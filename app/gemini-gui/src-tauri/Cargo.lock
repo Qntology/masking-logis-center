@@ -2626,6 +2626,7 @@ dependencies = [
 name = "gemini-gui"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "futures",
  "json-patch",
  "lancedb",

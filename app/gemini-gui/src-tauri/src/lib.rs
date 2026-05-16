@@ -10,6 +10,11 @@ use json_patch::diff;
 use futures::TryStreamExt;
 use lancedb::query::{QueryBase, ExecutableQuery};
 
+// Import Arrow traits/types directly from the arrow crate
+use arrow::array::RecordBatch;
+use arrow::datatypes::{Schema, Field, DataType};
+use arrow::json::ReaderBuilder;
+
 struct AppState {
     lock: Arc<Mutex<()>>,
 }
@@ -64,17 +69,17 @@ async fn update_lancedb_state(data: &Value) -> Result<(), String> {
     let state = data["state"].clone();
     
     // Convert JSON to RecordBatch properly
-    let schema = std::sync::Arc::new(lancedb::arrow::datatypes::Schema::new(vec![
-        lancedb::arrow::datatypes::Field::new("id", lancedb::arrow::datatypes::DataType::Int64, false),
-        lancedb::arrow::datatypes::Field::new("content", lancedb::arrow::datatypes::DataType::Utf8, false),
+    let schema = std::sync::Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("content", DataType::Utf8, false),
     ]));
     
     let json_data = json!([{"id": id, "content": state.to_string()}]);
-    let mut reader = lancedb::arrow::json::ReaderBuilder::new(schema)
+    let mut reader = ReaderBuilder::new(schema)
         .build(std::io::Cursor::new(json_data.to_string()))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e: arrow::error::ArrowError| e.to_string())?;
         
-    let record_batch = reader.next().ok_or("No data")?.map_err(|e| e.to_string())?;
+    let record_batch = reader.next().ok_or("No data")?.map_err(|e: arrow::error::ArrowError| e.to_string())?;
 
     table.add(vec![record_batch])
         .execute()
@@ -104,7 +109,7 @@ async fn fts_search(query: String) -> Result<String, String> {
         .await
         .map_err(|e: lancedb::Error| e.to_string())?;
     
-    let batches: Vec<lancedb::arrow::array::RecordBatch> = results.try_collect().await.map_err(|e| e.to_string())?;
+    let batches: Vec<RecordBatch> = results.try_collect().await.map_err(|e| e.to_string())?;
     Ok(format!("{:?}", batches))
 }
 
