@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "BeforeModel": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "omg-model-router",
+            "command": "node \"${extensionPath}/hooks/scripts/hook-bootstrap.js\" \"${extensionPath}/hooks/scripts/before-model-banner.js\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "omg-learn-signal-after-agent",
+            "command": "node \"${extensionPath}/hooks/scripts/hook-bootstrap.js\" \"${extensionPath}/hooks/scripts/learn.js\"",
+            "timeout": 8000
+          }
+        ]
+      }
+    ]
+  }
+}
