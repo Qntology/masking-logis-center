@@ -177,6 +177,7 @@ const OVERLAY_SCRIPT: &str = r#"
 "#;
 
 async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
+    // screen_width/height를 추가하여 윈도우 내부의 가용 영역을 꽉 채우도록 설정합니다.
     page.execute(EnableParams::default()).await?;
     page.execute(AddBindingParams::new("gemini_rpc")).await?;
     page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await?;
@@ -232,28 +233,49 @@ async fn execute_cli(command: String) -> Result<String, String> {
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let port = 9222; 
-    let _port_arg = format!("--remote-debugging-port={}", port);
+    let port = 9222;
+    let port_arg = format!("--remote-debugging-port={}", port);
+    
+    // 사용자가 요청한 클로저 기반 설정 로직 반영
+    let mut args = vec![
+        "--window-size=1920,1080", // 창 크기 강제 지정
+        "--window-position=0,0",
+        "--start-maximized", 
+        "--disable-gpu", 
+        "--disable-software-rasterizer",
+        "--disable-gpu-compositing",
+        "--no-first-run",
+        "--disable-notifications",
+        "--disable-extensions",
+        "--disable-popup-blocking",
+        "--blink-settings=imagesEnabled=false",
+        "--disable-blink-features=AutomationControlled",
+        "--password-store=basic",
+        "--no-default-browser-check",
+        "--force-dark-mode",
+        "--enable-features=WebUIDarkMode",
+        "--remote-allow-origins=*",
+        "--disable-dev-shm-usage",
+    ];
+    
+    // 원격 디버깅 포트 추가
+    let port_arg_str = port_arg.as_str();
+    args.push(port_arg_str);
+
+    // 인증 여부에 따른 초기 URL 설정 및 args 추가
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    let auth_path = std::path::PathBuf::from(home).join(".gemini/oauth_creds.json");
+    let is_authenticated = auth_path.exists();
+    let target_url = if is_authenticated { "https://www.google.com" } else { "https://aistudio.google.com/" };
+    args.push(target_url);
+
     let config = BrowserConfig::builder()
         .with_head()
-        .arg("--start-maximized")
-        .arg("--window-size=1920,1080")
-        .arg("--disable-device-emulation")
-        .arg("--disable-gpu")
-        .arg("--disable-software-rasterizer")
-        .arg("--disable-gpu-compositing")
-        .arg("--no-first-run")
-        .arg("--disable-notifications")
-        .arg("--disable-popup-blocking")
-        .arg("--blink-settings=imagesEnabled=false")
-        .arg("--disable-blink-features=AutomationControlled")
-        .arg("--password-store=basic")
-        .arg("--no-default-browser-check")
-        .arg("--force-dark-mode")
-        .arg("--enable-features=WebUIDarkMode")
-        .arg("--remote-debugging-port=9222")
-        .arg("--remote-allow-origins=*")
-        .build()?;
+        .no_sandbox()
+        .viewport(None) // 뷰포트 제한 해제
+        .args(args)
+        .build()
+        .map_err(|e| format!("Config error: {}", e))?;
     let (browser, mut handler) = Browser::launch(config).await?;
     let browser = Arc::new(browser);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
