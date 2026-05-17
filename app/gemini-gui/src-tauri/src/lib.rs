@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use json_patch::diff;
 use futures::TryStreamExt;
 use lancedb::query::{QueryBase, ExecutableQuery};
+use sha2::{Sha256, Digest};
+use tauri::{WebviewWindowBuilder, WebviewUrl};
 
 // Import Arrow traits/types directly from the arrow crate
 use arrow::array::RecordBatch;
@@ -17,6 +19,35 @@ use arrow::json::ReaderBuilder;
 
 struct AppState {
     lock: Arc<Mutex<()>>,
+}
+
+// Helper: URL Hash
+fn hash_url(url: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    let result = hasher.finalize();
+    
+    // Convert [u8; 32] to hex string manually
+    result.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// IPC: Open new tab
+#[tauri::command]
+async fn open_new_tab(url: String, app: tauri::AppHandle) -> Result<String, String> {
+    let hash = hash_url(&url);
+    let label = format!("tab-{}", hash);
+    
+    WebviewWindowBuilder::new(
+        &app,
+        label.clone(),
+        WebviewUrl::External(url.parse::<tauri::Url>().map_err(|e| e.to_string())?),
+    )
+    .title("Gemini Browser Tab")
+    .inner_size(800.0, 600.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    
+    Ok(hash) // Return hash to frontend for Dexie reference
 }
 
 // Harness Middleware: Process output, update state, and return result
@@ -121,6 +152,32 @@ fn get_creds_path() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[tauri::command]
+async fn store_text_log(channel_id: String, content: String) -> Result<(), String> {
+    let db = lancedb::connect("data/commerce-db").execute().await.map_err(|e| e.to_string())?;
+    let table = db.open_table("logs").execute().await.map_err(|e| e.to_string())?;
+    
+    // Convert text to RecordBatch
+    let schema = std::sync::Arc::new(Schema::new(vec![
+        Field::new("channel_id", DataType::Utf8, false),
+        Field::new("content", DataType::Utf8, false),
+    ]));
+    
+    let json_data = json!([{"channel_id": channel_id, "content": content}]);
+    let mut reader = ReaderBuilder::new(schema)
+        .build(std::io::Cursor::new(json_data.to_string()))
+        .map_err(|e: arrow::error::ArrowError| e.to_string())?;
+        
+    let record_batch = reader.next().ok_or("No data")?.map_err(|e: arrow::error::ArrowError| e.to_string())?;
+
+    table.add(vec![record_batch])
+        .execute()
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -131,7 +188,9 @@ pub fn run() {
             save_oauth_creds, 
             execute_branching_cli, 
             fts_search, 
-            calculate_state_diff
+            calculate_state_diff,
+            open_new_tab,
+            store_text_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

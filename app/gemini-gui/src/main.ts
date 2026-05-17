@@ -1,7 +1,29 @@
 import { invoke } from "@tauri-apps/api/core";
+import { db } from "./db";
 
-async function login() {
-  alert("OAuth login temporarily disabled.");
+async function saveMessage(channelId: string, role: 'user' | 'assistant', content: string) {
+  // 1. Save to local cache (Dexie)
+  const id = await db.conversation_log.add({
+    channel_id: channelId,
+    role,
+    content,
+    timestamp: Date.now(),
+    status: 'pending'
+  });
+
+  // 2. Sync to Backend (LanceDB) via Harness IPC
+  try {
+    const result = await invoke<string>("execute_branching_cli", { 
+      command: JSON.stringify({ id, role, content, channel_id: channelId }) 
+    });
+    console.log("Sync success:", result);
+    
+    // 3. Mark as committed
+    await db.conversation_log.update(id, { status: 'committed' });
+  } catch (error) {
+    console.error("Sync failed:", error);
+    // Handle error (e.g., mark as error in UI)
+  }
 }
 
 async function runCommand() {
@@ -10,40 +32,17 @@ async function runCommand() {
 
   if (!inputEl || !outputEl) return;
 
+  const content = inputEl.value;
+  await saveMessage('trunk', 'user', content);
+
   try {
-    const output = await invoke<string>("execute_branching_cli", { command: inputEl.value });
+    const output = await invoke<string>("execute_branching_cli", { command: content });
     outputEl.textContent = output;
   } catch (error) {
     outputEl.textContent = "Error: " + error;
   }
 }
 
-async function renderDiff(oldState: any, newState: any) {
-  const diffOutputEl = document.querySelector("#diff-output") as HTMLElement;
-  if (!diffOutputEl) return;
-
-  try {
-    const patchStr = await invoke<string>("calculate_state_diff", { 
-        oldState: JSON.stringify(oldState), 
-        newState: JSON.stringify(newState) 
-    });
-    const patch = JSON.parse(patchStr);
-
-    let html = "<h3>State Changes:</h3><pre>";
-    patch.forEach((op: any) => {
-        if (op.op === 'add') html += `<span style="color:green">+ ${op.path}: ${JSON.stringify(op.value)}</span>\n`;
-        else if (op.op === 'remove') html += `<span style="color:red">- ${op.path}</span>\n`;
-        else if (op.op === 'replace') html += `<span style="color:orange">~ ${op.path}: ${JSON.stringify(op.value)}</span>\n`;
-    });
-    html += "</pre>";
-    diffOutputEl.innerHTML = html;
-  } catch (error) {
-    diffOutputEl.textContent = "Diff Error: " + error;
-  }
-}
-
 window.addEventListener("DOMContentLoaded", () => {
-  document.querySelector("#login-btn")?.addEventListener("click", login);
   document.querySelector("#run-btn")?.addEventListener("click", runCommand);
-  renderDiff({a: 1}, {a: 2, b: 3});
 });
