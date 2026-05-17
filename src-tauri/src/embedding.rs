@@ -59,7 +59,7 @@ impl RmsNorm {
 
     fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         let x_dtype = x.dtype();
-        let internal_dtype = DType::F32;
+        let internal_dtype = if x_dtype == DType::BF16 { DType::BF16 } else { DType::F32 };
         let x = x.to_dtype(internal_dtype)?;
         let variance = x.powf(2.0)?.mean_keepdim(candle_core::D::Minus1)?;
         let x_normed = x.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
@@ -438,6 +438,8 @@ impl EmbeddingModel {
         let config: Config = serde_json::from_str(&config_str)?;
         let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(anyhow::Error::msg)?;
 
+        let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
+
         let model_enum = if gguf_path.exists() {
             println!("[EmbeddingModel] Loading GGUF model from {:?}", gguf_path);
             let mut file = std::fs::File::open(&gguf_path)?;
@@ -446,7 +448,7 @@ impl EmbeddingModel {
             ModelEnum::Quantized(model)
         } else if weights_path.exists() {
              println!("[EmbeddingModel] Loading Safetensors model from {:?}", weights_path);
-             let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, device).map_err(anyhow::Error::msg)? };
+             let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, device).map_err(anyhow::Error::msg)? };
              let model = FloatModel::new(&config, vb, device).map_err(anyhow::Error::msg)?;
              ModelEnum::Float(model)
         } else {
