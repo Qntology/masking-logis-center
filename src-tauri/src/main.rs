@@ -1,3 +1,4 @@
+mod db;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams};
 use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, SetDiscoverTargetsParams};
@@ -9,20 +10,45 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use include_dir::{include_dir, Dir};
 
-static CLI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../../cli/omg");
+// static CLI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../cli/omg");
 
 fn extract_cli() -> PathBuf {
-    let temp_dir = std::env::temp_dir().join("gemini-cli-bundle");
-    if !temp_dir.exists() {
-        CLI_DIR.extract(&temp_dir).expect("Failed to extract CLI");
-    }
-    temp_dir
+    PathBuf::new() // 임시 경로 반환
+    // let temp_dir = std::env::temp_dir().join("gemini-cli-bundle");
+    // if !temp_dir.exists() {
+    //     CLI_DIR.extract(&temp_dir).expect("Failed to extract CLI");
+    // }
+    // temp_dir
 }
 
 const OVERLAY_SCRIPT: &str = r#"
 (function() {
     if (window.geminiSidebarLoaded) return;
     window.geminiSidebarLoaded = true;
+
+    function cleanAndConvertToYaml(node, depth = 0) {
+        let yaml = '';
+        const indent = '  '.repeat(depth);
+        if (node.nodeType === Node.TEXT_NODE) {
+            const text = node.textContent.trim();
+            if (text) return text + '\n';
+            return '';
+        }
+        if (node.nodeType === Node.ELEMENT_NODE) {
+            if (['script', 'style', 'link', 'meta', 'noscript', 'svg', 'iframe'].includes(node.tagName.toLowerCase())) return '';
+            const tagName = node.tagName.toLowerCase();
+            yaml += `${indent}${tagName}:\n`;
+            node.childNodes.forEach(child => { yaml += cleanAndConvertToYaml(child, depth + 1); });
+        }
+        return yaml;
+    }
+
+    async function generatePageId(url) {
+        const msgUint8 = new TextEncoder().encode(url);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    }
 
     function initUI() {
         const existing = document.getElementById('gemini-agent-host');
@@ -58,41 +84,42 @@ const OVERLAY_SCRIPT: &str = r#"
                 .content { flex: 1; padding: 15px; overflow-y: auto; background: #fff; color: #000; box-sizing: border-box; }
                 .footer { padding: 15px; background: #f8f9fa; border-top: 1px solid #eee; flex-shrink: 0; }
                 input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+                .staged-item { display: flex; align-items: center; margin-bottom: 10px; }
             </style>
             <button id="toggle-btn">AI</button>
             <div id="agent-container">
-                <header>Gemini Agent (Native Mode)</header>
-                <div class="content" id="log"><div>연결됨.</div></div>
+                <header>Staging Area (Dexie)</header>
+                <div class="content" id="staged-list"></div>
                 <div class="footer">
+                    <button id="extract-btn">추출</button>
+                    <button id="push-btn">Push Selected</button>
                     <input type="text" id="cli-input" placeholder="메시지 입력...">
                 </div>
             </div>
         `;
 
-        const container = shadow.querySelector('#agent-container');
+        const stagedList = shadow.querySelector('#staged-list');
+        const pushBtn = shadow.querySelector('#push-btn');
+        const extractBtn = shadow.querySelector('#extract-btn');
         const toggleBtn = shadow.querySelector('#toggle-btn');
-        const input = shadow.querySelector('#cli-input');
-        const log = shadow.querySelector('#log');
-
-        toggleBtn.onclick = () => { 
-            console.log("[Gemini-JS] Requesting DevTools...");
-            if (window.gemini_rpc) window.gemini_rpc("open_devtools");
+        let stagedItems = [];
+        toggleBtn.onclick = () => { shadow.querySelector('#agent-container').classList.toggle('open'); };
+        extractBtn.onclick = async () => {
+            const pageId = await generatePageId(window.location.href);
+            const yaml = cleanAndConvertToYaml(document.body);
+            const item = { id: pageId, host: window.location.hostname, url: window.location.href, context: yaml, status: 'DRAFT' };
+            stagedItems.push(item);
+            const div = document.createElement('div');
+            div.className = 'staged-item';
+            div.innerHTML = `<input type="checkbox" data-id="${pageId}"> ${pageId.substring(0,8)}...`;
+            stagedList.appendChild(div);
         };
-        
-        input.onkeypress = async (e) => {
-            if (e.key === 'Enter' && input.value) {
-                const cmd = input.value;
-                input.value = '';
-                log.innerHTML += `<div><strong>You:</strong> ${cmd}</div>`;
-                if (window.gemini_rpc) window.gemini_rpc(cmd);
-            }
+        pushBtn.onclick = () => {
+            const selected = Array.from(shadow.querySelectorAll('input:checked')).map(cb => cb.dataset.id);
+            const payload = stagedItems.filter(i => selected.includes(i.id));
+            if (window.gemini_rpc) window.gemini_rpc("push_data:" + JSON.stringify(payload));
         };
-
-        window.addEventListener('gemini_rpc_response', (e) => {
-            log.innerHTML += `<div style="color:blue"><strong>AI:</strong> ${e.detail}</div>`;
-        });
     }
-
     if (document.readyState === 'complete') initUI();
     else window.addEventListener('load', initUI);
 })();
@@ -103,26 +130,36 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
     page.execute(AddBindingParams::new("gemini_rpc")).await?;
     page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await?;
     let _ = page.evaluate(OVERLAY_SCRIPT).await;
-
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
     let browser_clone = browser.clone();
     tokio::task::spawn(async move {
         while let Some(event) = bindings.next().await {
             if event.name == "gemini_rpc" {
-                if event.payload == "\"open_devtools\"" {
+                let payload = event.payload.trim_matches('"');
+                let response = if payload.starts_with("sync_data:") {
+                    format!("Data staged.")
+                } else if payload.starts_with("push_data:") {
+                    let data = &payload["push_data:".len()..];
+                    match serde_json::from_str::<Vec<db::CommerceRecord>>(data) {
+                        Ok(records) => {
+                            match db::save_records(records).await {
+                                Ok(_) => "Data pushed successfully.".to_string(),
+                                Err(e) => format!("DB Error: {}", e),
+                            }
+                        },
+                        Err(e) => format!("JSON Error: {}", e),
+                    }
+                } else if payload == "open_devtools" {
                     let tid = page_clone.target_id().clone();
-                    // DevTools를 띄우기 위한 URL
                     let url = format!("devtools://devtools/bundled/inspector.html?ws=localhost:9222/devtools/page/{:?}", tid);
-                    
-                    // 브라우저에 타겟 생성 명령을 보내 개발자 도구를 엽니다
                     let _ = browser_clone.execute(chromiumoxide::cdp::browser_protocol::target::CreateTargetParams::new(url)).await;
-                    continue;
-                }
-                
-                let response = match execute_cli(event.payload.clone()).await {
-                    Ok(res) => res,
-                    Err(e) => format!("Error: {}", e),
+                    "DevTools opened".to_string()
+                } else {
+                    match execute_cli(payload.to_string()).await {
+                        Ok(res) => res,
+                        Err(e) => format!("Error: {}", e),
+                    }
                 };
                 let script = format!(
                     "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
@@ -134,72 +171,35 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
     });
     Ok(())
 }
-
 async fn execute_cli(command: String) -> Result<String, String> {
     let cli_path = extract_cli();
     let index_js = cli_path.join("index.js");
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map_err(|e| e.to_string())?;
     let path = PathBuf::from(home).join(".gemini/oauth_creds.json");
-    
-    let output = Command::new("node")
-        .arg(index_js)
-        .arg(&command)
-        .env("GEMINI_AUTH_FILE", path.to_str().unwrap())
-        .output().await.map_err(|e| e.to_string())?;
-    
+    let output = Command::new("node").arg(index_js).arg(&command).env("GEMINI_AUTH_FILE", path.to_str().unwrap()).output().await.map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("[Rust] Initializing Gemini Browser...");
-
-    // Dynamic port handling for remote debugging
     let port = 9222; 
     let port_arg = format!("--remote-debugging-port={}", port);
-
-    let devtools_path = std::env::current_dir().unwrap().join("devtools").to_str().unwrap().to_string();
-    let extension_arg = format!("--load-extension={}", devtools_path);
-
     let config = BrowserConfig::builder()
         .with_head()
-        .arg("--disable-device-emulation")
-        .arg("--start-maximized")
-        .arg("--disable-gpu")
-        .arg("--disable-software-rasterizer")
-        .arg("--disable-gpu-compositing")
-        .arg("--no-first-run")
-        .arg("--disable-notifications")
-        .arg("--disable-extensions-except={}") // Allow only our extension if needed
-        .arg(extension_arg)
-        .arg("--disable-popup-blocking")
-        .arg("--blink-settings=imagesEnabled=false")
-        .arg("--disable-blink-features=AutomationControlled")
-        .arg("--password-store=basic")
-        .arg("--no-default-browser-check")
-        .arg("--force-dark-mode")
-        .arg("--enable-features=WebUIDarkMode")
-        .arg(port_arg)
+        .arg("--remote-debugging-port=9222")
         .arg("--remote-allow-origins=*")
         .build()?;
-
     let (browser, mut handler) = Browser::launch(config).await?;
     let browser = Arc::new(browser);
-
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-    
-    // 핸들러 루프 태스크
     tokio::task::spawn(async move {
         while let Some(h) = handler.next().await {
             if let Err(e) = h { eprintln!("[Rust] Handler Error: {:?}", e); break; }
         }
         let _ = tx.send(()).await;
     });
-
     browser.execute(SetDiscoverTargetsParams::new(true)).await?;
-
     let mut target_events = browser.event_listener::<EventTargetCreated>().await?;
     let b_target = browser.clone();
-    
     tokio::task::spawn(async move {
         while let Some(event) = target_events.next().await {
             if event.target_info.r#type == "page" {
@@ -214,14 +214,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-
     let initial_page = browser.new_page("https://www.google.com").await?;
     setup_page(browser.clone(), initial_page).await?;
-
     tokio::select! {
         _ = tokio::signal::ctrl_c() => println!("\n[Rust] Shutting down..."),
         _ = rx.recv() => println!("\n[Rust] Browser closed, shutting down..."),
     }
-    
     Ok(())
 }

@@ -1,0 +1,26 @@
+[package]
+name = "gemini-gui"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "gemini_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+chromiumoxide = { version = "0.9.1", features = ["default"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+lancedb = "0.29.0"
+json-patch = "3.0.1"
+similar = "3.1.0"
+uuid = { version = "1.23.1", features = ["v4"] }
+sha2 = "0.11.0"
+async-trait = "0.1"
+include_dir = "0.7"
+tantivy = "0.22"
+arrow = "58.3.0"
+arrow-array = "58.3.0"
+lance-tokenizer = "6.0.0"
