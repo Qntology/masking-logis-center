@@ -1,7 +1,7 @@
 pub mod config;
 pub mod viterbi;
 
-use candle_core::{DType, Device, Module, Tensor};
+use candle_core::{DType, Device, Module, Tensor, IndexOp, Shape};
 use candle_nn::{linear, VarBuilder, Embedding};
 use anyhow::Result;
 use std::path::Path;
@@ -9,6 +9,9 @@ use tokenizers::Tokenizer;
 use self::config::{ModelConfig, ViterbiConfig};
 use self::viterbi::PrivacySpan;
 use candle_transformers::models::deepseek2::TopKLastDimOp;
+
+const ALPHA: f32 = 1.702;
+const LIMIT: f32 = 7.0;
 
 pub struct PrivacyFilterModel {
     embed_tokens: Embedding,
@@ -87,11 +90,12 @@ impl RotaryEmbedding {
 
         let mut cos_data = vec![0f32; max_seq_len * half_dim];
         let mut sin_data = vec![0f32; max_seq_len * half_dim];
+        let scale = attention_scaling as f32;
         for pos in 0..max_seq_len {
             for i in 0..half_dim {
                 let angle = pos as f32 * inv_freq[i];
-                cos_data[pos * half_dim + i] = angle.cos() * attention_scaling as f32;
-                sin_data[pos * half_dim + i] = angle.sin() * attention_scaling as f32;
+                cos_data[pos * half_dim + i] = angle.cos() * scale;
+                sin_data[pos * half_dim + i] = angle.sin() * scale;
             }
         }
 
@@ -100,10 +104,10 @@ impl RotaryEmbedding {
         Ok(Self { cos, sin })
     }
 
-    fn forward(&self, x: &Tensor, seq_len: usize) -> candle_core::Result<Tensor> {
+    fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         let (b, h, s, d) = x.dims4()?;
-        let cos = self.cos.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?;
-        let sin = self.sin.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?;
+        let cos = self.cos.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?; // [1, 1, s, d/2]
+        let sin = self.sin.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?; // [1, 1, s, d/2]
 
         let x_pairs = x.reshape((b, h, s, d / 2, 2))?;
         let x0 = x_pairs.narrow(candle_core::D::Minus1, 0, 1)?.reshape((b, h, s, d / 2))?;
@@ -112,14 +116,14 @@ impl RotaryEmbedding {
         let r0 = (x0.broadcast_mul(&cos)? - x1.broadcast_mul(&sin)?)?;
         let r1 = (x1.broadcast_mul(&cos)? + x0.broadcast_mul(&sin)?)?;
 
-        let res = Tensor::cat(&[r0.unsqueeze(candle_core::D::Minus1)?, r1.unsqueeze(candle_core::D::Minus1)?], candle_core::D::Minus1)?
-            .reshape((b, h, s, d))?;
-        Ok(res)
+        let interleaved = Tensor::cat(&[r0.unsqueeze(candle_core::D::Minus1)?, r1.unsqueeze(candle_core::D::Minus1)?], candle_core::D::Minus1)?;
+        interleaved.reshape((b, h, s, d))
     }
 }
 
 struct SparseMoE {
-    router: candle_nn::Linear,
+    router_weight: Tensor,
+    router_bias: Tensor,
     gate_up_proj: Tensor,
     gate_up_proj_bias: Tensor,
     down_proj: Tensor,
@@ -131,14 +135,15 @@ struct SparseMoE {
 
 impl SparseMoE {
     fn new(cfg: &ModelConfig, vb: VarBuilder) -> Result<Self> {
-        let router = candle_nn::linear(cfg.hidden_size, cfg.num_local_experts, vb.pp("router"))?;
+        let router_weight = vb.get((cfg.num_local_experts, cfg.hidden_size), "router.weight")?.transpose(0, 1)?;
+        let router_bias = vb.get(cfg.num_local_experts, "router.bias")?;
         let gate_up_proj = vb.get((cfg.num_local_experts, cfg.hidden_size, 2 * cfg.intermediate_size), "experts.gate_up_proj")?;
         let gate_up_proj_bias = vb.get((cfg.num_local_experts, 2 * cfg.intermediate_size), "experts.gate_up_proj_bias")?;
         let down_proj = vb.get((cfg.num_local_experts, cfg.intermediate_size, cfg.hidden_size), "experts.down_proj")?;
         let down_proj_bias = vb.get((cfg.num_local_experts, cfg.hidden_size), "experts.down_proj_bias")?;
 
         Ok(Self {
-            router, gate_up_proj, gate_up_proj_bias, down_proj, down_proj_bias,
+            router_weight, router_bias, gate_up_proj, gate_up_proj_bias, down_proj, down_proj_bias,
             num_experts: cfg.num_local_experts,
             num_experts_per_tok: cfg.num_experts_per_tok,
             intermediate_size: cfg.intermediate_size,
@@ -148,7 +153,7 @@ impl SparseMoE {
     fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         let (b, s, h) = x.dims3()?;
         let x_flat = x.reshape((b * s, h))?;
-        let router_logits = self.router.forward(&x_flat)?;
+        let router_logits = (x_flat.matmul(&self.router_weight)?.broadcast_add(&self.router_bias))?;
         
         let top_k = router_logits.topk(self.num_experts_per_tok)?;
         let routing_weights = candle_nn::ops::softmax(&top_k.values, candle_core::D::Minus1)?;
@@ -181,9 +186,9 @@ impl SparseMoE {
             let gu_b = self.gate_up_proj_bias.get(eidx)?;
             let gate_up = (expert_input.matmul(&gu_w)?.broadcast_add(&gu_b))?;
             
-            let gate = gate_up.narrow(candle_core::D::Minus1, 0, self.intermediate_size)?.minimum(7.0)?;
-            let up = gate_up.narrow(candle_core::D::Minus1, self.intermediate_size, self.intermediate_size)?.clamp(-7.0, 7.0)?;
-            let glu = (gate.clone() * candle_nn::ops::sigmoid(&(gate * 1.702)?)?)?;
+            let gate = gate_up.narrow(candle_core::D::Minus1, 0, self.intermediate_size)?.minimum(LIMIT as f64)?;
+            let up = gate_up.narrow(candle_core::D::Minus1, self.intermediate_size, self.intermediate_size)?.clamp(-(LIMIT as f64), LIMIT as f64)?;
+            let glu = (gate.clone() * candle_nn::ops::sigmoid(&(gate * ALPHA as f64)?)?)?;
             let expert_out_mid = (up.affine(1.0, 1.0)?.mul(&glu))?;
             
             let dp_w = self.down_proj.get(eidx)?;
@@ -257,8 +262,8 @@ impl TransformerLayer {
         let mut k = self.k_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
         let mut v = self.v_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
         
-        let q = rope.forward(&q, s)?;
-        k = rope.forward(&k, s)?;
+        let q = rope.forward(&q)?;
+        k = rope.forward(&k)?;
 
         if let Some(cache) = cache {
             let pos = cache.current_pos;
@@ -278,6 +283,11 @@ impl TransformerLayer {
         let attn_weights = (q.matmul(&k.transpose(2, 3)?)?.broadcast_add(mask))?;
         let sinks = self.sinks.reshape((1, self.num_heads, 1, 1))?.expand((b, self.num_heads, s, 1))?;
         let combined = Tensor::cat(&[attn_weights, sinks], 3)?;
+        
+        // Max-subtract for stability
+        let max_vals = combined.max_keepdim(3)?;
+        let combined = combined.broadcast_sub(&max_vals)?;
+        
         let probs = candle_nn::ops::softmax(&combined, 3)?;
         let scores = probs.narrow(3, 0, s)?.contiguous()?;
         
