@@ -21,23 +21,6 @@ const OVERLAY_SCRIPT: &str = r#"
     if (window.geminiSidebarLoaded) return;
     window.geminiSidebarLoaded = true;
 
-    function cleanAndConvertToYaml(node, depth = 0) {
-        let yaml = '';
-        const indent = '  '.repeat(depth);
-        if (node.nodeType === Node.TEXT_NODE) {
-            const text = node.textContent.trim();
-            if (text) return text + '\n';
-            return '';
-        }
-        if (node.nodeType === Node.ELEMENT_NODE) {
-            if (['script', 'style', 'link', 'meta', 'noscript', 'svg', 'iframe'].includes(node.tagName.toLowerCase())) return '';
-            const tagName = node.tagName.toLowerCase();
-            yaml += `${indent}${tagName}:\n`;
-            node.childNodes.forEach(child => { yaml += cleanAndConvertToYaml(child, depth + 1); });
-        }
-        return yaml;
-    }
-
     async function generatePageId(url) {
         const msgUint8 = new TextEncoder().encode(url);
         const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
@@ -45,7 +28,7 @@ const OVERLAY_SCRIPT: &str = r#"
         return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
-    // 데이터 중심 정제 및 변환 함수
+    // 데이터 중심 정제 및 변환 함수 (중복 제거 및 통합)
     function cleanAndConvertToYaml(node, depth = 0) {
         if (node.nodeType === Node.TEXT_NODE) {
             const text = node.textContent.trim();
@@ -73,87 +56,183 @@ const OVERLAY_SCRIPT: &str = r#"
     }
 
     function initUI() {
-        const existing = document.getElementById('gemini-agent-host');
-        if (existing) existing.remove();
+        if (document.getElementById('gemini-agent-host')) return;
+
+        // body가 아직 생성되지 않았다면 대기 후 다시 호출
+        if (!document.body) {
+            window.requestAnimationFrame(initUI);
+            return;
+        }
 
         const host = document.createElement('div');
         host.id = 'gemini-agent-host';
-        host.style.cssText = 'position:fixed; top:0; right:0; bottom:0; width:0; z-index:2147483647; pointer-events:none;';
-        document.body.appendChild(host);
+        host.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; z-index:2147483647; pointer-events:none; overflow:hidden;';
+        
+        // body에 안전하게 추가
+        try {
+            document.body.appendChild(host);
+        } catch (e) {
+            // 사이트 정책에 의해 appendChild가 거부될 경우를 대비해 최상위 요소로 시도
+            document.documentElement.appendChild(host);
+        }
 
         const shadow = host.attachShadow({ mode: 'open' });
-        shadow.innerHTML = `
-            <style>
-                #agent-container { 
-                    position: fixed; top: 0; right: 0; bottom: 0; 
-                    width: 350px; z-index: 2147483647;
-                    background: white; border-left: 1px solid #ccc;
-                    display: flex; flex-direction: column;
-                    transition: transform 0.3s ease; transform: translateX(100%);
-                    box-shadow: -5px 0 15px rgba(0,0,0,0.1);
-                    visibility: visible !important; pointer-events: auto;
-                }
-                #agent-container.open { transform: translateX(0); }
-                #toggle-btn { 
-                    position: fixed; bottom: 30px; right: 30px; 
-                    width: 60px; height: 60px; background: #007bff; color: white;
-                    border-radius: 50%; cursor: pointer; z-index: 2147483647;
-                    display: flex; align-items: center; justify-content: center;
-                    border: 4px solid white; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-                    pointer-events: auto;
-                }
-                header { padding: 15px; background: #f0f0f0; font-weight: bold; color: #000; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
-                .content { flex: 1; padding: 15px; overflow-y: auto; background: #fff; color: #000; box-sizing: border-box; }
-                .footer { padding: 15px; background: #f8f9fa; border-top: 1px solid #eee; flex-shrink: 0; }
-                input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-                .staged-item { display: flex; align-items: center; margin-bottom: 10px; }
-            </style>
-            <button id="toggle-btn">AI</button>
-            <div id="agent-container">
-                <header>Staging Area (Dexie) <button id="close-btn">X</button></header>
-                <div class="content" id="staged-list">
-                    <div id="log"></div>
-                </div>
-                <div class="footer">
-                    <button id="extract-btn">추출</button>
-                    <button id="push-btn">Push Selected</button>
-                    <input type="text" id="cli-input" placeholder="메시지 입력...">
-                </div>
-            </div>
+
+        const style = document.createElement('style');
+        style.textContent = `
+            :host { all: initial; }
+            #agent-container { 
+                position: fixed; top: 0; right: 0; bottom: 0; 
+                width: 350px; z-index: 2147483648;
+                background: white !important; border-left: 1px solid #ccc;
+                display: flex !important; flex-direction: column;
+                transition: transform 0.3s ease-in-out; transform: translateX(100%);
+                box-shadow: -5px 0 15px rgba(0,0,0,0.2);
+                pointer-events: auto;
+            }
+            #agent-container.open { transform: translateX(0); }
+            #toggle-btn { 
+                all: unset;
+                position: fixed; bottom: 30px; right: 30px; 
+                width: 60px !important; height: 60px !important; 
+                background: #007bff !important; color: white !important;
+                border-radius: 50% !important; cursor: pointer !important; 
+                z-index: 2147483649;
+                display: flex !important; align-items: center !important; 
+                justify-content: center !important;
+                border: 4px solid white !important; 
+                font-weight: bold !important; 
+                font-family: sans-serif !important;
+                font-size: 16px !important;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
+                pointer-events: auto;
+                transition: all 0.2s ease;
+            }
+            #toggle-btn:hover { background: #0056b3 !important; transform: scale(1.05); }
+            header { padding: 15px; background: #f0f0f0 !important; font-weight: bold !important; color: #000 !important; border-bottom: 1px solid #ddd; display: flex !important; justify-content: space-between; align-items: center; }
+            .content { flex: 1; padding: 15px; overflow-y: auto; background: #ffffff !important; color: #000000 !important; box-sizing: border-box !important; }
+            .footer { padding: 15px; background: #f8f9fa !important; border-top: 1px solid #eee; flex-shrink: 0; }
+            input { width: 100%; padding: 10px; border: 1px solid #ddd !important; border-radius: 4px; box-sizing: border-box !important; background: white !important; color: black !important; }
+            button { cursor: pointer; padding: 5px 10px; }
+            .staged-item { display: flex !important; align-items: center !important; margin-bottom: 10px; color: black !important; }
         `;
 
-        const stagedList = shadow.querySelector('#staged-list');
-        const pushBtn = shadow.querySelector('#push-btn');
-        const extractBtn = shadow.querySelector('#extract-btn');
-        const toggleBtn = shadow.querySelector('#toggle-btn');
-        const closeBtn = shadow.querySelector('#close-btn');
-        const log = shadow.querySelector('#log');
+        const toggleBtn = document.createElement('div');
+        toggleBtn.id = 'toggle-btn';
+        toggleBtn.textContent = 'AI';
+
+        const agentContainer = document.createElement('div');
+        agentContainer.id = 'agent-container';
+
+        const header = document.createElement('header');
+        header.textContent = 'Staging Area (LanceDB) ';
+        const closeBtn = document.createElement('button');
+        closeBtn.id = 'close-btn';
+        closeBtn.textContent = 'X';
+        header.appendChild(closeBtn);
+
+        const stagedList = document.createElement('div');
+        stagedList.className = 'content';
+        stagedList.id = 'staged-list';
+        const log = document.createElement('div');
+        log.id = 'log';
+        stagedList.appendChild(log);
+
+        const footer = document.createElement('div');
+        footer.className = 'footer';
+        const extractBtn = document.createElement('button');
+        extractBtn.id = 'extract-btn';
+        extractBtn.textContent = '추출';
+        const pushBtn = document.createElement('button');
+        pushBtn.id = 'push-btn';
+        pushBtn.textContent = 'Push Selected';
+        const cliInput = document.createElement('input');
+        cliInput.type = 'text';
+        cliInput.id = 'cli-input';
+        cliInput.placeholder = '메시지 입력...';
+        
+        footer.appendChild(extractBtn);
+        footer.appendChild(pushBtn);
+        footer.appendChild(cliInput);
+
+        agentContainer.appendChild(header);
+        agentContainer.appendChild(stagedList);
+        agentContainer.appendChild(footer);
+
+        shadow.appendChild(style);
+        shadow.appendChild(toggleBtn);
+        shadow.appendChild(agentContainer);
 
         let stagedItems = [];
+
+        // UI 리스트를 갱신하는 독립 렌더링 함수
+        function renderStagedList() {
+            // 기존 아이템 삭제 (로그 영역은 보존)
+            const items = stagedList.querySelectorAll('.staged-item');
+            items.forEach(item => item.remove());
+
+            stagedItems.forEach(item => {
+                const itemDiv = document.createElement('div');
+                itemDiv.className = 'staged-item';
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.dataset.id = item.id;
+                itemDiv.appendChild(checkbox);
+                itemDiv.appendChild(document.createTextNode(' ' + item.id.substring(0,8) + '... (v' + item.version + ')'));
+                stagedList.appendChild(itemDiv);
+            });
+        }
+
+        // 초기 로드 시 백엔드에 기존 DRAFT 목록 요청
+        if (window.gemini_rpc) window.gemini_rpc("fetch_drafts");
 
         // 자동 추출 함수
         async function autoExtract() {
             const pageId = await generatePageId(window.location.href);
             const yaml = cleanAndConvertToYaml(document.body);
             
-            // 1. UI 로그에 YAML 표시
-            log.innerHTML += `<div style="white-space: pre-wrap; font-size: 11px; margin-top: 5px;"><strong>[Auto-Extracted]:</strong>\n${yaml.substring(0, 100)}...</div>`;
+            // 1. UI 로그에 YAML 표시 (Trusted Types 우회)
+            const autoLogDiv = document.createElement('div');
+            autoLogDiv.style.cssText = 'white-space: pre-wrap; font-size: 11px; margin-top: 5px;';
+            const strongText = document.createElement('strong');
+            strongText.textContent = '[Auto-Extracted]:\n';
+            autoLogDiv.appendChild(strongText);
+            autoLogDiv.appendChild(document.createTextNode(yaml.substring(0, 100) + '...'));
+            log.appendChild(autoLogDiv);
             
-            // 2. Dexie Staging 영역에 추가
-            const item = { id: pageId, host: window.location.hostname, url: window.location.href, context: yaml, status: 'DRAFT' };
-            stagedItems.push(item);
+            const item = { 
+                id: pageId, 
+                host: window.location.hostname, 
+                url: window.location.href, 
+                title: document.title, 
+                domain: 'COMMERCE', 
+                context: yaml, 
+                status: 'DRAFT', 
+                track: 'MAIN', 
+                version: 1, 
+                created_at: Date.now(), 
+                updated_at: Date.now() 
+            };
             
-            const div = document.createElement('div');
-            div.className = 'staged-item';
-            div.innerHTML = `<input type="checkbox" data-id="${pageId}"> ${pageId.substring(0,8)}...`;
-            stagedList.appendChild(div);
+            // 2. 동일한 ID의 DRAFT가 있으면 덮어쓰기(버전업), 없으면 신규 추가
+            const existingIndex = stagedItems.findIndex(i => i.id === pageId && i.status === 'DRAFT');
+            if (existingIndex !== -1) {
+                stagedItems[existingIndex].context = yaml;
+                stagedItems[existingIndex].updated_at = item.updated_at;
+                stagedItems[existingIndex].version += 1;
+                Object.assign(item, stagedItems[existingIndex]); 
+            } else {
+                stagedItems.push(item);
+            }
             
-            // 3. Rust 백엔드로 전송
+            renderStagedList();
+            
+            // 3. Rust 백엔드(LanceDB)로 DRAFT 상태 동기화 (Upsert) 요청
             if (window.gemini_rpc) window.gemini_rpc("sync_data:" + JSON.stringify(item));
         }
 
-        toggleBtn.onclick = () => { shadow.querySelector('#agent-container').classList.toggle('open'); };
-        closeBtn.onclick = () => { shadow.querySelector('#agent-container').classList.remove('open'); };
+        toggleBtn.onclick = () => { agentContainer.classList.toggle('open'); };
+        closeBtn.onclick = () => { agentContainer.classList.remove('open'); };
         
         extractBtn.onclick = autoExtract;
 
@@ -171,35 +250,71 @@ const OVERLAY_SCRIPT: &str = r#"
         }
 
         window.addEventListener('gemini_rpc_response', (e) => {
+            try {
+                // JSON 형태의 응답(fetch_drafts) 처리
+                const data = JSON.parse(e.detail);
+                if (data.type === 'drafts_loaded') {
+                    data.payload.forEach(draft => {
+                        // 중복 방지: 현재 리스트에 없는 항목만 추가
+                        if (!stagedItems.find(i => i.id === draft.id)) {
+                            stagedItems.push(draft);
+                        }
+                    });
+                    renderStagedList();
+                    return; // 데이터 응답이므로 채팅 로그에 출력하지 않고 종료
+                }
+            } catch(err) {
+                // JSON 파싱 실패 시 일반 텍스트 응답으로 간주하여 아래 로그 출력 진행
+            }
+
             if (log) {
-                log.innerHTML += `<div style="color:blue"><strong>AI:</strong> ${e.detail}</div>`;
+                const rpcLogDiv = document.createElement('div');
+                rpcLogDiv.style.color = 'blue';
+                const rpcStrong = document.createElement('strong');
+                rpcStrong.textContent = 'AI: ';
+                rpcLogDiv.appendChild(rpcStrong);
+                rpcLogDiv.appendChild(document.createTextNode(e.detail));
+                log.appendChild(rpcLogDiv);
             }
         });
     }
 
-    // 초기화 호출부 강화 (iframe 체크 추가)
+    // 초기화 호출부 강화 (MutationObserver를 통한 강제 렌더링 보장)
     if (window.self === window.top) {
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initUI);
+        const runOnce = () => {
+            if (!document.getElementById('gemini-agent-host')) initUI();
+        };
+
+        // 로드 시점별 실행
+        if (document.readyState === 'complete') {
+            runOnce();
         } else {
-            initUI();
+            window.addEventListener('load', runOnce);
+            document.addEventListener('DOMContentLoaded', runOnce);
         }
 
-        window.addEventListener('pageshow', (event) => {
-            if (event.persisted) {
-                initUI();
+        // 네이버처럼 DOM이 계속 변하는 사이트를 위해 body 출현 감시
+        const observer = new MutationObserver(() => {
+            if (document.body && !document.getElementById('gemini-agent-host')) {
+                runOnce();
+                // 생성 성공 시 감시 종료하여 부하 감소
+                if (document.getElementById('gemini-agent-host')) observer.disconnect();
             }
         });
+        
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+
+        window.addEventListener('pageshow', runOnce);
     }
 
 })();
 "#;
 
 async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
-    // screen_width/height를 추가하여 윈도우 내부의 가용 영역을 꽉 채우도록 설정합니다.
-    page.execute(EnableParams::default()).await?;
-    page.execute(AddBindingParams::new("gemini_rpc")).await?;
-    page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await?;
+    // RPC 바인딩 등록
+    let _ = page.execute(AddBindingParams::new("gemini_rpc")).await;
+    
+    // 이미 로드된 현재 페이지 상태에서 UI가 즉시 나타나도록 강제 실행
     let _ = page.evaluate(OVERLAY_SCRIPT).await;
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
@@ -209,7 +324,26 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
             if event.name == "gemini_rpc" {
                 let payload = event.payload.trim_matches('"');
                 let response = if payload.starts_with("sync_data:") {
-                    format!("Data staged.")
+                    let data = &payload["sync_data:".len()..];
+                    match serde_json::from_str::<db::CommerceRecord>(data) {
+                        Ok(record) => {
+                            match db::save_records(vec![record]).await {
+                                Ok(_) => "Data synced to LanceDB (DRAFT).".to_string(),
+                                Err(e) => format!("DB Error: {}", e),
+                            }
+                        },
+                        Err(e) => format!("JSON Error: {}", e),
+                    }
+                } else if payload == "fetch_drafts" {
+                    match db::fetch_drafts().await {
+                        Ok(drafts) => {
+                            json!({
+                                "type": "drafts_loaded",
+                                "payload": drafts
+                            }).to_string()
+                        },
+                        Err(e) => format!("DB Error: {}", e),
+                    }
                 } else if payload.starts_with("push_data:") {
                     let data = &payload["push_data:".len()..];
                     match serde_json::from_str::<Vec<db::CommerceRecord>>(data) {
@@ -281,17 +415,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port_arg_str = port_arg.as_str();
     args.push(port_arg_str);
 
-    // 인증 여부에 따른 초기 URL 설정 (args에는 추가하지 않음)
+    // 인증 여부에 따른 초기 URL 설정
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
     let auth_path = std::path::PathBuf::from(home).join(".gemini/oauth_creds.json");
     let is_authenticated = auth_path.exists();
     let start_url = if is_authenticated { "https://www.google.com" } else { "https://aistudio.google.com/" };
+    
+    // 브라우저 실행 시 무조건 빈 탭(about:blank) 하나만 열리도록 강제합니다.
+    // 시작부터 URL을 넣으면, 스크립트를 주입하기 전에 페이지 로딩이 끝나버려서 버튼이 안 나오는 '경합(Race Condition)'이 발생합니다.
+    args.push("about:blank");
 
     let config = BrowserConfig::builder()
         .with_head()
         .no_sandbox()
         .viewport(None)
-        .args(args) // URL을 인자에서 제외하여 중복 실행 방지
+        .args(args)
         .build()
         .map_err(|e| format!("Config error: {}", e))?;
     let (browser, mut handler) = Browser::launch(config).await?;
@@ -304,6 +442,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = tx.send(()).await;
     });
     browser.execute(SetDiscoverTargetsParams::new(true)).await?;
+    
+    // 브라우저 직접 실행 방식은 프로토콜 에러를 유발하므로 삭제합니다.
+    // 대신 아래의 target_events 리스너 내부에서 페이지별로 설정을 주입합니다.
+
     let mut target_events = browser.event_listener::<EventTargetCreated>().await?;
     let b_target = browser.clone();
     tokio::task::spawn(async move {
@@ -312,8 +454,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let tid = event.target_info.target_id.clone();
                 let b_inner = b_target.clone();
                 tokio::task::spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    // CDP 연결 확보를 위한 최소한의 시간 대기
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    
                     if let Ok(page) = b_inner.get_page(tid).await {
+                        // 페이지 객체 확보 후 바인딩 및 주입 설정을 즉시 수행하여 '페이지 로드 시작' 단계부터 스크립트가 살아있게 함
+                        let _ = page.execute(EnableParams::default()).await;
+                        let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await;
+                        
+                        // 특정 페이지 로딩 상태(예: DOMContentLoaded)까지 기다리지 않고 즉시 셋업 시도
                         let _ = setup_page(b_inner.clone(), page).await;
                     }
                 });
@@ -325,14 +474,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[Rust] Authentication required. Redirecting to login...");
     }
 
-    // 첫 번째 페이지 가져오기 및 초기 URL 이동
-    // 별도의 setup_page 호출 없이 URL 이동만 수행하면 상단의 target_events 리스너가 이를 감지하여 처리함
-    let pages = browser.pages().await?;
-    if let Some(page) = pages.first() {
-        page.goto(start_url).await?;
-    } else {
-        browser.new_page(start_url).await?;
+    // 이미 열려있는 최초 빈 탭(about:blank)을 가져와 스크립트 환경을 완벽하게 주입합니다.
+    if let Ok(pages) = browser.pages().await {
+        if let Some(page) = pages.first() {
+            let _ = page.execute(EnableParams::default()).await;
+            // 모든 새 문서에 스크립트가 자동 실행되도록 브라우저 내부 설정
+            let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await;
+            // RPC 바인딩 및 이벤트 리스너 세팅
+            let _ = setup_page(browser.clone(), page.clone()).await;
+            
+            // 모든 세팅이 완료된 이후에 수동으로 타겟 URL로 이동시킵니다.
+            // 이렇게 해야 페이지가 새로 로드되면서 이미 예약된 스크립트가 100% 동작하여 버튼이 노출됩니다.
+            let _ = page.goto(start_url).await;
+        }
     }
+
+    // 하단의 goto 및 new_page 로직을 제거하여 탭이 중복으로 생성되거나 이동되는 현상을 차단합니다.
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => println!("\n[Rust] Shutting down..."),
