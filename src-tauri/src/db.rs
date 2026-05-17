@@ -5,6 +5,9 @@ use lancedb::query::QueryBase;
 use lancedb::query::ExecutableQuery;
 use serde::{Deserialize, Serialize};
 use lance_tokenizer::Language;
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CommerceRecord {
@@ -19,27 +22,28 @@ pub struct CommerceRecord {
     pub created_at: i64,
     pub updated_at: i64,
 }
+
+#[allow(dead_code)]
 pub async fn get_or_create_table() -> Result<lancedb::Table, lancedb::Error> {
     let db = connect("data/commerce-db").execute().await?;
 
     match db.open_table("commerce_records").execute().await {
         Ok(table) => Ok(table),
         Err(_) => {
-            // 빈 테이블을 명시적 스키마로 생성
-            let table = db.create_table("commerce_records", arrow_array::RecordBatch::new_empty(
-                std::sync::Arc::new(arrow_schema::Schema::new(vec![
-                    arrow_schema::Field::new("id", arrow_schema::DataType::Utf8, false),
-                    arrow_schema::Field::new("host", arrow_schema::DataType::Utf8, false),
-                    arrow_schema::Field::new("url", arrow_schema::DataType::Utf8, false),
-                    arrow_schema::Field::new("domain", arrow_schema::DataType::Utf8, false),
-                    arrow_schema::Field::new("context", arrow_schema::DataType::Utf8, false),
-                    arrow_schema::Field::new("status", arrow_schema::DataType::Utf8, false),
-                    arrow_schema::Field::new("track", arrow_schema::DataType::Utf8, false),
-                    arrow_schema::Field::new("version", arrow_schema::DataType::Int32, false),
-                    arrow_schema::Field::new("created_at", arrow_schema::DataType::Int64, false),
-                    arrow_schema::Field::new("updated_at", arrow_schema::DataType::Int64, false),
-                ]))
-            )).execute().await?;
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Utf8, false),
+                Field::new("host", DataType::Utf8, false),
+                Field::new("url", DataType::Utf8, false),
+                Field::new("domain", DataType::Utf8, false),
+                Field::new("context", DataType::Utf8, false),
+                Field::new("status", DataType::Utf8, false),
+                Field::new("track", DataType::Utf8, false),
+                Field::new("version", DataType::Int32, false),
+                Field::new("created_at", DataType::Int64, false),
+                Field::new("updated_at", DataType::Int64, false),
+            ]));
+            let empty_batch = RecordBatch::new_empty(schema);
+            let table = db.create_table("commerce_records", empty_batch).execute().await?;
 
             let fts_builder = FtsIndexBuilder::new("ngram".to_string(), Language::English)
                 .ngram_min_length(2)
@@ -56,6 +60,7 @@ pub async fn save_records(_records: Vec<CommerceRecord>) -> Result<(), lancedb::
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn search_context(query: &str) -> Result<Vec<CommerceRecord>, lancedb::Error> {
     let table = get_or_create_table().await?;
     let _results = table
