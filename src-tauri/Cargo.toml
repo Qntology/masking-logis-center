@@ -33,6 +33,7 @@ safetensors = "0.7"
 half = { version = "2", features = ["bytemuck"] }
 anyhow = "1.0.95"
 rayon = "1.10.0"
+regex = "1"
 
 [features]
 default = ["cuda"]
