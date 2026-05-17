@@ -92,10 +92,10 @@ impl RotaryEmbedding {
         Ok(Self { cos, sin })
     }
 
-    fn forward(&self, x: &Tensor, seq_len: usize) -> candle_core::Result<Tensor> {
+    fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         let (b, h, s, d) = x.dims4()?;
-        let cos = self.cos.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?;
-        let sin = self.sin.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?;
+        let cos = self.cos.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?.broadcast_as((b, h, s, d / 2))?;
+        let sin = self.sin.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?.broadcast_as((b, h, s, d / 2))?;
 
         let x_pairs = x.reshape((b, h, s, d / 2, 2))?;
         let x0 = x_pairs.narrow(candle_core::D::Minus1, 0, 1)?.reshape((b, h, s, d / 2))?;
@@ -181,25 +181,13 @@ impl SparseMoE {
             let dp_b = self.down_proj_bias.get(eidx)?;
             let expert_output = (expert_out_mid.matmul(&dp_w)?.broadcast_add(&dp_b))?;
 
-            let expert_output_cpu = expert_output.to_device(&Device::Cpu)?;
             for (i, &(tidx, weight)) in tokens.iter().enumerate() {
-                let weighted = (expert_output_cpu.get(i)? * weight as f64)?.to_device(x.device())?;
+                let weighted = (expert_output.get(i)? * weight as f64)?;
                 final_out = final_out.slice_assign(&[tidx..tidx+1, 0..h], &weighted.unsqueeze(0)?)?;
             }
         }
         
         final_out.reshape((b, s, h))
-    }
-}
-
-pub struct KvCache {
-    pub k: Vec<Option<Tensor>>,
-    pub v: Vec<Option<Tensor>>,
-}
-
-impl KvCache {
-    pub fn new(num_layers: usize) -> Self {
-        Self { k: vec![None; num_layers], v: vec![None; num_layers] }
     }
 }
 
@@ -244,8 +232,8 @@ impl TransformerLayer {
         let k = self.k_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
         let v = self.v_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
         
-        let q = rope.forward(&q, s)?;
-        let k = rope.forward(&k, s)?;
+        let q = rope.forward(&q)?;
+        let k = rope.forward(&k)?;
 
         let q = (q * self.scaling as f64)?;
         let k = (k * self.scaling as f64)?;
