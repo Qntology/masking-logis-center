@@ -1,4 +1,5 @@
 mod db;
+mod embedding;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams};
 use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, SetDiscoverTargetsParams};
@@ -310,7 +311,7 @@ const OVERLAY_SCRIPT: &str = r#"
 })();
 "#;
 
-async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
+async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, embedding_model: Arc<embedding::EmbeddingModel>) -> Result<(), Box<dyn std::error::Error>> {
     // RPC 바인딩 등록
     let _ = page.execute(AddBindingParams::new("gemini_rpc")).await;
     
@@ -319,6 +320,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
     let browser_clone = browser.clone();
+    let model_clone = embedding_model.clone();
     tokio::task::spawn(async move {
         while let Some(event) = bindings.next().await {
             if event.name == "gemini_rpc" {
@@ -326,9 +328,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
                 let response = if payload.starts_with("sync_data:") {
                     let data = &payload["sync_data:".len()..];
                     match serde_json::from_str::<db::CommerceRecord>(data) {
-                        Ok(record) => {
+                        Ok(mut record) => {
+                            // 임베딩 생성
+                            match model_clone.embed(&record.context) {
+                                Ok(vector) => record.vector = vector,
+                                Err(e) => eprintln!("Embedding Error: {}", e),
+                            }
                             match db::save_records(vec![record]).await {
-                                Ok(_) => "Data synced to LanceDB (DRAFT).".to_string(),
+                                Ok(_) => "Data synced to LanceDB (DRAFT) with embedding.".to_string(),
                                 Err(e) => format!("DB Error: {}", e),
                             }
                         },
@@ -446,13 +453,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 브라우저 직접 실행 방식은 프로토콜 에러를 유발하므로 삭제합니다.
     // 대신 아래의 target_events 리스너 내부에서 페이지별로 설정을 주입합니다.
 
+    // 🌟 Embedding Model 초기화
+    let model_path = std::path::PathBuf::from("..\\models\\embeddings");
+    let embedding_model = Arc::new(embedding::EmbeddingModel::new(model_path).map_err(|e| format!("Model load error: {}", e))?);
+
     let mut target_events = browser.event_listener::<EventTargetCreated>().await?;
     let b_target = browser.clone();
+    let model_target = embedding_model.clone();
     tokio::task::spawn(async move {
         while let Some(event) = target_events.next().await {
             if event.target_info.r#type == "page" {
                 let tid = event.target_info.target_id.clone();
                 let b_inner = b_target.clone();
+                let model_inner = model_target.clone();
                 tokio::task::spawn(async move {
                     // CDP 연결 확보를 위한 최소한의 시간 대기
                     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -463,7 +476,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await;
                         
                         // 특정 페이지 로딩 상태(예: DOMContentLoaded)까지 기다리지 않고 즉시 셋업 시도
-                        let _ = setup_page(b_inner.clone(), page).await;
+                        let _ = setup_page(b_inner.clone(), page, model_inner).await;
                     }
                 });
             }
@@ -481,7 +494,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 모든 새 문서에 스크립트가 자동 실행되도록 브라우저 내부 설정
             let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await;
             // RPC 바인딩 및 이벤트 리스너 세팅
-            let _ = setup_page(browser.clone(), page.clone()).await;
+            let _ = setup_page(browser.clone(), page.clone(), embedding_model.clone()).await;
             
             // 모든 세팅이 완료된 이후에 수동으로 타겟 URL로 이동시킵니다.
             // 이렇게 해야 페이지가 새로 로드되면서 이미 예약된 스크립트가 100% 동작하여 버튼이 노출됩니다.
