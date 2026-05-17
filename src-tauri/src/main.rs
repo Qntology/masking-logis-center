@@ -1,7 +1,4 @@
-mod db;
-mod embedding;
-mod privacy_filter;
-
+use gemini_gui_lib::{db, embedding, privacy_filter};
 use privacy_filter::{PrivacyFilterModel, viterbi::PrivacySpan};
 use candle_core::Device;
 

@@ -6,18 +6,9 @@
 ///   I-X → I-X, E-X
 ///   E-X → O, B-*, S-*
 ///   S-X → O, B-*, S-*
-///
-/// Label layout (33 labels):
-///   0: O
-///   For each of 8 categories (c = 0..7):
-///     1 + c*4 + 0: B-category
-///     1 + c*4 + 1: I-category
-///     1 + c*4 + 2: E-category
-///     1 + c*4 + 3: S-category
 
-use crate::config::ViterbiConfig;
+use super::config::ViterbiConfig;
 
-const NUM_LABELS: usize = 33;
 const NEG_INF: f64 = -1e30;
 
 /// Get the BIOES tag type for a label index.
@@ -36,7 +27,7 @@ fn label_tag(label: usize) -> char {
     }
 }
 
-/// Get the category index for a label (0-7). Returns None for O.
+/// Get the category index for a label. Returns None for O.
 fn label_category(label: usize) -> Option<usize> {
     if label == 0 {
         None
@@ -85,39 +76,28 @@ fn transition_bias(prev: usize, curr: usize, config: &ViterbiConfig) -> f64 {
 }
 
 /// Run constrained Viterbi decoding on logits.
-///
-/// # Arguments
-/// - `logits`: [seq_len, NUM_LABELS] emission scores
-/// - `config`: Viterbi transition bias configuration
-///
-/// # Returns
-/// Vector of label indices for each token position.
-pub fn viterbi_decode(logits: &[f32], seq_len: usize, config: &ViterbiConfig) -> Vec<usize> {
+pub fn viterbi_decode(logits: &[f32], seq_len: usize, num_labels: usize, config: &ViterbiConfig) -> Vec<usize> {
     if seq_len == 0 {
         return vec![];
     }
 
-    // dp[t][s] = best score ending at time t in state s
-    let mut dp = vec![vec![NEG_INF; NUM_LABELS]; seq_len];
-    // backpointer[t][s] = previous state for best path
-    let mut bp = vec![vec![0usize; NUM_LABELS]; seq_len];
+    let mut dp = vec![vec![NEG_INF; num_labels]; seq_len];
+    let mut bp = vec![vec![0usize; num_labels]; seq_len];
 
-    // Initialize: first token can only start with O, B-*, or S-*
-    for s in 0..NUM_LABELS {
+    for s in 0..num_labels {
         let tag = label_tag(s);
         if matches!(tag, 'O' | 'B' | 'S') {
             dp[0][s] = logits[s] as f64;
         }
     }
 
-    // Forward pass
     for t in 1..seq_len {
-        for curr in 0..NUM_LABELS {
-            let emission = logits[t * NUM_LABELS + curr] as f64;
+        for curr in 0..num_labels {
+            let emission = logits[t * num_labels + curr] as f64;
             let mut best_score = NEG_INF;
             let mut best_prev = 0;
 
-            for prev in 0..NUM_LABELS {
+            for prev in 0..num_labels {
                 if !is_valid_transition(prev, curr) {
                     continue;
                 }
@@ -135,10 +115,9 @@ pub fn viterbi_decode(logits: &[f32], seq_len: usize, config: &ViterbiConfig) ->
         }
     }
 
-    // Find best final state (must be O, E-*, or S-*)
     let mut best_final = 0;
     let mut best_score = NEG_INF;
-    for s in 0..NUM_LABELS {
+    for s in 0..num_labels {
         let tag = label_tag(s);
         if matches!(tag, 'O' | 'E' | 'S') && dp[seq_len - 1][s] > best_score {
             best_score = dp[seq_len - 1][s];
@@ -146,7 +125,6 @@ pub fn viterbi_decode(logits: &[f32], seq_len: usize, config: &ViterbiConfig) ->
         }
     }
 
-    // Backtrace
     let mut path = vec![0usize; seq_len];
     path[seq_len - 1] = best_final;
     for t in (1..seq_len).rev() {
@@ -167,11 +145,11 @@ pub struct PrivacySpan {
 }
 
 /// Extract spans from Viterbi-decoded label path.
-///
-/// Groups consecutive B-I-E or standalone S labels into spans.
 pub fn extract_spans(
     label_path: &[usize],
     logits: &[f32],
+    num_labels: usize,
+    label_list: &[String],
     tokens: &[String],
     offsets: &[(usize, usize)],
     input_text: &str,
@@ -187,9 +165,10 @@ pub fn extract_spans(
         match tag {
             'S' => {
                 // Single-token span
-                let cat = label_category(label).unwrap();
-                let cat_name = crate::config::SPAN_LABELS[cat];
-                let score = compute_span_score(logits, &[i], label_path);
+                let label_name = &label_list[label];
+                let cat_name = label_name.strip_prefix("S-").unwrap_or(label_name);
+                
+                let score = compute_span_score(logits, num_labels, &[i], label_path);
                 let (start, end) = offsets[i];
                 let word = if end > start && end <= input_text.len() {
                     input_text[start..end].to_string()
@@ -207,21 +186,20 @@ pub fn extract_spans(
             }
             'B' => {
                 // Begin of multi-token span
+                let label_name = &label_list[label];
+                let cat_name = label_name.strip_prefix("B-").unwrap_or(label_name);
                 let cat = label_category(label).unwrap();
-                let cat_name = crate::config::SPAN_LABELS[cat];
+                
                 let span_start = i;
                 let char_start = offsets[i].0;
                 i += 1;
 
-                // Collect I tokens
                 while i < seq_len {
                     let next_label = label_path[i];
                     let next_tag = label_tag(next_label);
-                    if next_tag == 'I' && label_category(next_label) == Some(cat) {
+                    if (next_tag == 'I' || next_tag == 'E') && label_category(next_label) == Some(cat) {
                         i += 1;
-                    } else if next_tag == 'E' && label_category(next_label) == Some(cat) {
-                        i += 1;
-                        break;
+                        if next_tag == 'E' { break; }
                     } else {
                         break;
                     }
@@ -230,7 +208,7 @@ pub fn extract_spans(
                 let span_end = i;
                 let char_end = offsets[span_end - 1].1;
                 let token_indices: Vec<usize> = (span_start..span_end).collect();
-                let score = compute_span_score(logits, &token_indices, label_path);
+                let score = compute_span_score(logits, num_labels, &token_indices, label_path);
                 let word = if char_end > char_start && char_end <= input_text.len() {
                     input_text[char_start..char_end].to_string()
                 } else {
@@ -254,22 +232,21 @@ pub fn extract_spans(
 }
 
 /// Compute average softmax confidence for a span.
-fn compute_span_score(logits: &[f32], token_indices: &[usize], label_path: &[usize]) -> f32 {
+fn compute_span_score(logits: &[f32], num_labels: usize, token_indices: &[usize], label_path: &[usize]) -> f32 {
     if token_indices.is_empty() {
         return 0.0;
     }
 
     let mut total_score = 0.0;
     for &t in token_indices {
-        let offset = t * NUM_LABELS;
+        let offset = t * num_labels;
         let label = label_path[t];
 
-        // Softmax for this position
-        let max_val = logits[offset..offset + NUM_LABELS]
+        let max_val = logits[offset..offset + num_labels]
             .iter()
             .copied()
             .fold(f32::NEG_INFINITY, f32::max);
-        let exp_sum: f32 = logits[offset..offset + NUM_LABELS]
+        let exp_sum: f32 = logits[offset..offset + num_labels]
             .iter()
             .map(|&v| (v - max_val).exp())
             .sum();
