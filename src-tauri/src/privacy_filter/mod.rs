@@ -1,7 +1,7 @@
 pub mod config;
 pub mod viterbi;
 
-use candle_core::{DType, Device, Module, Tensor, IndexOp};
+use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::{linear, VarBuilder, Embedding};
 use anyhow::Result;
 use std::path::Path;
@@ -23,6 +23,7 @@ pub struct PrivacyFilterModel {
     config: ModelConfig,
     viterbi_config: ViterbiConfig,
     device: Device,
+    dtype: DType,
 }
 
 struct RmsNorm {
@@ -46,12 +47,12 @@ impl RmsNorm {
 }
 
 struct RotaryEmbedding {
-    cos: Tensor,
-    sin: Tensor,
+    inv_freq: Tensor,
+    attention_scaling: f64,
 }
 
 impl RotaryEmbedding {
-    fn new_yarn(cfg: &config::RopeParameters, head_dim: usize, max_seq_len: usize, device: &Device) -> Result<Self> {
+    fn new_yarn(cfg: &config::RopeParameters, head_dim: usize, max_seq_len: usize, dtype: DType, device: &Device) -> Result<Self> {
         let dim = head_dim;
         let half_dim = dim / 2;
         let theta = cfg.rope_theta;
@@ -88,26 +89,18 @@ impl RotaryEmbedding {
             inv_freq[i] = inv_freq_interpolation[i] * ramp + inv_freq_extrapolation[i] * (1.0 - ramp);
         }
 
-        let mut cos_data = vec![0f32; max_seq_len * half_dim];
-        let mut sin_data = vec![0f32; max_seq_len * half_dim];
-        let scale = attention_scaling as f32;
-        for pos in 0..max_seq_len {
-            for i in 0..half_dim {
-                let angle = pos as f32 * inv_freq[i];
-                cos_data[pos * half_dim + i] = angle.cos() * scale;
-                sin_data[pos * half_dim + i] = angle.sin() * scale;
-            }
-        }
-
-        let cos = Tensor::from_vec(cos_data, (max_seq_len, half_dim), device)?;
-        let sin = Tensor::from_vec(sin_data, (max_seq_len, half_dim), device)?;
-        Ok(Self { cos, sin })
+        let inv_freq = Tensor::from_vec(inv_freq, (half_dim,), device)?.to_dtype(dtype)?;
+        Ok(Self { inv_freq, attention_scaling })
     }
 
-    fn forward(&self, x: &Tensor, seq_len: usize) -> candle_core::Result<Tensor> {
+    fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         let (b, h, s, d) = x.dims4()?;
-        let cos = self.cos.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?;
-        let sin = self.sin.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?;
+        let device = x.device();
+        let t = Tensor::arange(0u32, s as u32, device)?.to_dtype(x.dtype())?.unsqueeze(1)?;
+        let freqs = t.matmul(&self.inv_freq.unsqueeze(0)?)?;
+        
+        let cos = freqs.cos()?.affine(self.attention_scaling, 0.0)?.unsqueeze(0)?.unsqueeze(0)?;
+        let sin = freqs.sin()?.affine(self.attention_scaling, 0.0)?.unsqueeze(0)?.unsqueeze(0)?;
 
         let x_pairs = x.reshape((b, h, s, d / 2, 2))?;
         let x0 = x_pairs.narrow(candle_core::D::Minus1, 0, 1)?.reshape((b, h, s, d / 2))?;
@@ -158,29 +151,24 @@ impl SparseMoE {
         let top_k = router_logits.topk(self.num_experts_per_tok)?;
         let routing_weights = candle_nn::ops::softmax(&top_k.values, candle_core::D::Minus1)?;
         
-        let indices_vec = top_k.indices.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<u32>()?;
-        let weights_vec = routing_weights.to_dtype(DType::F32)?.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?;
-        
         let mut final_out = Tensor::zeros((b * s, h), x.dtype(), x.device())?;
         
-        let mut expert_mask = vec![Vec::new(); self.num_experts];
-        for i in 0..(b * s) {
-            for k in 0..self.num_experts_per_tok {
-                let expert_idx = indices_vec[i * self.num_experts_per_tok + k] as usize;
-                let weight = weights_vec[i * self.num_experts_per_tok + k] as f64;
-                expert_mask[expert_idx].push((i, weight));
-            }
-        }
+        let indices_flat = top_k.indices.flatten_all()?;
+        let weights_flat = routing_weights.flatten_all()?;
 
-        for (eidx, tokens) in expert_mask.into_iter().enumerate() {
-            if tokens.is_empty() { continue; }
-            
-            let n = tokens.len();
-            let mut expert_input_vec = Vec::with_capacity(n);
-            for &(tidx, _) in &tokens {
-                expert_input_vec.push(x_flat.get(tidx)?);
-            }
-            let expert_input = Tensor::stack(&expert_input_vec, 0)?;
+        for eidx in 0..self.num_experts {
+            let mask = indices_flat.eq(eidx as u32)?;
+            let count = mask.to_dtype(DType::F32)?.sum_all()?.to_vec0::<f32>()? as usize;
+            if count == 0 { continue; }
+
+            let pos_indices = mask.where_cond(&Tensor::arange(0u32, (b * s * self.num_experts_per_tok) as u32, x.device())?, &Tensor::new(u32::MAX, x.device())?.broadcast_as(mask.shape())?)?;
+            let mut pos_vec: Vec<u32> = pos_indices.to_device(&Device::Cpu)?.to_vec1()?;
+            pos_vec.retain(|&i| i != u32::MAX);
+            let pos_indices_tensor = Tensor::new(pos_vec.as_slice(), x.device())?;
+
+            let token_indices = pos_indices_tensor.to_dtype(DType::F32)?.affine(1.0 / self.num_experts_per_tok as f64, 0.0)?.to_dtype(DType::U32)?;
+            let expert_input = x_flat.index_select(&token_indices, 0)?;
+            let expert_weights = weights_flat.index_select(&pos_indices_tensor, 0)?.to_dtype(x.dtype())?.unsqueeze(1)?;
 
             let gu_w = self.gate_up_proj.get(eidx)?;
             let gu_b = self.gate_up_proj_bias.get(eidx)?;
@@ -195,28 +183,11 @@ impl SparseMoE {
             let dp_b = self.down_proj_bias.get(eidx)?;
             let expert_output = (expert_out_mid.matmul(&dp_w)?.broadcast_add(&dp_b))?;
 
-            for (i, &(tidx, weight)) in tokens.iter().enumerate() {
-                let weighted = (expert_output.get(i)?.affine(weight, 0.0))?;
-                let current = final_out.get(tidx)?;
-                final_out = final_out.slice_assign(&[tidx..tidx+1, 0..h], &(current + weighted)?.unsqueeze(0)?)?;
-            }
+            let weighted_output = expert_output.broadcast_mul(&expert_weights)?;
+            final_out = final_out.index_add(&token_indices, &weighted_output, 0)?;
         }
         
         final_out.affine(self.num_experts_per_tok as f64, 0.0)?.reshape((b, s, h))
-    }
-}
-
-pub struct UnifiedKvCache {
-    pub k: Tensor,
-    pub v: Tensor,
-    pub current_pos: usize,
-}
-
-impl UnifiedKvCache {
-    pub fn new(num_layers: usize, num_kv_heads: usize, head_dim: usize, max_seq_len: usize, device: &Device) -> candle_core::Result<Self> {
-        let k = Tensor::zeros((num_layers, 1, num_kv_heads, max_seq_len, head_dim), DType::F32, device)?;
-        let v = Tensor::zeros((num_layers, 1, num_kv_heads, max_seq_len, head_dim), DType::F32, device)?;
-        Ok(Self { k, v, current_pos: 0 })
     }
 }
 
@@ -233,11 +204,10 @@ struct TransformerLayer {
     num_kv_heads: usize,
     head_dim: usize,
     scaling: f32,
-    layer_idx: usize,
 }
 
 impl TransformerLayer {
-    fn new(cfg: &ModelConfig, vb: VarBuilder, layer_idx: usize) -> Result<Self> {
+    fn new(cfg: &ModelConfig, vb: VarBuilder) -> Result<Self> {
         let q_proj = linear(cfg.hidden_size, cfg.num_attention_heads * cfg.head_dim, vb.pp("self_attn.q_proj"))?;
         let k_proj = linear(cfg.hidden_size, cfg.num_key_value_heads * cfg.head_dim, vb.pp("self_attn.k_proj"))?;
         let v_proj = linear(cfg.hidden_size, cfg.num_key_value_heads * cfg.head_dim, vb.pp("self_attn.v_proj"))?;
@@ -251,35 +221,26 @@ impl TransformerLayer {
             q_proj, k_proj, v_proj, o_proj, sinks, input_layernorm, post_attention_layernorm, moe,
             num_heads: cfg.num_attention_heads, num_kv_heads: cfg.num_key_value_heads,
             head_dim: cfg.head_dim, scaling: (cfg.head_dim as f32).powf(-0.25),
-            layer_idx,
         })
     }
 
-    fn forward(&self, x: &Tensor, rope: &RotaryEmbedding, mask: &Tensor, cache: &mut Option<&mut UnifiedKvCache>) -> candle_core::Result<Tensor> {
+    fn forward(&self, x: &Tensor, rope: &RotaryEmbedding, mask: &Tensor) -> candle_core::Result<Tensor> {
         let (b, s, _) = x.dims3()?;
         let x_norm = self.input_layernorm.forward(x)?;
         
         let q = self.q_proj.forward(&x_norm)?.reshape((b, s, self.num_heads, self.head_dim))?.transpose(1, 2)?;
-        let mut k = self.k_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
-        let mut v = self.v_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+        let k = self.k_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+        let v = self.v_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
         
-        let q = rope.forward(&q, s)?;
-        k = rope.forward(&k, s)?;
-
-        if let Some(cache) = cache {
-            let pos = cache.current_pos;
-            cache.k.slice_assign(&[self.layer_idx..self.layer_idx+1, 0..b, 0..self.num_kv_heads, pos..pos+s, 0..self.head_dim], &k)?;
-            cache.v.slice_assign(&[self.layer_idx..self.layer_idx+1, 0..b, 0..self.num_kv_heads, pos..pos+s, 0..self.head_dim], &v)?;
-            k = cache.k.get(self.layer_idx)?.narrow(2, 0, pos + s)?;
-            v = cache.v.get(self.layer_idx)?.narrow(2, 0, pos + s)?;
-        }
+        let q = rope.forward(&q)?;
+        let k = rope.forward(&k)?;
 
         let q = q.affine(self.scaling as f64, 0.0)?;
         let k = k.affine(self.scaling as f64, 0.0)?;
         
         let n_rep = self.num_heads / self.num_kv_heads;
-        let k = if n_rep > 1 { crate::privacy_filter::repeat_kv(&k, n_rep)? } else { k };
-        let v = if n_rep > 1 { crate::privacy_filter::repeat_kv(&v, n_rep)? } else { v };
+        let k = if n_rep > 1 { repeat_kv(&k, n_rep)? } else { k };
+        let v = if n_rep > 1 { repeat_kv(&v, n_rep)? } else { v };
 
         let attn_weights = (q.matmul(&k.transpose(2, 3)?)?.broadcast_add(mask))?;
         let sinks = self.sinks.reshape((1, self.num_heads, 1, 1))?.expand((b, self.num_heads, s, 1))?;
@@ -320,27 +281,28 @@ impl PrivacyFilterModel {
     pub fn load(model_dir: &Path, device: &Device) -> Result<Self> {
         let config = ModelConfig::from_file(&model_dir.join("config.json"))?;
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(anyhow::Error::msg)?;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_dir.join("model.safetensors")], DType::F32, device)? };
+        
+        let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_dir.join("model.safetensors")], dtype, device)? };
 
         let embed_tokens = candle_nn::embedding(config.vocab_size, config.hidden_size, vb.pp("model.embed_tokens"))?;
-        let layers = (0..config.num_hidden_layers).map(|i| TransformerLayer::new(&config, vb.pp(format!("model.layers.{}", i)), i)).collect::<Result<Vec<_>>>()?;
+        let layers = (0..config.num_hidden_layers).map(|i| TransformerLayer::new(&config, vb.pp(format!("model.layers.{}", i)))).collect::<Result<Vec<_>>>()?;
         let norm = RmsNorm::new(config.hidden_size, config.rms_norm_eps, vb.pp("model.norm"))?;
         let score_weight = vb.get((config.num_labels(), config.hidden_size), "score.weight")?.transpose(0, 1)?;
         let score_bias = vb.get(config.num_labels(), "score.bias")?;
         let viterbi_config = ViterbiConfig::from_file(&model_dir.join("viterbi_calibration.json"), "default").unwrap_or_default();
 
-        Ok(Self { embed_tokens, layers, norm, score_weight, score_bias, tokenizer, config, viterbi_config, device: device.clone() })
+        Ok(Self { embed_tokens, layers, norm, score_weight, score_bias, tokenizer, config, viterbi_config, device: device.clone(), dtype })
     }
 
-    pub fn forward(&self, input_ids: &[u32], cache: &mut Option<&mut UnifiedKvCache>) -> candle_core::Result<Tensor> {
-        let seq_len = input_ids.len();
+    pub fn forward(&self, input_ids: &[u32]) -> candle_core::Result<Tensor> {
         let mut x = self.embed_tokens.forward(&Tensor::new(input_ids, &self.device)?)?.unsqueeze(0)?;
         
-        let rope = RotaryEmbedding::new_yarn(&self.config.rope_parameters, self.config.head_dim, self.config.max_position_embeddings, &self.device).map_err(candle_core::Error::msg)?;
-        let mask = create_sliding_window_mask(seq_len, self.config.sliding_window, &self.device)?;
+        let rope = RotaryEmbedding::new_yarn(&self.config.rope_parameters, self.config.head_dim, input_ids.len(), self.dtype, &self.device).map_err(candle_core::Error::msg)?;
+        let mask = create_sliding_window_mask(input_ids.len(), self.config.sliding_window, &self.device)?.to_dtype(self.dtype)?;
 
         for layer in &self.layers {
-            x = layer.forward(&x, &rope, &mask, cache)?;
+            x = layer.forward(&x, &rope, &mask)?;
         }
 
         let x = self.norm.forward(&x)?;
@@ -351,8 +313,8 @@ impl PrivacyFilterModel {
         let tokens = self.tokenizer.encode(text, false).map_err(anyhow::Error::msg)?;
         let input_ids = tokens.get_ids();
         let s = input_ids.len();
-        let logits = self.forward(input_ids, &mut None).map_err(anyhow::Error::msg)?;
-        let logits_data = logits.flatten_all()?.to_vec1::<f32>().map_err(anyhow::Error::msg)?;
+        let logits = self.forward(input_ids).map_err(anyhow::Error::msg)?;
+        let logits_data = logits.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>().map_err(anyhow::Error::msg)?;
         
         let num_labels = self.config.num_labels();
         let label_list = self.config.id2label.as_ref().map(|m| {

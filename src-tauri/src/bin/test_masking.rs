@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
     // Debug logits
     let tokens = model.tokenizer.encode(test_text, false).map_err(anyhow::Error::msg)?;
     let input_ids = tokens.get_ids();
-    let logits = model.forward(input_ids, &mut None)?;
+    let logits = model.forward(input_ids)?;
     let argmax = logits.argmax(candle_core::D::Minus1)?.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<u32>()?;
     
     println!("[Test] Argmax labels for first 10 tokens:");
