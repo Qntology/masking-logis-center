@@ -13,9 +13,8 @@ static CLI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../../cli/omg");
 
 fn extract_cli() -> PathBuf {
     let temp_dir = std::env::temp_dir().join("gemini-cli-bundle");
-    // 추출 실패 시 패닉 대신 로그 출력
-    if let Err(e) = CLI_DIR.extract(&temp_dir) {
-        eprintln!("[Rust] Critical: Failed to extract CLI: {:?}", e);
+    if !temp_dir.exists() {
+        CLI_DIR.extract(&temp_dir).expect("Failed to extract CLI");
     }
     temp_dir
 }
@@ -76,8 +75,8 @@ const OVERLAY_SCRIPT: &str = r#"
         const log = shadow.querySelector('#log');
 
         toggleBtn.onclick = () => { 
-            console.log("[Gemini-JS] The DevTools panel has been deprecated.");
-            alert('상시 최상단 Tauri 앱 인터페이스를 이용해 주세요. 개발자 도구가 필요하면 F12를 직접 눌러주세요.');
+            console.log("[Gemini-JS] Requesting DevTools...");
+            if (window.gemini_rpc) window.gemini_rpc("open_devtools");
         };
         
         input.onkeypress = async (e) => {
@@ -103,35 +102,31 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
     page.execute(EnableParams::default()).await?;
     page.execute(AddBindingParams::new("gemini_rpc")).await?;
     page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await?;
+    let _ = page.evaluate(OVERLAY_SCRIPT).await;
 
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
-
+    let browser_clone = browser.clone();
     tokio::task::spawn(async move {
         while let Some(event) = bindings.next().await {
             if event.name == "gemini_rpc" {
-                let raw_command = event.payload.trim_matches('"').to_string();
-
-                if raw_command == "open_devtools" {
-                    let _ = page_clone.bring_to_front().await;
-                    let script = "alert('개발자 도구 패널 대신 최상단 Tauri 앱을 사용해 주세요.');";
-                    let _ = page_clone.evaluate(script).await;
+                if event.payload == "\"open_devtools\"" {
+                    let tid = page_clone.target_id().clone();
+                    // DevTools를 띄우기 위한 URL
+                    let url = format!("devtools://devtools/bundled/inspector.html?ws=localhost:9222/devtools/page/{:?}", tid);
+                    
+                    // 브라우저에 타겟 생성 명령을 보내 개발자 도구를 엽니다
+                    let _ = browser_clone.execute(chromiumoxide::cdp::browser_protocol::target::CreateTargetParams::new(url)).await;
                     continue;
                 }
-
-                let response = match execute_cli(raw_command).await {
+                
+                let response = match execute_cli(event.payload.clone()).await {
                     Ok(res) => res,
                     Err(e) => format!("Error: {}", e),
                 };
-                // dispatchEvent와 동시에 panel.html의 setInterval이 감지할 수 있도록 전역 변수에 응답을 기록합니다.
-                let response_json = json!(response);
                 let script = format!(
-                    r#"
-                    window.last_gemini_response = {};
-                    window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));
-                    "#,
-                    response_json,
-                    response_json
+                    "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
+                    json!(response)
                 );
                 let _ = page_clone.evaluate(script).await;
             }
@@ -154,61 +149,45 @@ async fn execute_cli(command: String) -> Result<String, String> {
     
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
-use tauri::Manager;
-
-fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_oauth::init())
-        .setup(|app| {
-            // 메인 윈도우 객체를 가져옵니다.
-            let window = app.get_webview_window("main").unwrap();
-            
-            // 앱 실행 시 윈도우를 항상 최상단에 노출하도록 설정합니다.
-            window.set_always_on_top(true).unwrap();
-            
-            // 기존의 브라우저 제어 로직을 비동기 런타임에서 별도로 실행합니다.
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = run_browser_service().await {
-                    eprintln!("[Rust] Browser Service Error: {:?}", e);
-                }
-            });
-            
-            Ok(())
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
-}
-
-async fn run_browser_service() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[Rust] Initializing Gemini Browser...");
-    
+
+    // Dynamic port handling for remote debugging
     let port = 9222; 
     let port_arg = format!("--remote-debugging-port={}", port);
-    let mut current_dir = std::env::current_dir().expect("Failed to get current dir");
-    if current_dir.ends_with("src-tauri") {
-        current_dir = current_dir.parent().unwrap().to_path_buf();
-    }
+
+    let devtools_path = std::env::current_dir().unwrap().join("devtools").to_str().unwrap().to_string();
+    let extension_arg = format!("--load-extension={}", devtools_path);
 
     let config = BrowserConfig::builder()
         .with_head()
         .arg("--disable-device-emulation")
         .arg("--start-maximized")
+        .arg("--disable-gpu")
+        .arg("--disable-software-rasterizer")
+        .arg("--disable-gpu-compositing")
         .arg("--no-first-run")
-        .arg("--no-sandbox")
-        .arg("--disable-setuid-sandbox")
+        .arg("--disable-notifications")
+        .arg("--disable-extensions-except={}") // Allow only our extension if needed
+        .arg(extension_arg)
+        .arg("--disable-popup-blocking")
+        .arg("--blink-settings=imagesEnabled=false")
+        .arg("--disable-blink-features=AutomationControlled")
+        .arg("--password-store=basic")
+        .arg("--no-default-browser-check")
+        .arg("--force-dark-mode")
+        .arg("--enable-features=WebUIDarkMode")
         .arg(port_arg)
         .arg("--remote-allow-origins=*")
-        .arg("--disable-web-security")
-        .arg("--user-data-dir=C:\\temp\\gemini-profile")
-        .arg("--disable-blink-features=AutomationControlled")
-        .arg("--use-fake-ui-for-media-stream")
         .build()?;
 
     let (browser, mut handler) = Browser::launch(config).await?;
     let browser = Arc::new(browser);
+
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
     
+    // 핸들러 루프 태스크
     tokio::task::spawn(async move {
         while let Some(h) = handler.next().await {
             if let Err(e) = h { eprintln!("[Rust] Handler Error: {:?}", e); break; }
@@ -217,23 +196,19 @@ async fn run_browser_service() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     browser.execute(SetDiscoverTargetsParams::new(true)).await?;
+
     let mut target_events = browser.event_listener::<EventTargetCreated>().await?;
-    let b_target = Arc::clone(&browser);
+    let b_target = browser.clone();
     
     tokio::task::spawn(async move {
         while let Some(event) = target_events.next().await {
-            // TargetInfo 내부의 필드 접근 방식을 확인하여 수정
-            let target_info = &event.target_info;
-            if target_info.r#type == "page" {
-                let tid = target_info.target_id.clone();
-                let b_inner = Arc::clone(&b_target);
+            if event.target_info.r#type == "page" {
+                let tid = event.target_info.target_id.clone();
+                let b_inner = b_target.clone();
                 tokio::task::spawn(async move {
-                    // 페이지가 완전히 로드될 때까지 약간의 대기 시간을 가짐
-                    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     if let Ok(page) = b_inner.get_page(tid).await {
-                        if let Err(e) = setup_page(Arc::clone(&b_inner), page).await {
-                            eprintln!("[Rust] Error setting up page: {:?}", e);
-                        }
+                        let _ = setup_page(b_inner.clone(), page).await;
                     }
                 });
             }
@@ -243,6 +218,10 @@ async fn run_browser_service() -> Result<(), Box<dyn std::error::Error>> {
     let initial_page = browser.new_page("https://www.google.com").await?;
     setup_page(browser.clone(), initial_page).await?;
 
-    rx.recv().await;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => println!("\n[Rust] Shutting down..."),
+        _ = rx.recv() => println!("\n[Rust] Browser closed, shutting down..."),
+    }
+    
     Ok(())
 }
