@@ -1,6 +1,6 @@
 use gemini_gui_lib::privacy_filter;
 use privacy_filter::PrivacyFilterModel;
-use candle_core::Device;
+use candle_core::{Device, Tensor};
 use std::path::PathBuf;
 
 fn mask_pii(text: &str, spans: &[privacy_filter::viterbi::PrivacySpan]) -> String {
@@ -36,6 +36,17 @@ fn main() -> anyhow::Result<()> {
     
     let test_text = "My name is Alice Smith and I live at 123 Maple Street, New York. My phone number is 555-0199.";
     println!("[Test] Input: {}", test_text);
+    
+    // Debug logits
+    let tokens = model.tokenizer.encode(test_text, false).map_err(anyhow::Error::msg)?;
+    let input_ids = tokens.get_ids();
+    let logits = model.forward(input_ids, &mut None)?;
+    let argmax = logits.argmax(candle_core::D::Minus1)?.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<u32>()?;
+    
+    println!("[Test] Argmax labels for first 10 tokens:");
+    for i in 0..10.min(argmax.len()) {
+        println!("  token '{}' -> label {}", tokens.get_tokens()[i], argmax[i]);
+    }
     
     let spans = model.predict(test_text)?;
     println!("[Test] Detected {} spans.", spans.len());
