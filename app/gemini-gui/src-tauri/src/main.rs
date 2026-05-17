@@ -98,7 +98,7 @@ const OVERLAY_SCRIPT: &str = r#"
 })();
 "#;
 
-async fn setup_page(page: chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
+async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
     page.execute(EnableParams::default()).await?;
     page.execute(AddBindingParams::new("gemini_rpc")).await?;
     page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await?;
@@ -106,11 +106,17 @@ async fn setup_page(page: chromiumoxide::Page) -> Result<(), Box<dyn std::error:
 
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
+    let browser_clone = browser.clone();
     tokio::task::spawn(async move {
         while let Some(event) = bindings.next().await {
             if event.name == "gemini_rpc" {
                 if event.payload == "\"open_devtools\"" {
-                    println!("[Rust] DevTools requested - manual access only for this native mode.");
+                    let tid = page_clone.target_id().clone();
+                    // DevTools를 띄우기 위한 URL
+                    let url = format!("devtools://devtools/bundled/inspector.html?ws=localhost:9222/devtools/page/{:?}", tid);
+                    
+                    // 브라우저에 타겟 생성 명령을 보내 개발자 도구를 엽니다
+                    let _ = browser_clone.execute(chromiumoxide::cdp::browser_protocol::target::CreateTargetParams::new(url)).await;
                     continue;
                 }
                 
@@ -151,6 +157,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = 9222; 
     let port_arg = format!("--remote-debugging-port={}", port);
 
+    let devtools_path = std::env::current_dir().unwrap().join("devtools").to_str().unwrap().to_string();
+    let extension_arg = format!("--load-extension={}", devtools_path);
+
     let config = BrowserConfig::builder()
         .with_head()
         .arg("--disable-device-emulation")
@@ -160,7 +169,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg("--disable-gpu-compositing")
         .arg("--no-first-run")
         .arg("--disable-notifications")
-        .arg("--disable-extensions")
+        .arg("--disable-extensions-except={}") // Allow only our extension if needed
+        .arg(extension_arg)
         .arg("--disable-popup-blocking")
         .arg("--blink-settings=imagesEnabled=false")
         .arg("--disable-blink-features=AutomationControlled")
@@ -198,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::task::spawn(async move {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     if let Ok(page) = b_inner.get_page(tid).await {
-                        let _ = setup_page(page).await;
+                        let _ = setup_page(b_inner.clone(), page).await;
                     }
                 });
             }
@@ -206,7 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let initial_page = browser.new_page("https://www.google.com").await?;
-    setup_page(initial_page).await?;
+    setup_page(browser.clone(), initial_page).await?;
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => println!("\n[Rust] Shutting down..."),
