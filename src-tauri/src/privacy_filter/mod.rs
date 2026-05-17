@@ -20,7 +20,7 @@ pub struct PrivacyFilterModel {
     score_weight: Tensor,
     score_bias: Tensor,
     pub tokenizer: Tokenizer,
-    config: ModelConfig,
+    pub config: ModelConfig,
     viterbi_config: ViterbiConfig,
     device: Device,
     dtype: DType,
@@ -278,6 +278,21 @@ pub fn create_sliding_window_mask(seq_len: usize, window_size: usize, device: &D
 }
 
 impl PrivacyFilterModel {
+    pub fn get_label_list(&self) -> Vec<String> {
+        let num_labels = self.config.num_labels();
+        self.config.id2label.as_ref().map(|m| {
+            let mut l = vec![String::new(); num_labels];
+            for (id, name) in m {
+                if let Ok(idx) = id.parse::<usize>() {
+                    if idx < num_labels {
+                        l[idx] = name.clone();
+                    }
+                }
+            }
+            l
+        }).unwrap_or_else(crate::privacy_filter::config::build_label_list)
+    }
+
     pub fn load(model_dir: &Path, device: &Device) -> Result<Self> {
         let config = ModelConfig::from_file(&model_dir.join("config.json"))?;
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(anyhow::Error::msg)?;

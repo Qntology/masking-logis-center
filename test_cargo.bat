@@ -1,7 +1,9 @@
 @echo off
 chcp 65001 > nul
 call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+chcp 65001 > nul
 set "PYTHONIOENCODING=utf-8"
+set "LC_ALL=C.UTF-8"
 
 :: [AMD ROCm/HIP]
 set "CANDLE_HIP=1"
@@ -14,4 +16,5 @@ rem Add DirectStorage DLLs to PATH
 set "PATH=%PATH%;%CD%\microsoft.direct3d.directstorage.1.3.0\native\bin\x64"
 
 echo [TEST] Compiling and running masking test (UTF-8 Mode)...
-cargo run --bin test_masking --features cuda
+cargo run --bin test_masking --features cuda > ..\test_result.txt 2>&1
+type ..\test_result.txt

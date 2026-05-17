@@ -34,28 +34,28 @@ fn main() -> anyhow::Result<()> {
     println!("[Test] Loading model on {:?} from {:?}...", device, model_path);
     let model = PrivacyFilterModel::load(&model_path, &device)?;
     
-    let test_text = "My name is Alice Smith and I live at 123 Maple Street, New York. My phone number is 555-0199.";
-    println!("[Test] Input: {}", test_text);
-    
-    // Debug logits
-    let tokens = model.tokenizer.encode(test_text, false).map_err(anyhow::Error::msg)?;
-    let input_ids = tokens.get_ids();
-    let logits = model.forward(input_ids)?;
-    let argmax = logits.argmax(candle_core::D::Minus1)?.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<u32>()?;
-    
-    println!("[Test] Argmax labels for first 10 tokens:");
-    for i in 0..10.min(argmax.len()) {
-        println!("  token '{}' -> label {}", tokens.get_tokens()[i], argmax[i]);
+    let test_texts = vec![
+        "안녕하세요, 제 이름은 김철수이고 서울시 강남구 역삼동 123-45에 살고 있습니다. 전화번호는 010-1234-5678입니다.",
+        "제 이메일 주소는 chulsoo.kim@example.com이고, 주민등록번호는 900101-1234567입니다.",
+        "결제는 국민은행 123-456-789012 계좌로 입금해 주세요.",
+        "문의사항은 경기도 성남시 분당구 판교역로 166, 카카오 판교 오피스로 방문해 주세요."
+    ];
+
+    let label_list = model.get_label_list();
+
+    for (idx, test_text) in test_texts.iter().enumerate() {
+        println!("\n--- Test Case {} ---", idx + 1);
+        println!("[Test] Input: {}", test_text);
+        
+        let spans = model.predict(test_text)?;
+        println!("[Test] Detected {} spans.", spans.len());
+        for span in &spans {
+            println!("  - {}: {} (score: {:.4})", span.entity_group, span.word, span.score);
+        }
+        
+        let masked = mask_pii(test_text, &spans);
+        println!("[Test] Masked: {}", masked);
     }
-    
-    let spans = model.predict(test_text)?;
-    println!("[Test] Detected {} spans.", spans.len());
-    for span in &spans {
-        println!("  - {}: {} (score: {:.4})", span.entity_group, span.word, span.score);
-    }
-    
-    let masked = mask_pii(test_text, &spans);
-    println!("[Test] Masked: {}", masked);
     
     Ok(())
 }
