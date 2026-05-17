@@ -15,6 +15,9 @@ fn extract_cli() -> PathBuf {
 
 const OVERLAY_SCRIPT: &str = r#"
 (function() {
+    // iframe 내부라면 실행하지 않음 (최상위 프레임에서만 렌더링)
+    if (window.self !== window.top) return;
+
     if (window.geminiSidebarLoaded) return;
     window.geminiSidebarLoaded = true;
 
@@ -160,18 +163,34 @@ const OVERLAY_SCRIPT: &str = r#"
             if (window.gemini_rpc) window.gemini_rpc("push_data:" + JSON.stringify(payload));
         };
 
-        // 자동 실행
-        window.addEventListener('load', autoExtract);
-        window.addEventListener('pageshow', autoExtract);
+        // 자동 실행 및 상태 유지
+        if (document.readyState === 'complete') {
+            autoExtract();
+        } else {
+            window.addEventListener('load', autoExtract);
+        }
 
         window.addEventListener('gemini_rpc_response', (e) => {
-            log.innerHTML += `<div style="color:blue"><strong>AI:</strong> ${e.detail}</div>`;
+            if (log) {
+                log.innerHTML += `<div style="color:blue"><strong>AI:</strong> ${e.detail}</div>`;
+            }
         });
     }
 
-    // 모든 탭/페이지 이동마다 UI 재초기화
-    window.addEventListener('load', initUI);
-    window.addEventListener('pageshow', initUI);
+    // 초기화 호출부 강화 (iframe 체크 추가)
+    if (window.self === window.top) {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initUI);
+        } else {
+            initUI();
+        }
+
+        window.addEventListener('pageshow', (event) => {
+            if (event.persisted) {
+                initUI();
+            }
+        });
+    }
 
 })();
 "#;
@@ -262,18 +281,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port_arg_str = port_arg.as_str();
     args.push(port_arg_str);
 
-    // 인증 여부에 따른 초기 URL 설정 및 args 추가
+    // 인증 여부에 따른 초기 URL 설정 (args에는 추가하지 않음)
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
     let auth_path = std::path::PathBuf::from(home).join(".gemini/oauth_creds.json");
     let is_authenticated = auth_path.exists();
-    let target_url = if is_authenticated { "https://www.google.com" } else { "https://aistudio.google.com/" };
-    args.push(target_url);
+    let start_url = if is_authenticated { "https://www.google.com" } else { "https://aistudio.google.com/" };
 
     let config = BrowserConfig::builder()
         .with_head()
         .no_sandbox()
-        .viewport(None) // 뷰포트 제한 해제
-        .args(args)
+        .viewport(None)
+        .args(args) // URL을 인자에서 제외하여 중복 실행 방지
         .build()
         .map_err(|e| format!("Config error: {}", e))?;
     let (browser, mut handler) = Browser::launch(config).await?;
@@ -302,20 +320,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-    // 인증 체크
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
-    let auth_path = PathBuf::from(home).join(".gemini/oauth_creds.json");
-    let is_authenticated = auth_path.exists();
 
-    let start_url = if is_authenticated {
-        "https://www.google.com"
-    } else {
+    if !is_authenticated {
         println!("[Rust] Authentication required. Redirecting to login...");
-        "https://aistudio.google.com/"
-    };
+    }
 
-    let initial_page = browser.new_page(start_url).await?;
-    setup_page(browser.clone(), initial_page).await?;
+    // 첫 번째 페이지 가져오기 및 초기 URL 이동
+    // 별도의 setup_page 호출 없이 URL 이동만 수행하면 상단의 target_events 리스너가 이를 감지하여 처리함
+    let pages = browser.pages().await?;
+    if let Some(page) = pages.first() {
+        page.goto(start_url).await?;
+    } else {
+        browser.new_page(start_url).await?;
+    }
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => println!("\n[Rust] Shutting down..."),
         _ = rx.recv() => println!("\n[Rust] Browser closed, shutting down..."),
