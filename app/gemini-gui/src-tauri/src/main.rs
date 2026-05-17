@@ -1,53 +1,80 @@
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::handler::viewport::Viewport;
-use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+use chromiumoxide::cdp::browser_protocol::browser::{GetWindowForTargetParams, SetWindowBoundsParams, Bounds, WindowState};
+use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams};
 use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, SetDiscoverTargetsParams};
 use chromiumoxide::cdp::js_protocol::runtime::{AddBindingParams, EventBindingCalled};
 use futures::StreamExt;
-use std::process::Stdio;
 use tokio::process::Command;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::io::{self, Write};
+use include_dir::{include_dir, Dir};
 
-// [보강된 OVERLAY_SCRIPT]
+static CLI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../../cli/omg");
+
+fn extract_cli() -> PathBuf {
+    let temp_dir = std::env::temp_dir().join("gemini-cli-bundle");
+    if !temp_dir.exists() {
+        CLI_DIR.extract(&temp_dir).expect("Failed to extract CLI");
+    }
+    temp_dir
+}
+
+// 초기 렌더링 강제 동기화 (창 크기 강제 재설정하여 브라우저 레이아웃 강제 갱신)
+async fn force_layout_refresh(page: &chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
+    let target_id = page.target_id().clone();
+    let browser = page.browser();
+    
+    // 현재 창 정보 조회
+    let window_info = browser.execute(GetWindowForTargetParams::builder().target_id(target_id).build()?).await?;
+    let window_id = window_info.window_id;
+
+    // 현재 경계 값을 살짝만 재설정해서 브라우저가 레이아웃을 다시 그리게 함
+    let bounds = window_info.bounds;
+    let new_bounds = Bounds::builder()
+        .left(bounds.left)
+        .top(bounds.top)
+        .width(bounds.width)
+        .height(bounds.height)
+        .window_state(WindowState::Normal)
+        .build()?;
+
+    browser.execute(
+        SetWindowBoundsParams::builder()
+            .window_id(window_id)
+            .bounds(new_bounds)
+            .build()?
+    ).await?;
+    
+    Ok(())
+}
+
 const OVERLAY_SCRIPT: &str = r#"
 (function() {
-    console.log("[Gemini-JS] Sidebar Script Loading...");
     if (window.geminiSidebarLoaded) return;
     window.geminiSidebarLoaded = true;
 
     function initUI() {
-        console.log("[Gemini-JS] Initializing UI...");
         const existing = document.getElementById('gemini-agent-host');
         if (existing) existing.remove();
 
         const host = document.createElement('div');
         host.id = 'gemini-agent-host';
-        // 호스트 자체가 공간을 차지하지 않도록 고정 위치 설정
-        host.style.cssText = 'position:fixed; top:0; right:0; width:0; height:0; z-index:2147483647; overflow:visible;';
+        host.style.cssText = 'position:fixed; top:0; right:0; bottom:0; width:0; z-index:2147483647; pointer-events:none;';
         document.body.appendChild(host);
         
         const shadow = host.attachShadow({ mode: 'open' });
         shadow.innerHTML = `
             <style>
                 #agent-container { 
-                    position: fixed; 
-                    top: 0; 
-                    right: 0; 
-                    bottom: 0; /* 100vh 대신 top/bottom 0으로 전체 높이 확보 */
-                    width: 350px; 
-                    z-index: 2147483647;
-                    background: white; 
-                    border-left: 1px solid #ccc;
-                    display: flex; 
-                    flex-direction: column;
-                    transition: transform 0.3s ease; 
-                    transform: translateX(100%);
+                    position: fixed; top: 0; right: 0; bottom: 0; 
+                    width: 350px; z-index: 2147483647;
+                    background: white; border-left: 1px solid #ccc;
+                    display: flex; flex-direction: column;
+                    transition: transform 0.3s ease; transform: translateX(100%);
                     box-shadow: -5px 0 15px rgba(0,0,0,0.1);
-                    visibility: visible !important;
-                    pointer-events: auto;
+                    visibility: visible !important; pointer-events: auto;
                 }
                 #agent-container.open { transform: translateX(0); }
                 #toggle-btn { 
@@ -56,29 +83,17 @@ const OVERLAY_SCRIPT: &str = r#"
                     border-radius: 50%; cursor: pointer; z-index: 2147483647;
                     display: flex; align-items: center; justify-content: center;
                     border: 4px solid white; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-                    visibility: visible !important;
+                    pointer-events: auto;
                 }
-                header { 
-                    padding: 15px; background: #f0f0f0; font-weight: bold; color: #000; 
-                    border-bottom: 1px solid #ddd; flex-shrink: 0;
-                }
-                .content { 
-                    flex: 1; padding: 15px; overflow-y: auto; 
-                    background: #fff; color: #000; font-family: sans-serif;
-                    box-sizing: border-box;
-                }
-                .footer { 
-                    padding: 15px; background: #f8f9fa; border-top: 1px solid #eee; 
-                    flex-shrink: 0;
-                }
+                header { padding: 15px; background: #f0f0f0; font-weight: bold; color: #000; border-bottom: 1px solid #ddd; flex-shrink: 0; }
+                .content { flex: 1; padding: 15px; overflow-y: auto; background: #fff; color: #000; box-sizing: border-box; }
+                .footer { padding: 15px; background: #f8f9fa; border-top: 1px solid #eee; flex-shrink: 0; }
                 input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
             </style>
             <button id="toggle-btn">AI</button>
             <div id="agent-container">
-                <header>Gemini Agent (v0.9.1)</header>
-                <div class="content" id="log">
-                    <div style="color: #666; font-style: italic;">연결됨. 명령을 입력하세요.</div>
-                </div>
+                <header>Gemini Agent (Native Mode)</header>
+                <div class="content" id="log"><div>연결됨.</div></div>
                 <div class="footer">
                     <input type="text" id="cli-input" placeholder="메시지 입력...">
                 </div>
@@ -90,83 +105,45 @@ const OVERLAY_SCRIPT: &str = r#"
         const input = shadow.querySelector('#cli-input');
         const log = shadow.querySelector('#log');
 
-        toggleBtn.onclick = () => { 
-            console.log("[Gemini-JS] Opening Sidebar");
-            container.classList.add('open'); 
-            toggleBtn.style.display = 'none'; 
-        };
+        toggleBtn.onclick = () => { container.classList.add('open'); toggleBtn.style.display = 'none'; };
         
         input.onkeypress = async (e) => {
             if (e.key === 'Enter' && input.value) {
                 const cmd = input.value;
                 input.value = '';
-                const div = document.createElement('div');
-                div.style.marginBottom = '10px';
-                div.innerHTML = '<strong>You:</strong> ' + cmd;
-                log.appendChild(div);
-                log.scrollTop = log.scrollHeight;
-                
-                if (window.gemini_rpc) {
-                    window.gemini_rpc(cmd);
-                }
+                log.innerHTML += `<div><strong>You:</strong> ${cmd}</div>`;
+                if (window.gemini_rpc) window.gemini_rpc(cmd);
             }
         };
 
         window.addEventListener('gemini_rpc_response', (e) => {
-            const div = document.createElement('div');
-            div.style.marginBottom = '10px';
-            div.style.color = '#0056b3';
-            div.innerHTML = '<strong>AI:</strong> ' + e.detail;
-            log.appendChild(div);
-            log.scrollTop = log.scrollHeight;
+            log.innerHTML += `<div style="color:blue"><strong>AI:</strong> ${e.detail}</div>`;
         });
-
-        // 레이아웃 강제 업데이트 함수
-        function updateLayout() {
-            const h = window.innerHeight;
-            container.style.height = h + 'px';
-            console.log("[Gemini-JS] Layout updated: " + window.innerWidth + "x" + h);
-        }
-
-        window.addEventListener('resize', updateLayout);
-        updateLayout(); // 초기 실행
-
-        console.log("[Gemini-JS] UI Initialized with robust resizing.");
     }
 
-    if (document.body) initUI();
-    else window.addEventListener('DOMContentLoaded', initUI);
+    if (document.readyState === 'complete') initUI();
+    else window.addEventListener('load', initUI);
 })();
 "#;
 
 async fn setup_page(page: chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
-    let url = page.url().await?.unwrap_or_else(|| "unknown".to_string());
-    println!("[Rust] >>> Setting up page: {}", url);
-    io::stdout().flush().unwrap();
-
-    // 1. 바인딩 및 스크립트 설정
-    // Runtime.addBinding
-    page.execute(AddBindingParams::new("gemini_rpc")).await?;
-    // Page.addScriptToEvaluateOnNewDocument
-    page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await?;
+    // 1. 강제 갱신
+    let _ = force_layout_refresh(&page).await;
     
-    // 2. 즉시 실행 (현재 페이지가 이미 로드된 경우)
+    page.execute(EnableParams::default()).await?;
+    page.execute(AddBindingParams::new("gemini_rpc")).await?;
+    page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await?;
     let _ = page.evaluate(OVERLAY_SCRIPT).await;
 
-    // 3. 바인딩 리스너
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
     tokio::task::spawn(async move {
         while let Some(event) = bindings.next().await {
             if event.name == "gemini_rpc" {
-                println!("[Rust] Received RPC call: {}", event.payload);
-                io::stdout().flush().unwrap();
-                
                 let response = match execute_cli(event.payload.clone()).await {
                     Ok(res) => res,
                     Err(e) => format!("Error: {}", e),
                 };
-                
                 let script = format!(
                     "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
                     json!(response)
@@ -175,88 +152,57 @@ async fn setup_page(page: chromiumoxide::Page) -> Result<(), Box<dyn std::error:
             }
         }
     });
-
-    println!("[Rust] >>> Page setup complete for {}", url);
-    io::stdout().flush().unwrap();
     Ok(())
 }
 
 async fn execute_cli(command: String) -> Result<String, String> {
-    let path = get_creds_path()?;
+    let cli_path = extract_cli();
+    let index_js = cli_path.join("index.js");
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map_err(|e| e.to_string())?;
+    let path = PathBuf::from(home).join(".gemini/oauth_creds.json");
     
     let output = Command::new("node")
-        .arg("../../../cli/omg/index.js")
+        .arg(index_js)
         .arg(&command)
         .env("GEMINI_AUTH_FILE", path.to_str().unwrap())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e: std::io::Error| e.to_string())?;
+        .output().await.map_err(|e| e.to_string())?;
     
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
-}
-
-fn get_creds_path() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map_err(|e| e.to_string())?;
-    let mut path = PathBuf::from(home);
-    path.push(".gemini");
-    path.push("oauth_creds.json");
-    Ok(path)
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("[Rust] Initializing Gemini Browser (v0.9.1)...");
-    io::stdout().flush().unwrap();
-
+    println!("[Rust] Initializing Gemini Browser...");
+    
     let config = BrowserConfig::builder()
         .with_head()
-        .viewport(Viewport {
-            width: 1280,
-            height: 720,
-            ..Default::default()
-        })
         .build()?;
 
     let (browser, mut handler) = Browser::launch(config).await?;
     let browser = Arc::new(browser);
 
-    // [중요] 핸들러 루프를 별도 스레드에서 가장 먼저 시작
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+    
+    // 핸들러 루프 태스크
     tokio::task::spawn(async move {
-        println!("[Rust] Handler loop started.");
-        io::stdout().flush().unwrap();
         while let Some(h) = handler.next().await {
-            if let Err(e) = h {
-                eprintln!("[Rust] Handler Error: {:?}", e);
-            }
+            if let Err(e) = h { eprintln!("[Rust] Handler Error: {:?}", e); break; }
         }
+        let _ = tx.send(()).await;
     });
 
-    // 타겟 감지 활성화
     browser.execute(SetDiscoverTargetsParams::new(true)).await?;
 
-    // 새 탭 감지 리스너
     let mut target_events = browser.event_listener::<EventTargetCreated>().await?;
-    let b_clone = browser.clone();
+    let b_target = browser.clone();
     
     tokio::task::spawn(async move {
-        println!("[Rust] Event listener started.");
-        io::stdout().flush().unwrap();
         while let Some(event) = target_events.next().await {
             if event.target_info.r#type == "page" {
                 let tid = event.target_info.target_id.clone();
-                let b_inner = b_clone.clone();
-                println!("[Rust] New page target detected: {:?}", tid);
-                io::stdout().flush().unwrap();
-                
+                let b_inner = b_target.clone();
                 tokio::task::spawn(async move {
-                    // 페이지 객체가 준비될 때까지 지연
-                    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     if let Ok(page) = b_inner.get_page(tid).await {
                         let _ = setup_page(page).await;
                     }
@@ -265,14 +211,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 초기 페이지 로드
     let initial_page = browser.new_page("https://www.google.com").await?;
     setup_page(initial_page).await?;
 
-    println!("[Rust] Initial page loaded. Press Ctrl+C to terminate.");
-    io::stdout().flush().unwrap();
-
-    tokio::signal::ctrl_c().await?;
-    println!("\n[Rust] Terminating...");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => println!("\n[Rust] Shutting down..."),
+        _ = rx.recv() => println!("\n[Rust] Browser closed, shutting down..."),
+    }
+    
     Ok(())
 }
