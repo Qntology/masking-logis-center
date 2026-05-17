@@ -1,8 +1,10 @@
 mod db;
 mod embedding;
-use privacy_filter_rs::{PrivacyFilterInference, PrivacySpan};
-use burn::backend::NdArray;
-use burn::backend::ndarray::NdArrayDevice;
+mod privacy_filter;
+
+use privacy_filter::{PrivacyFilterModel, viterbi::PrivacySpan};
+use candle_core::Device;
+
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams};
 use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, SetDiscoverTargetsParams};
@@ -368,10 +370,21 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
                     let data = &payload["push_data:".len()..];
                     match serde_json::from_str::<Vec<db::CommerceRecord>>(data) {
                         Ok(mut records) => {
+                            // 0. Device selection logic
+                            #[cfg(any(feature = "cuda", feature = "metal"))]
+                            let device = if cfg!(feature = "cuda") {
+                                Device::new_cuda(0).unwrap_or(Device::Cpu)
+                            } else if cfg!(feature = "metal") {
+                                Device::new_metal(0).unwrap_or(Device::Cpu)
+                            } else {
+                                Device::Cpu
+                            };
+                            #[cfg(not(any(feature = "cuda", feature = "metal")))]
+                            let device = Device::Cpu;
+
                             // 1. PII Masking
                             let privacy_model_path = std::path::PathBuf::from("..\\models\\privacy-filter");
-                            let device = NdArrayDevice::Cpu;
-                            if let Ok(privacy_engine) = PrivacyFilterInference::<NdArray>::load(&privacy_model_path, device) {
+                            if let Ok(privacy_engine) = PrivacyFilterModel::load(&privacy_model_path, &device) {
                                 println!("[Rust] Privacy Filter Loaded. Masking PII...");
                                 for record in &mut records {
                                     if let Ok(spans) = privacy_engine.predict(&record.context) {
@@ -384,7 +397,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
 
                             // 2. Push 요청 시에만 임베딩 모델을 메모리에 로드합니다.
                             let model_path = std::path::PathBuf::from("..\\models\\embeddings");
-                            match embedding::EmbeddingModel::new(model_path) {
+                            match embedding::EmbeddingModel::new_with_device(model_path, &device) {
                                 Ok(model) => {
                                     for record in &mut records {
                                         match model.embed(&record.context) {
@@ -392,7 +405,6 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
                                             Err(e) => eprintln!("Embedding Error: {}", e),
                                         }
                                     }
-                                    // 스코프가 끝나면 model이 드롭되어 VRAM에서 해제됩니다.
                                 },
                                 Err(e) => eprintln!("Model load error: {}", e),
                             }
