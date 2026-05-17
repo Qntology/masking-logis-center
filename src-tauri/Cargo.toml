@@ -29,3 +29,4 @@ candle-core = "0.9.2"
 candle-nn = "0.9.2"
 tokenizers = "0.21.0"
 anyhow = "1.0.95"
+privacy-filter-rs = { path = "./src/privacy-filter", default-features = false, features = ["ndarray"] }

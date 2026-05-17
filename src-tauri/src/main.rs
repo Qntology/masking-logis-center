@@ -1,5 +1,8 @@
 mod db;
 mod embedding;
+use privacy_filter_rs::{PrivacyFilterInference, PrivacySpan};
+use burn::backend::NdArray;
+use burn::backend::ndarray::NdArrayDevice;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams};
 use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, SetDiscoverTargetsParams};
@@ -12,6 +15,21 @@ use std::sync::Arc;
 
 fn extract_cli() -> PathBuf {
     PathBuf::new() 
+}
+
+fn mask_pii(text: &str, spans: &[PrivacySpan]) -> String {
+    let mut masked_text = text.to_string();
+    let mut sorted_spans = spans.to_vec();
+    // Sort spans by start index in reverse to maintain offset correctness during replacement
+    sorted_spans.sort_by(|a, b| b.start.cmp(&a.start));
+
+    for span in sorted_spans {
+        if span.start < masked_text.len() && span.end <= masked_text.len() && span.start < span.end {
+            let mask = format!("[{}]", span.entity_group.to_uppercase());
+            masked_text.replace_range(span.start..span.end, &mask);
+        }
+    }
+    masked_text
 }
 
 const OVERLAY_SCRIPT: &str = r#"
@@ -311,7 +329,7 @@ const OVERLAY_SCRIPT: &str = r#"
 })();
 "#;
 
-async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, embedding_model: Arc<embedding::EmbeddingModel>) -> Result<(), Box<dyn std::error::Error>> {
+async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
     // RPC 바인딩 등록
     let _ = page.execute(AddBindingParams::new("gemini_rpc")).await;
     
@@ -320,7 +338,6 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, embedding_
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
     let browser_clone = browser.clone();
-    let model_clone = embedding_model.clone();
     tokio::task::spawn(async move {
         while let Some(event) = bindings.next().await {
             if event.name == "gemini_rpc" {
@@ -328,14 +345,10 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, embedding_
                 let response = if payload.starts_with("sync_data:") {
                     let data = &payload["sync_data:".len()..];
                     match serde_json::from_str::<db::CommerceRecord>(data) {
-                        Ok(mut record) => {
-                            // 임베딩 생성
-                            match model_clone.embed(&record.context) {
-                                Ok(vector) => record.vector = vector,
-                                Err(e) => eprintln!("Embedding Error: {}", e),
-                            }
+                        Ok(record) => {
+                            // 임시 저장(DRAFT) 시에는 임베딩 모델을 로드하지 않습니다.
                             match db::save_records(vec![record]).await {
-                                Ok(_) => "Data synced to LanceDB (DRAFT) with embedding.".to_string(),
+                                Ok(_) => "Data synced to LanceDB (DRAFT).".to_string(),
                                 Err(e) => format!("DB Error: {}", e),
                             }
                         },
@@ -354,9 +367,38 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, embedding_
                 } else if payload.starts_with("push_data:") {
                     let data = &payload["push_data:".len()..];
                     match serde_json::from_str::<Vec<db::CommerceRecord>>(data) {
-                        Ok(records) => {
+                        Ok(mut records) => {
+                            // 1. PII Masking
+                            let privacy_model_path = std::path::PathBuf::from("..\\models\\privacy-filter");
+                            let device = NdArrayDevice::Cpu;
+                            if let Ok(privacy_engine) = PrivacyFilterInference::<NdArray>::load(&privacy_model_path, device) {
+                                println!("[Rust] Privacy Filter Loaded. Masking PII...");
+                                for record in &mut records {
+                                    if let Ok(spans) = privacy_engine.predict(&record.context) {
+                                        record.context = mask_pii(&record.context, &spans);
+                                    }
+                                }
+                            } else {
+                                eprintln!("[Rust] Warning: Failed to load privacy filter model");
+                            }
+
+                            // 2. Push 요청 시에만 임베딩 모델을 메모리에 로드합니다.
+                            let model_path = std::path::PathBuf::from("..\\models\\embeddings");
+                            match embedding::EmbeddingModel::new(model_path) {
+                                Ok(model) => {
+                                    for record in &mut records {
+                                        match model.embed(&record.context) {
+                                            Ok(vector) => record.vector = vector,
+                                            Err(e) => eprintln!("Embedding Error: {}", e),
+                                        }
+                                    }
+                                    // 스코프가 끝나면 model이 드롭되어 VRAM에서 해제됩니다.
+                                },
+                                Err(e) => eprintln!("Model load error: {}", e),
+                            }
+                            
                             match db::save_records(records).await {
-                                Ok(_) => "Data pushed successfully.".to_string(),
+                                Ok(_) => "Data pushed successfully with PII masking and embeddings.".to_string(),
                                 Err(e) => format!("DB Error: {}", e),
                             }
                         },
@@ -393,17 +435,11 @@ async fn execute_cli(command: String) -> Result<String, String> {
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let port = 9222;
-    let port_arg = format!("--remote-debugging-port={}", port);
-    
     // 사용자가 요청한 클로저 기반 설정 로직 반영
-    let mut args = vec![
+    let args = vec![
         "--window-size=1920,1080", // 창 크기 강제 지정
         "--window-position=0,0",
         "--start-maximized", 
-        "--disable-gpu", 
-        "--disable-software-rasterizer",
-        "--disable-gpu-compositing",
         "--no-first-run",
         "--disable-notifications",
         "--disable-extensions",
@@ -417,20 +453,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "--remote-allow-origins=*",
         "--disable-dev-shm-usage",
     ];
-    
-    // 원격 디버깅 포트 추가
-    let port_arg_str = port_arg.as_str();
-    args.push(port_arg_str);
 
     // 인증 여부에 따른 초기 URL 설정
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
     let auth_path = std::path::PathBuf::from(home).join(".gemini/oauth_creds.json");
     let is_authenticated = auth_path.exists();
     let start_url = if is_authenticated { "https://www.google.com" } else { "https://aistudio.google.com/" };
-    
-    // 브라우저 실행 시 무조건 빈 탭(about:blank) 하나만 열리도록 강제합니다.
-    // 시작부터 URL을 넣으면, 스크립트를 주입하기 전에 페이지 로딩이 끝나버려서 버튼이 안 나오는 '경합(Race Condition)'이 발생합니다.
-    args.push("about:blank");
+
+    // chromiumoxide가 자체적으로 디버깅 포트와 초기 타겟(about:blank)을 
+    // 충돌 없이 할당하도록 포트 플래그 및 about:blank 인자를 제거했습니다.
 
     let config = BrowserConfig::builder()
         .with_head()
@@ -453,19 +484,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 브라우저 직접 실행 방식은 프로토콜 에러를 유발하므로 삭제합니다.
     // 대신 아래의 target_events 리스너 내부에서 페이지별로 설정을 주입합니다.
 
-    // 🌟 Embedding Model 초기화
-    let model_path = std::path::PathBuf::from("..\\models\\embeddings");
-    let embedding_model = Arc::new(embedding::EmbeddingModel::new(model_path).map_err(|e| format!("Model load error: {}", e))?);
-
     let mut target_events = browser.event_listener::<EventTargetCreated>().await?;
     let b_target = browser.clone();
-    let model_target = embedding_model.clone();
     tokio::task::spawn(async move {
         while let Some(event) = target_events.next().await {
             if event.target_info.r#type == "page" {
                 let tid = event.target_info.target_id.clone();
                 let b_inner = b_target.clone();
-                let model_inner = model_target.clone();
                 tokio::task::spawn(async move {
                     // CDP 연결 확보를 위한 최소한의 시간 대기
                     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -476,7 +501,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await;
                         
                         // 특정 페이지 로딩 상태(예: DOMContentLoaded)까지 기다리지 않고 즉시 셋업 시도
-                        let _ = setup_page(b_inner.clone(), page, model_inner).await;
+                        let _ = setup_page(b_inner.clone(), page).await;
                     }
                 });
             }
@@ -494,7 +519,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 모든 새 문서에 스크립트가 자동 실행되도록 브라우저 내부 설정
             let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await;
             // RPC 바인딩 및 이벤트 리스너 세팅
-            let _ = setup_page(browser.clone(), page.clone(), embedding_model.clone()).await;
+            let _ = setup_page(browser.clone(), page.clone()).await;
             
             // 모든 세팅이 완료된 이후에 수동으로 타겟 URL로 이동시킵니다.
             // 이렇게 해야 페이지가 새로 로드되면서 이미 예약된 스크립트가 100% 동작하여 버튼이 노출됩니다.
