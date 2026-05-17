@@ -298,9 +298,10 @@ impl PrivacyFilterModel {
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(anyhow::Error::msg)?;
         
         let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_dir.join("model.safetensors")], dtype, device)? };
+        let vb_cpu = unsafe { VarBuilder::from_mmaped_safetensors(&[model_dir.join("model.safetensors")], dtype, &Device::Cpu)? };
+        let embed_tokens = candle_nn::embedding(config.vocab_size, config.hidden_size, vb_cpu.pp("model.embed_tokens"))?;
 
-        let embed_tokens = candle_nn::embedding(config.vocab_size, config.hidden_size, vb.pp("model.embed_tokens"))?;
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_dir.join("model.safetensors")], dtype, device)? };
         let layers = (0..config.num_hidden_layers).map(|i| TransformerLayer::new(&config, vb.pp(format!("model.layers.{}", i)))).collect::<Result<Vec<_>>>()?;
         let norm = RmsNorm::new(config.hidden_size, config.rms_norm_eps, vb.pp("model.norm"))?;
         let score_weight = vb.get((config.num_labels(), config.hidden_size), "score.weight")?.transpose(0, 1)?;
@@ -311,7 +312,8 @@ impl PrivacyFilterModel {
     }
 
     pub fn forward(&self, input_ids: &[u32]) -> candle_core::Result<Tensor> {
-        let mut x = self.embed_tokens.forward(&Tensor::new(input_ids, &self.device)?)?.unsqueeze(0)?;
+        // Look up on CPU, then move to device
+        let mut x = self.embed_tokens.forward(&Tensor::new(input_ids, &Device::Cpu)?)?.to_device(&self.device)?.unsqueeze(0)?;
         
         let rope = RotaryEmbedding::new_yarn(&self.config.rope_parameters, self.config.head_dim, input_ids.len(), self.dtype, &self.device).map_err(candle_core::Error::msg)?;
         let mask = create_sliding_window_mask(input_ids.len(), self.config.sliding_window, &self.device)?.to_dtype(self.dtype)?;

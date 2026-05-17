@@ -17,7 +17,7 @@ warning: unused import: `Tensor`
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: `gemini-gui` (bin "test_masking") generated 1 warning (run `cargo fix --bin "test_masking" -p gemini-gui` to apply 1 suggestion)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 54s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 48s
      Running `target\debug\test_masking.exe`
 [Test] Loading model on Cuda(CudaDevice(DeviceId(1))) from "..\\models\\privacy-filter"...
 
