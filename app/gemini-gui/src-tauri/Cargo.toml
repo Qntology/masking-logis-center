@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # tauri-build = { version = "2", features = [] }
 
 [dependencies]
-chromiumoxide = { version = "0.9.1", features = ["tokio", "default"] }
+chromiumoxide = { version = "0.9.1", features = ["default"] }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

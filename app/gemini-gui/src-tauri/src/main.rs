@@ -13,113 +13,147 @@ use std::sync::Arc;
 // Overlay Script for Injection
 const OVERLAY_SCRIPT: &str = r#"
 (function() {
-    if (window.geminiSidebarLoaded) return;
+    console.log("[Gemini] Injection script started");
+    if (window.geminiSidebarLoaded) {
+        console.log("[Gemini] Sidebar already loaded, skipping");
+        return;
+    }
     window.geminiSidebarLoaded = true;
 
-    const host = document.createElement('div');
-    host.id = 'gemini-agent-host';
-    document.body.appendChild(host);
-    const shadow = host.attachShadow({ mode: 'open' });
-    shadow.innerHTML = `
-        <style>
-            #agent-container { 
-                position: fixed; top: 0; right: 0; 
-                width: 350px; height: 100vh; z-index: 999999;
-                background: white; border-left: 1px solid #ccc; box-shadow: -2px 0 10px rgba(0,0,0,0.1);
-                display: flex; flex-direction: column; overflow: hidden; font-family: sans-serif;
-                transition: transform 0.3s ease;
-                transform: translateX(100%);
-            }
-            #agent-container.open {
-                transform: translateX(0);
-            }
-            #toggle-btn { 
-                position: fixed; bottom: 20px; right: 20px; 
-                width: 50px; height: 50px; background: #007bff; color: white;
-                border-radius: 50%; cursor: pointer; z-index: 1000000;
-                display: flex; align-items: center; justify-content: center;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-                border: none; font-weight: bold; font-size: 14px;
-            }
-            header { background: #f8f9fa; padding: 15px; border-bottom: 1px solid #eee; font-weight: bold; display: flex; justify-content: space-between; }
-            .content { flex: 1; padding: 15px; overflow-y: auto; font-size: 13px; line-height: 1.5; }
-            .footer { padding: 15px; border-top: 1px solid #eee; background: #fff; }
-            input { width: 100%; padding: 8px; box-sizing: border-box; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; }
-            button#run-btn { width: 100%; padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
-            button#run-btn:hover { background: #0056b3; }
-            .log-entry { margin-bottom: 8px; padding: 5px; border-radius: 4px; }
-            .log-user { background: #e7f3ff; text-align: right; }
-            .log-ai { background: #f1f1f1; }
-        </style>
-        <button id="toggle-btn">AI</button>
-        <div id="agent-container">
-            <header>
-                <span>Gemini Agent</span>
-                <button id="close-btn" style="background:none; border:none; cursor:pointer;">&times;</button>
-            </header>
-            <div class="content" id="log">
-                <div class="log-entry log-ai">준비되었습니다. 무엇을 도와드릴까요?</div>
-            </div>
-            <div class="footer">
-                <input type="text" id="cli-input" placeholder="명령어 또는 질문 입력...">
-                <button id="run-btn">실행</button>
-            </div>
-        </div>
-    `;
-
-    const container = shadow.querySelector('#agent-container');
-    const toggleBtn = shadow.querySelector('#toggle-btn');
-    const closeBtn = shadow.querySelector('#close-btn');
-    const input = shadow.querySelector('#cli-input');
-    const runBtn = shadow.querySelector('#run-btn');
-    const log = shadow.querySelector('#log');
-
-    const addLog = (text, role) => {
-        const div = document.createElement('div');
-        div.className = `log-entry log-${role}`;
-        div.innerText = text;
-        log.appendChild(div);
-        log.scrollTop = log.scrollHeight;
-    };
-
-    toggleBtn.onclick = () => {
-        container.classList.add('open');
-        toggleBtn.style.display = 'none';
-    };
-
-    closeBtn.onclick = () => {
-        container.classList.remove('open');
-        toggleBtn.style.display = 'flex';
-    };
-
-    // 응답 수신 대기
-    window.addEventListener('gemini_rpc_response', (e) => {
-        addLog(e.detail, 'ai');
-    });
-
-    runBtn.onclick = async () => {
-        const cmd = input.value;
-        if (!cmd) return;
+    try {
+        const host = document.createElement('div');
+        host.id = 'gemini-agent-host';
+        // Ensure host itself doesn't affect layout
+        host.style.position = 'fixed';
+        host.style.zIndex = '2147483647'; // Max z-index
+        document.body.appendChild(host);
         
-        addLog(cmd, 'user');
-        input.value = '';
-        
-        if (window.gemini_rpc) {
-            try {
-                // Runtime.addBinding은 동기적으로 호출되지만 리턴값을 주지 않음.
-                // 그래서 위에서 이벤트를 대기함.
-                window.gemini_rpc(cmd);
-            } catch (e) {
-                addLog("에러: " + e, 'ai');
-            }
-        } else {
-            addLog("RPC 연결 실패 (백엔드 확인 필요)", 'ai');
-        }
-    };
+        console.log("[Gemini] Host element created and appended to body");
 
-    input.onkeypress = (e) => {
-        if (e.key === 'Enter') runBtn.click();
-    };
+        const shadow = host.attachShadow({ mode: 'open' });
+        console.log("[Gemini] Shadow root attached");
+
+        shadow.innerHTML = `
+            <style>
+                :host {
+                    all: initial; /* Reset all inherited styles for the host */
+                }
+                #agent-container { 
+                    position: fixed; top: 0; right: 0; 
+                    width: 350px; height: 100vh; z-index: 2147483647;
+                    background: white !important; 
+                    border-left: 1px solid #ccc !important; 
+                    box-shadow: -2px 0 10px rgba(0,0,0,0.1) !important;
+                    display: flex !important; 
+                    flex-direction: column !important; 
+                    overflow: hidden !important; 
+                    font-family: sans-serif !important;
+                    transition: transform 0.3s ease !important;
+                    transform: translateX(100%);
+                    visibility: visible !important;
+                }
+                #agent-container.open {
+                    transform: translateX(0) !important;
+                }
+                #toggle-btn { 
+                    position: fixed; bottom: 20px; right: 20px; 
+                    width: 60px; height: 60px; background: #007bff !important; color: white !important;
+                    border-radius: 50% !important; cursor: pointer !important; z-index: 2147483647;
+                    display: flex !important; align-items: center !important; justify-content: center !important;
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.3) !important;
+                    border: 2px solid white !important; 
+                    font-weight: bold !important; font-size: 16px !important;
+                    visibility: visible !important;
+                }
+                header { background: #f8f9fa; padding: 15px; border-bottom: 1px solid #eee; font-weight: bold; display: flex; justify-content: space-between; color: black; }
+                .content { flex: 1; padding: 15px; overflow-y: auto; font-size: 13px; line-height: 1.5; background: white; color: black; }
+                .footer { padding: 15px; border-top: 1px solid #eee; background: #f8f9fa; }
+                input { width: 100%; padding: 10px; box-sizing: border-box; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; background: white; color: black; }
+                button#run-btn { width: 100%; padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+                button#run-btn:hover { background: #0056b3; }
+                .log-entry { margin-bottom: 8px; padding: 8px; border-radius: 4px; word-break: break-all; }
+                .log-user { background: #e7f3ff; text-align: right; color: #0056b3; }
+                .log-ai { background: #f1f1f1; color: #333; }
+            </style>
+            <button id="toggle-btn" title="Open Gemini AI">AI</button>
+            <div id="agent-container">
+                <header>
+                    <span>Gemini Agent</span>
+                    <button id="close-btn" style="background:none; border:none; cursor:pointer; font-size: 20px;">&times;</button>
+                </header>
+                <div class="content" id="log">
+                    <div class="log-entry log-ai">준비되었습니다. 무엇을 도와드릴까요? (v0.9.1)</div>
+                </div>
+                <div class="footer">
+                    <input type="text" id="cli-input" placeholder="명령어 또는 질문 입력...">
+                    <button id="run-btn">실행</button>
+                </div>
+            </div>
+        `;
+
+        const container = shadow.querySelector('#agent-container');
+        const toggleBtn = shadow.querySelector('#toggle-btn');
+        const closeBtn = shadow.querySelector('#close-btn');
+        const input = shadow.querySelector('#cli-input');
+        const runBtn = shadow.querySelector('#run-btn');
+        const log = shadow.querySelector('#log');
+
+        console.log("[Gemini] UI Elements initialized within shadow root");
+
+        const addLog = (text, role) => {
+            const div = document.createElement('div');
+            div.className = `log-entry log-${role}`;
+            div.innerText = text;
+            log.appendChild(div);
+            log.scrollTop = log.scrollHeight;
+        };
+
+        toggleBtn.onclick = () => {
+            console.log("[Gemini] Sidebar opened");
+            container.classList.add('open');
+            toggleBtn.style.display = 'none';
+        };
+
+        closeBtn.onclick = () => {
+            console.log("[Gemini] Sidebar closed");
+            container.classList.remove('open');
+            toggleBtn.style.display = 'flex';
+        };
+
+        window.addEventListener('gemini_rpc_response', (e) => {
+            console.log("[Gemini] Received RPC response:", e.detail);
+            addLog(e.detail, 'ai');
+        });
+
+        runBtn.onclick = async () => {
+            const cmd = input.value;
+            if (!cmd) return;
+            
+            console.log("[Gemini] Sending command:", cmd);
+            addLog(cmd, 'user');
+            input.value = '';
+            
+            if (window.gemini_rpc) {
+                try {
+                    window.gemini_rpc(cmd);
+                } catch (e) {
+                    console.error("[Gemini] RPC call failed:", e);
+                    addLog("에러: " + e, 'ai');
+                }
+            } else {
+                console.warn("[Gemini] window.gemini_rpc not found");
+                addLog("RPC 연결 실패 (백엔드 확인 필요)", 'ai');
+            }
+        };
+
+        input.onkeypress = (e) => {
+            if (e.key === 'Enter') runBtn.click();
+        };
+        
+        console.log("[Gemini] Sidebar setup complete and visible");
+    } catch (err) {
+        console.error("[Gemini] Critical error during injection:", err);
+    }
 })();
 "#;
 
@@ -127,7 +161,7 @@ async fn execute_cli(command: String) -> Result<String, String> {
     let path = get_creds_path()?;
     
     let output = Command::new("node")
-        .arg("../../cli/omg/index.js")
+        .arg("../../../cli/omg/index.js")
         .arg(&command)
         .env("GEMINI_AUTH_FILE", path.to_str().unwrap())
         .stdout(Stdio::piped())
