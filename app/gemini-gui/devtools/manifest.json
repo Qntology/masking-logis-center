@@ -1,7 +1,0 @@
-{
-  "manifest_version": 3,
-  "name": "Gemini Agent DevTools",
-  "version": "1.0",
-  "devtools_page": "devtools.html",
-  "permissions": ["tabs", "scripting"]
-}

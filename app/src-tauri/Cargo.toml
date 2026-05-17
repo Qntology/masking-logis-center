@@ -14,8 +14,8 @@ edition = "2021"
 name = "gemini_gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# Remove tauri-build
-# tauri-build = { version = "2", features = [] }
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
 
 [dependencies]
 chromiumoxide = { version = "0.9.1", features = ["default"] }
@@ -31,8 +31,8 @@ uuid = { version = "1.23.1", features = ["v4"] }
 sha2 = "0.11.0"
 async-trait = "0.1"
 include_dir = "0.7"
-# Remove tauri related dependencies
-# tauri = { version = "2", features = [] }
-# tauri-plugin-opener = "2"
-# tauri-plugin-oauth = "2.0.0"
+# "all" 기능을 제거하고 v2에서 유효한 기능들로 구성합니다.
+tauri = { version = "2.11.2", features = ["wry", "tray-icon"] }
+tauri-plugin-opener = "2.0.0"
+tauri-plugin-oauth = "2.0.0"
 
