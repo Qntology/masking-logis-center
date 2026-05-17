@@ -1,5 +1,4 @@
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::cdp::browser_protocol::browser::{GetWindowForTargetParams, SetWindowBoundsParams, Bounds, WindowState};
 use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams};
 use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, SetDiscoverTargetsParams};
 use chromiumoxide::cdp::js_protocol::runtime::{AddBindingParams, EventBindingCalled};
@@ -8,7 +7,6 @@ use tokio::process::Command;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::io::{self, Write};
 use include_dir::{include_dir, Dir};
 
 static CLI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../../cli/omg");
@@ -19,35 +17,6 @@ fn extract_cli() -> PathBuf {
         CLI_DIR.extract(&temp_dir).expect("Failed to extract CLI");
     }
     temp_dir
-}
-
-// 초기 렌더링 강제 동기화 (창 크기 강제 재설정하여 브라우저 레이아웃 강제 갱신)
-async fn force_layout_refresh(page: &chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
-    let target_id = page.target_id().clone();
-    let browser = page.browser();
-    
-    // 현재 창 정보 조회
-    let window_info = browser.execute(GetWindowForTargetParams::builder().target_id(target_id).build()?).await?;
-    let window_id = window_info.window_id;
-
-    // 현재 경계 값을 살짝만 재설정해서 브라우저가 레이아웃을 다시 그리게 함
-    let bounds = window_info.bounds;
-    let new_bounds = Bounds::builder()
-        .left(bounds.left)
-        .top(bounds.top)
-        .width(bounds.width)
-        .height(bounds.height)
-        .window_state(WindowState::Normal)
-        .build()?;
-
-    browser.execute(
-        SetWindowBoundsParams::builder()
-            .window_id(window_id)
-            .bounds(new_bounds)
-            .build()?
-    ).await?;
-    
-    Ok(())
 }
 
 const OVERLAY_SCRIPT: &str = r#"
@@ -105,7 +74,10 @@ const OVERLAY_SCRIPT: &str = r#"
         const input = shadow.querySelector('#cli-input');
         const log = shadow.querySelector('#log');
 
-        toggleBtn.onclick = () => { container.classList.add('open'); toggleBtn.style.display = 'none'; };
+        toggleBtn.onclick = () => { 
+            console.log("[Gemini-JS] Requesting DevTools...");
+            if (window.gemini_rpc) window.gemini_rpc("open_devtools");
+        };
         
         input.onkeypress = async (e) => {
             if (e.key === 'Enter' && input.value) {
@@ -127,9 +99,6 @@ const OVERLAY_SCRIPT: &str = r#"
 "#;
 
 async fn setup_page(page: chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. 강제 갱신
-    let _ = force_layout_refresh(&page).await;
-    
     page.execute(EnableParams::default()).await?;
     page.execute(AddBindingParams::new("gemini_rpc")).await?;
     page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await?;
@@ -140,6 +109,11 @@ async fn setup_page(page: chromiumoxide::Page) -> Result<(), Box<dyn std::error:
     tokio::task::spawn(async move {
         while let Some(event) = bindings.next().await {
             if event.name == "gemini_rpc" {
+                if event.payload == "\"open_devtools\"" {
+                    println!("[Rust] DevTools requested - manual access only for this native mode.");
+                    continue;
+                }
+                
                 let response = match execute_cli(event.payload.clone()).await {
                     Ok(res) => res,
                     Err(e) => format!("Error: {}", e),
@@ -169,13 +143,33 @@ async fn execute_cli(command: String) -> Result<String, String> {
     
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[Rust] Initializing Gemini Browser...");
-    
+
+    // Dynamic port handling for remote debugging
+    let port = 9222; 
+    let port_arg = format!("--remote-debugging-port={}", port);
+
     let config = BrowserConfig::builder()
         .with_head()
+        .arg("--disable-device-emulation")
+        .arg("--start-maximized")
+        .arg("--disable-gpu")
+        .arg("--disable-software-rasterizer")
+        .arg("--disable-gpu-compositing")
+        .arg("--no-first-run")
+        .arg("--disable-notifications")
+        .arg("--disable-extensions")
+        .arg("--disable-popup-blocking")
+        .arg("--blink-settings=imagesEnabled=false")
+        .arg("--disable-blink-features=AutomationControlled")
+        .arg("--password-store=basic")
+        .arg("--no-default-browser-check")
+        .arg("--force-dark-mode")
+        .arg("--enable-features=WebUIDarkMode")
+        .arg(port_arg)
+        .arg("--remote-allow-origins=*")
         .build()?;
 
     let (browser, mut handler) = Browser::launch(config).await?;
