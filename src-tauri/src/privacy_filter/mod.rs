@@ -1,7 +1,7 @@
 pub mod config;
 pub mod viterbi;
 
-use candle_core::{DType, Device, Module, Tensor, IndexOp, Shape};
+use candle_core::{DType, Device, Module, Tensor, IndexOp};
 use candle_nn::{linear, VarBuilder, Embedding};
 use anyhow::Result;
 use std::path::Path;
@@ -104,10 +104,10 @@ impl RotaryEmbedding {
         Ok(Self { cos, sin })
     }
 
-    fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
+    fn forward(&self, x: &Tensor, seq_len: usize) -> candle_core::Result<Tensor> {
         let (b, h, s, d) = x.dims4()?;
-        let cos = self.cos.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?; // [1, 1, s, d/2]
-        let sin = self.sin.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?; // [1, 1, s, d/2]
+        let cos = self.cos.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?;
+        let sin = self.sin.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?;
 
         let x_pairs = x.reshape((b, h, s, d / 2, 2))?;
         let x0 = x_pairs.narrow(candle_core::D::Minus1, 0, 1)?.reshape((b, h, s, d / 2))?;
@@ -167,7 +167,7 @@ impl SparseMoE {
         for i in 0..(b * s) {
             for k in 0..self.num_experts_per_tok {
                 let expert_idx = indices_vec[i * self.num_experts_per_tok + k] as usize;
-                let weight = weights_vec[i * self.num_experts_per_tok + k] / (self.num_experts_per_tok as f32);
+                let weight = weights_vec[i * self.num_experts_per_tok + k] as f64;
                 expert_mask[expert_idx].push((i, weight));
             }
         }
@@ -196,12 +196,13 @@ impl SparseMoE {
             let expert_output = (expert_out_mid.matmul(&dp_w)?.broadcast_add(&dp_b))?;
 
             for (i, &(tidx, weight)) in tokens.iter().enumerate() {
-                let weighted = (expert_output.get(i)?.affine(weight as f64, 0.0))?;
-                final_out = final_out.slice_assign(&[tidx..tidx+1, 0..h], &weighted.unsqueeze(0)?)?;
+                let weighted = (expert_output.get(i)?.affine(weight, 0.0))?;
+                let current = final_out.get(tidx)?;
+                final_out = final_out.slice_assign(&[tidx..tidx+1, 0..h], &(current + weighted)?.unsqueeze(0)?)?;
             }
         }
         
-        final_out.reshape((b, s, h))
+        final_out.affine(self.num_experts_per_tok as f64, 0.0)?.reshape((b, s, h))
     }
 }
 
@@ -262,8 +263,8 @@ impl TransformerLayer {
         let mut k = self.k_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
         let mut v = self.v_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
         
-        let q = rope.forward(&q)?;
-        k = rope.forward(&k)?;
+        let q = rope.forward(&q, s)?;
+        k = rope.forward(&k, s)?;
 
         if let Some(cache) = cache {
             let pos = cache.current_pos;
@@ -284,7 +285,6 @@ impl TransformerLayer {
         let sinks = self.sinks.reshape((1, self.num_heads, 1, 1))?.expand((b, self.num_heads, s, 1))?;
         let combined = Tensor::cat(&[attn_weights, sinks], 3)?;
         
-        // Max-subtract for stability
         let max_vals = combined.max_keepdim(3)?;
         let combined = combined.broadcast_sub(&max_vals)?;
         
