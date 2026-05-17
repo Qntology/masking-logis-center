@@ -2,7 +2,7 @@ pub mod config;
 pub mod viterbi;
 
 use candle_core::{DType, Device, Module, Tensor};
-use candle_nn::{linear_no_bias, VarBuilder, Embedding};
+use candle_nn::{linear, VarBuilder, Embedding};
 use anyhow::Result;
 use std::path::Path;
 use tokenizers::Tokenizer;
@@ -100,7 +100,7 @@ impl RotaryEmbedding {
         Ok(Self { cos, sin })
     }
 
-    fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
+    fn forward(&self, x: &Tensor, seq_len: usize) -> candle_core::Result<Tensor> {
         let (b, h, s, d) = x.dims4()?;
         let cos = self.cos.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?;
         let sin = self.sin.narrow(0, 0, s)?.unsqueeze(0)?.unsqueeze(0)?;
@@ -112,8 +112,9 @@ impl RotaryEmbedding {
         let r0 = (x0.broadcast_mul(&cos)? - x1.broadcast_mul(&sin)?)?;
         let r1 = (x1.broadcast_mul(&cos)? + x0.broadcast_mul(&sin)?)?;
 
-        Tensor::cat(&[r0.unsqueeze(candle_core::D::Minus1)?, r1.unsqueeze(candle_core::D::Minus1)?], candle_core::D::Minus1)?
-            .reshape((b, h, s, d))
+        let res = Tensor::cat(&[r0.unsqueeze(candle_core::D::Minus1)?, r1.unsqueeze(candle_core::D::Minus1)?], candle_core::D::Minus1)?
+            .reshape((b, h, s, d))?;
+        Ok(res)
     }
 }
 
@@ -231,10 +232,10 @@ struct TransformerLayer {
 
 impl TransformerLayer {
     fn new(cfg: &ModelConfig, vb: VarBuilder, layer_idx: usize) -> Result<Self> {
-        let q_proj = linear_no_bias(cfg.hidden_size, cfg.num_attention_heads * cfg.head_dim, vb.pp("self_attn.q_proj"))?;
-        let k_proj = linear_no_bias(cfg.hidden_size, cfg.num_key_value_heads * cfg.head_dim, vb.pp("self_attn.k_proj"))?;
-        let v_proj = linear_no_bias(cfg.hidden_size, cfg.num_key_value_heads * cfg.head_dim, vb.pp("self_attn.v_proj"))?;
-        let o_proj = linear_no_bias(cfg.num_attention_heads * cfg.head_dim, cfg.hidden_size, vb.pp("self_attn.o_proj"))?;
+        let q_proj = linear(cfg.hidden_size, cfg.num_attention_heads * cfg.head_dim, vb.pp("self_attn.q_proj"))?;
+        let k_proj = linear(cfg.hidden_size, cfg.num_key_value_heads * cfg.head_dim, vb.pp("self_attn.k_proj"))?;
+        let v_proj = linear(cfg.hidden_size, cfg.num_key_value_heads * cfg.head_dim, vb.pp("self_attn.v_proj"))?;
+        let o_proj = linear(cfg.num_attention_heads * cfg.head_dim, cfg.hidden_size, vb.pp("self_attn.o_proj"))?;
         let sinks = vb.get(cfg.num_attention_heads, "self_attn.sinks")?;
         let input_layernorm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
         let post_attention_layernorm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("post_attention_layernorm"))?;
@@ -256,8 +257,8 @@ impl TransformerLayer {
         let mut k = self.k_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
         let mut v = self.v_proj.forward(&x_norm)?.reshape((b, s, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
         
-        let q = rope.forward(&q)?;
-        k = rope.forward(&k)?;
+        let q = rope.forward(&q, s)?;
+        k = rope.forward(&k, s)?;
 
         if let Some(cache) = cache {
             let pos = cache.current_pos;
