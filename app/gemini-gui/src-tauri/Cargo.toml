@@ -14,21 +14,24 @@ edition = "2021"
 name = "gemini_gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
+# Remove tauri-build
+# tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
+chromiumoxide = { version = "0.9.1", features = ["tokio", "default"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri-plugin-oauth = "2.0.0"
-tokio = { version = "1.52.3", features = ["full"] }
 lancedb = "0.29.0"
 json-patch = "3.0.1"
-futures = "0.3.32"
 similar = "3.1.0"
 arrow = "58.3.0"
 uuid = { version = "1.23.1", features = ["v4"] }
 sha2 = "0.11.0"
+async-trait = "0.1"
+# Remove tauri related dependencies
+# tauri = { version = "2", features = [] }
+# tauri-plugin-opener = "2"
+# tauri-plugin-oauth = "2.0.0"
 
