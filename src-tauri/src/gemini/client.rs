@@ -25,24 +25,37 @@ impl GeminiClient {
 
     async fn get_project_id(&self, token: &str) -> anyhow::Result<String> {
         let url = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
-        let payload = json!({"metadata": {}});
+        
+        // bb.rs의 discoverProjectId 로직을 Rust식으로 재구현
+        let payload = json!({
+            "cloudaicompanionProject": serde_json::Value::Null,
+            "metadata": {
+                "duetProject": serde_json::Value::Null
+            }
+        });
+
         let res = self.client.post(url)
-            .bearer_auth(token)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
             .json(&payload)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e| anyhow::anyhow!("프로젝트 검색 네트워크 오류: {}", e))?;
 
         if !res.status().is_success() {
-            let err = res.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Project discovery failed: {}", err));
+            let status = res.status();
+            let err_body = res.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("프로젝트 탐색 실패 ({}): {}", status, err_body));
         }
 
-        let v: serde_json::Value = res.json().await.map_err(|e| anyhow::anyhow!(e))?;
+        let v: serde_json::Value = res.json().await?;
+        
+        // 응답에서 프로젝트 ID 추출 (bb.rs와 동일한 로직)
         if let Some(project) = v["cloudaicompanionProject"].as_str() {
+            println!("[Gemini] 프로젝트 ID 발견: {}", project);
             Ok(project.to_string())
         } else {
-            Err(anyhow::anyhow!("No cloudaicompanionProject found in response"))
+            Err(anyhow::anyhow!("응답에서 cloudaicompanionProject를 찾을 수 없습니다. OAuth 설정을 확인하세요."))
         }
     }
 
@@ -110,17 +123,21 @@ impl GeminiClient {
         
         let payload = if is_oauth {
             let project_id = self.get_project_id(&token).await.map_err(|e| e.to_string())?;
+            
             json!({
                 "model": self.model,
                 "project": project_id,
                 "request": {
-                    "contents": messages
+                    "contents": messages,
+                    "generationConfig": {
+                        "temperature": 0.7,
+                        "maxOutputTokens": 2048
+                    }
+                    // 필요 시 여기에 tools나 safetySettings 추가 가능 (bb.rs 방식)
                 }
             })
         } else {
-            json!({
-                "contents": messages,
-            })
+            json!({ "contents": messages })
         };
 
         let request = self.client.post(url).json(&payload);

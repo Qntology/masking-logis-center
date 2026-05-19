@@ -51,8 +51,9 @@ async function saveMessage(channelId: string, role: 'user' | 'assistant', conten
   });
 
   try {
-    const result = await invoke<string>("execute_branching_cli", { 
-      command: JSON.stringify({ id, role, content, channel_id: channelId }) 
+    // Direct sync to Rust backend
+    const result = await invoke<string>("sync_data", { 
+      data: JSON.stringify({ id, role, content, channel_id: channelId }) 
     });
     console.log("Sync success:", result);
     
@@ -72,7 +73,13 @@ async function runCommand() {
   await saveMessage('trunk', 'user', content);
 
   try {
-    const output = await invoke<string>("execute_branching_cli", { command: content });
+    // Direct chat to Rust backend
+    const output = await invoke<string>("gemini_chat", { 
+      payload: JSON.stringify({
+        messages: [{ role: 'user', parts: [{ text: content }] }],
+        model: 'gemini-3.1-flash-lite-preview'
+      })
+    });
     outputEl.textContent = output;
   } catch (error) {
     outputEl.textContent = "Error: " + error;
