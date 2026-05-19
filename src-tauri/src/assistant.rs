@@ -1,4 +1,4 @@
-use crate::db::{search_context, CommerceRecord};
+use crate::db::{search_context};
 use crate::categorizer::Categorizer;
 use crate::privacy_filter::masking::{PrivacyManager, PrivacySession};
 use crate::gemini::client::GeminiClient;
@@ -44,13 +44,11 @@ impl Assistant {
             sorted_spans.sort_by(|a, b| b.start.cmp(&a.start));
 
             for span in sorted_spans {
-                let label = span.label.to_uppercase();
-                if matches!(label.as_str(), "B-CITY" | "I-CITY" | "E-CITY" | "S-CITY" | 
-                                           "B-COUNTY" | "I-COUNTY" | "E-COUNTY" | "S-COUNTY" |
-                                           "B-STATE" | "I-STATE" | "E-STATE" | "S-STATE") {
+                let label = span.entity_group.to_uppercase();
+                if matches!(label.as_str(), "CITY" | "COUNTY" | "STATE") {
                     continue; 
                 }
-                let placeholder = privacy_session.get_or_create_placeholder(&span.text, &label, idx);
+                let placeholder = privacy_session.get_or_create_placeholder(&span.word, &label, idx);
                 masked_text.replace_range(span.start..span.end, &placeholder);
             }
             masked_records.push(masked_text);

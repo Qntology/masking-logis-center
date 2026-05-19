@@ -1,5 +1,6 @@
 use crate::model::{State, Entity, Info, Component};
-use scraper::{Html, Selector, Node, ElementRef};
+use crate::domain::Domain;
+use scraper::{Html, Selector, Node};
 use std::collections::HashMap;
 
 pub trait Harness {
@@ -13,72 +14,73 @@ impl DefaultHarness {
         let document = Html::parse_document(html);
         let mut cleaned_html = String::new();
 
-        self.process_node(&document.tree, document.root_element(), &mut cleaned_html);
+        self.process_node(document.root_element().clone(), &mut cleaned_html);
         cleaned_html
     }
 
-    fn process_node(&self, tree: &scraper::node::Arena<scraper::Node>, node_id: scraper::node::NodeId, output: &mut String) {
-        let node = &tree[node_id];
-        match node {
-            scraper::Node::Element(element) => {
-                let tag = element.name();
-                
-                // Skip forbidden tags
-                if matches!(tag, "script" | "style" | "link" | "noscript" | "iframe" | "svg" | "meta" | "br" | "hr" | "source") {
-                    return;
-                }
+    fn process_node(&self, element_ref: scraper::ElementRef, output: &mut String) {
+        let element = element_ref.value();
+        let tag = element.name();
+        
+        // Skip forbidden tags
+        if matches!(tag, "script" | "style" | "link" | "noscript" | "iframe" | "svg" | "meta" | "br" | "hr" | "source") {
+            return;
+        }
 
-                // Handle <select> logic
-                if tag == "select" {
-                    output.push_str("<select>");
-                    for child in tree.children(node_id) {
-                        let child_node = &tree[child];
-                        if let Node::Element(child_el) = child_node {
-                            if child_el.name() == "option" {
-                                let is_selected = child_el.attr("selected").is_some();
-                                if is_selected {
-                                    output.push_str("<option selected>");
-                                    self.process_children(tree, child, output);
-                                    output.push_str("</option>");
+        // Handle <select> logic
+        if tag == "select" {
+            output.push_str("<select>");
+            for child in element_ref.children() {
+                if let Node::Element(child_el) = child.value() {
+                    if child_el.name() == "option" {
+                        let is_selected = child_el.attr("selected").is_some();
+                        if is_selected {
+                            output.push_str("<option selected>");
+                            for grandchild in child.children() {
+                                if let Node::Text(text) = grandchild.value() {
+                                    output.push_str(text);
                                 }
                             }
+                            output.push_str("</option>");
                         }
                     }
-                    output.push_str("</select>");
-                    return;
                 }
+            }
+            output.push_str("</select>");
+            return;
+        }
 
-                // Generic tag processing (strip attributes)
-                if tag == "input" {
-                    let mut attrs = Vec::new();
-                    for attr in &["value", "selected", "checked"] {
-                        if element.attr(attr).is_some() {
-                            attrs.push(format!("{}=\"{}\"", attr, element.attr(attr).unwrap()));
-                        }
-                    }
-                    if attrs.is_empty() {
-                        output.push_str(&format!("<{}>", tag));
-                    } else {
-                        output.push_str(&format!("<{} {}>", tag, attrs.join(" ")));
-                    }
-                } else {
-                    output.push_str(&format!("<{}>", tag));
+        // Generic tag processing (strip attributes)
+        if tag == "input" {
+            let mut attrs = Vec::new();
+            for attr in &["value", "selected", "checked"] {
+                if let Some(val) = element.attr(attr) {
+                    attrs.push(format!("{}=\"{}\"", attr, val));
                 }
-
-                self.process_children(tree, node_id, output);
-                output.push_str(&format!("</{}>", tag));
             }
-            scraper::Node::Text(text) => {
-                output.push_str(text);
+            if attrs.is_empty() {
+                output.push_str(&format!("<{}>", tag));
+            } else {
+                output.push_str(&format!("<{} {}>", tag, attrs.join(" ")));
             }
-            _ => {}
+        } else {
+            output.push_str(&format!("<{}>", tag));
         }
-    }
 
-    fn process_children(&self, tree: &scraper::node::Arena<scraper::Node>, node_id: scraper::node::NodeId, output: &mut String) {
-        for child in tree.children(node_id) {
-            self.process_node(tree, child, output);
+        for child in element_ref.children() {
+            match child.value() {
+                Node::Element(_) => {
+                    if let Some(child_ref) = scraper::ElementRef::wrap(child) {
+                        self.process_node(child_ref, output);
+                    }
+                }
+                Node::Text(text) => {
+                    output.push_str(text);
+                }
+                _ => {}
+            }
         }
+        output.push_str(&format!("</{}>", tag));
     }
 }
 
@@ -86,7 +88,6 @@ impl Harness for DefaultHarness {
     fn normalize(&self, raw_input: &str) -> Result<State, anyhow::Error> {
         let cleaned_html = self.clean_html(raw_input);
         
-        // Example: Map inputs to components
         let document = Html::parse_fragment(&cleaned_html);
         let input_selector = Selector::parse("input").unwrap();
         
@@ -103,6 +104,7 @@ impl Harness for DefaultHarness {
         
         let mut entities = HashMap::new();
         entities.insert("page_root".to_string(), Entity {
+            domain: Domain::Commerce, // Default
             info: Info {
                 name: "root".to_string(),
                 metadata: HashMap::new(),

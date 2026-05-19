@@ -4,6 +4,7 @@ use futures::StreamExt;
 use super::types::ChatMessage;
 use super::auth::get_auth_token;
 
+#[derive(Clone)]
 pub struct GeminiClient {
     client: Client,
     model: String,
@@ -20,6 +21,29 @@ impl GeminiClient {
     async fn get_auth_header(&self) -> Result<String, Box<dyn std::error::Error>> {
         // 실제 구현에서는 여기서 get_auth_token()으로 토큰을 얻고 필요시 갱신합니다.
         Ok(get_auth_token()?)
+    }
+
+    pub async fn generate_content(&self, prompt: &str) -> anyhow::Result<String> {
+        let token = self.get_auth_header().await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", self.model);
+        
+        let payload = json!({
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
+        });
+
+        let response = self.client.post(url)
+            .bearer_auth(token)
+            .json(&payload)
+            .send()
+            .await.map_err(|e| anyhow::anyhow!(e))?;
+
+        let v: serde_json::Value = response.json().await.map_err(|e| anyhow::anyhow!(e))?;
+        let text = v["candidates"][0]["content"]["parts"][0]["text"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Failed to extract text from Gemini response"))?;
+
+        Ok(text.to_string())
     }
 
     pub async fn stream_message<F>(&self, messages: Vec<ChatMessage>, mut on_chunk: F) -> Result<(), Box<dyn std::error::Error>> 

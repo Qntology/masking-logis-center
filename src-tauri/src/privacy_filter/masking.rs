@@ -43,7 +43,6 @@ impl PrivacySession {
 
     pub fn unmask_text(&self, text: &str) -> String {
         let mut result = text.to_string();
-        // Replace longest placeholders first to avoid partial matches
         let mut placeholders: Vec<_> = self.reverse_map.keys().collect();
         placeholders.sort_by(|a, b| b.len().cmp(&a.len()));
 
@@ -71,23 +70,17 @@ impl PrivacyManager {
             let spans = self.model.predict(&text)?;
             let mut masked_text = text.clone();
             
-            // Sort spans by start position in reverse to replace correctly
             let mut sorted_spans = spans;
             sorted_spans.sort_by(|a, b| b.start.cmp(&a.start));
 
             for span in sorted_spans {
-                let label = span.label.to_uppercase();
+                let label = span.entity_group.to_uppercase();
                 
-                // Selective Exposure Logic
-                // White-listed labels (Plain text)
-                if matches!(label.as_str(), "B-CITY" | "I-CITY" | "E-CITY" | "S-CITY" | 
-                                           "B-COUNTY" | "I-COUNTY" | "E-COUNTY" | "S-COUNTY" |
-                                           "B-STATE" | "I-STATE" | "E-STATE" | "S-STATE") {
+                if matches!(label.as_str(), "CITY" | "COUNTY" | "STATE") {
                     continue; 
                 }
 
-                // Masking targets
-                let placeholder = session.get_or_create_placeholder(&span.text, &label, idx);
+                let placeholder = session.get_or_create_placeholder(&span.word, &label, idx);
                 masked_text.replace_range(span.start..span.end, &placeholder);
             }
             results.push(masked_text);
