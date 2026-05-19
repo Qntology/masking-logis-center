@@ -80,8 +80,10 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
         
         // Domain Categorization
         if let Some(cat) = categorizer {
-            if let Ok(domain) = cat.classify_text(&record.context).await {
-                record.domain = domain.as_str().to_string();
+            if let Ok(json_res) = cat.preprocess_web(&record.context).await {
+                if let Some(domain_str) = json_res.get("domain").and_then(|v| v.as_str()) {
+                    record.domain = domain_str.to_uppercase();
+                }
             }
         }
     }

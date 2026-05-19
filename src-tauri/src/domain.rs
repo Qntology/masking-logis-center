@@ -5,6 +5,7 @@ pub enum Domain {
     Commerce,
     Logistics,
     Trade,
+    Other,
 }
 
 impl Domain {
@@ -13,6 +14,7 @@ impl Domain {
             Domain::Commerce => "COMMERCE",
             Domain::Logistics => "LOGISTICS",
             Domain::Trade => "TRADE",
+            Domain::Other => "OTHER",
         }
     }
 
@@ -21,7 +23,8 @@ impl Domain {
             "COMMERCE" => Some(Domain::Commerce),
             "LOGISTICS" => Some(Domain::Logistics),
             "TRADE" => Some(Domain::Trade),
-            _ => None,
+            "OTHER" => Some(Domain::Other),
+            _ => Some(Domain::Other), // 매칭 실패 시 기본값을 Other로 안전하게 처리
         }
     }
 }

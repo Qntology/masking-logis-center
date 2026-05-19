@@ -57,7 +57,7 @@ impl GeminiClient {
         }
     }
 
-    pub async fn generate_content(&self, prompt: &str) -> anyhow::Result<String> {
+    pub async fn generate_content(&self, prompt: &str, system_instruction: Option<&str>) -> anyhow::Result<String> {
         let token = self.get_auth_header().await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
         
         let is_oauth = token.starts_with("ya29.") || token.starts_with("ya29_");
@@ -68,23 +68,32 @@ impl GeminiClient {
             format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", self.model)
         };
         
+        let mut request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": prompt}]
+            }]
+        });
+
+        // 시스템 프롬프트가 주입된 경우 컨텍스트 엔지니어링 영역(systemInstruction) 추가
+        if let Some(sys_text) = system_instruction {
+            request_body.as_object_mut().unwrap().insert(
+                "systemInstruction".to_string(),
+                json!({
+                    "parts": [{"text": sys_text}]
+                })
+            );
+        }
+        
         let payload = if is_oauth {
             let project_id = self.get_project_id(&token).await?;
             json!({
                 "model": self.model,
                 "project": project_id,
-                "request": {
-                    "contents": [{
-                        "parts": [{"text": prompt}]
-                    }]
-                }
+                "request": request_body
             })
         } else {
-            json!({
-                "contents": [{
-                    "parts": [{"text": prompt}]
-                }]
-            })
+            request_body
         };
 
         let request = self.client.post(url).json(&payload);
@@ -96,6 +105,64 @@ impl GeminiClient {
 
         let response = request.send().await.map_err(|e| anyhow::anyhow!(e))?;
 
+        let v: serde_json::Value = response.json().await.map_err(|e| anyhow::anyhow!(e))?;
+        
+        let text = if is_oauth {
+            v["response"]["candidates"][0]["content"]["parts"][0]["text"].as_str()
+        } else {
+            v["candidates"][0]["content"]["parts"][0]["text"].as_str()
+        }.ok_or_else(|| anyhow::anyhow!("Failed to extract text from Gemini response"))?;
+
+        Ok(text.to_string())
+    }
+
+    pub async fn generate_content_with_image(&self, prompt: &str, mime_type: &str, base64_data: &str) -> anyhow::Result<String> {
+        let token = self.get_auth_header().await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let is_oauth = token.starts_with("ya29.") || token.starts_with("ya29_");
+        
+        let url = if is_oauth {
+            "https://cloudcode-pa.googleapis.com/v1internal:generateContent".to_string()
+        } else {
+            format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", self.model)
+        };
+        
+        // Base64 문자열에서 "data:image/png;base64," 접두사가 있다면 제거
+        let clean_base64 = if let Some(idx) = base64_data.find(',') {
+            &base64_data[idx + 1..]
+        } else {
+            base64_data
+        };
+
+        let request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    { "text": prompt },
+                    {
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": clean_base64
+                        }
+                    }
+                ]
+            }]
+        });
+
+        let payload = if is_oauth {
+            let project_id = self.get_project_id(&token).await?;
+            json!({
+                "model": self.model,
+                "project": project_id,
+                "request": request_body
+            })
+        } else {
+            request_body
+        };
+
+        let request = self.client.post(url).json(&payload);
+        let request = if is_oauth { request.bearer_auth(&token) } else { request.header("x-goog-api-key", &token) };
+
+        let response = request.send().await.map_err(|e| anyhow::anyhow!(e))?;
         let v: serde_json::Value = response.json().await.map_err(|e| anyhow::anyhow!(e))?;
         
         let text = if is_oauth {

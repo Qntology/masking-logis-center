@@ -16,7 +16,6 @@ use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, SetDiscov
 use chromiumoxide::cdp::js_protocol::runtime::{AddBindingParams, EventBindingCalled};
 use futures::StreamExt;
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 fn mask_pii(text: &str, spans: &[PrivacySpan]) -> String {
@@ -32,6 +31,22 @@ fn mask_pii(text: &str, spans: &[PrivacySpan]) -> String {
         }
     }
     masked_text
+}
+
+#[derive(serde::Deserialize)]
+struct AppConfig {
+    default_tab: String,
+}
+
+fn load_default_tab() -> String {
+    let _ = std::fs::create_dir_all("data");
+    let config_path = std::path::PathBuf::from("data/config.json");
+    if let Ok(content) = std::fs::read_to_string(config_path) {
+        if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
+            return config.default_tab.to_uppercase();
+        }
+    }
+    "DRAFT".to_string()
 }
 
 const OVERLAY_SCRIPT: &str = r#"
@@ -137,38 +152,72 @@ const OVERLAY_SCRIPT: &str = r#"
 
         // 헤더 구성 (타이틀 + 상태 토글 + 닫기 버튼)
         const header = document.createElement('header');
-        const headerTitle = document.createElement('span');
-        headerTitle.textContent = 'LDB';
         
         const statusToggle = document.createElement('div');
         statusToggle.className = 'status-toggle';
-        const draftTab = document.createElement('span');
-        draftTab.textContent = 'DRAFT';
-        draftTab.className = 'active';
-        const mainTab = document.createElement('span');
-        mainTab.textContent = 'MAIN';
-        statusToggle.appendChild(draftTab);
-        statusToggle.appendChild(mainTab);
-
-        const closeBtn = document.createElement('button');
-        closeBtn.id = 'close-btn';
-        closeBtn.textContent = 'X';
+        const tabs = ['DRAFT', 'COMMERCE', 'LOGISTICS', 'TRADE', 'OTHER'];
+        const defaultTab = window.default_tab || 'DRAFT';
         
-        header.appendChild(headerTitle);
-        header.appendChild(statusToggle);
-        header.appendChild(closeBtn);
-
-        // 도메인 필터 바 구성
-        const domainFilterBar = document.createElement('div');
-        domainFilterBar.className = 'domain-filter';
-        const domains = ['ALL', 'COMMERCE', 'LOGISTICS', 'TRADE'];
-        domains.forEach(d => {
-            const btn = document.createElement('button');
-            btn.textContent = d;
-            if (d === 'ALL') btn.className = 'active';
-            domainFilterBar.appendChild(btn);
+        tabs.forEach(t => {
+            const tabSpan = document.createElement('span');
+            tabSpan.textContent = t;
+            if (t === defaultTab) tabSpan.className = 'active';
+            statusToggle.appendChild(tabSpan);
         });
 
+        header.appendChild(statusToggle);
+
+        
+
+        if(window.is_authenticated){
+            const pushBtn = document.createElement('button');
+            pushBtn.id = 'push-btn';
+            pushBtn.style.cssText = 'padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 13px; font-weight: bold; cursor: pointer;';
+            pushBtn.textContent = 'Push';
+            header.appendChild(pushBtn);
+
+            pushBtn.onclick = () => {
+                const selected = Array.from(shadow.querySelectorAll('input:checked')).map(cb => cb.dataset.id);
+                if (selected.length === 0) return;
+                
+                stagedItems.forEach(item => {
+                    if (selected.includes(item.id)) {
+                        item.is_progressing = true;
+                    }
+                });
+                renderStagedList();
+
+                const payload = stagedItems.filter(i => selected.includes(i.id));
+                
+                // 탭 간 상태 공유를 위해 localStorage 사용 및 진행 상태 표시
+                localStorage.setItem('gemini_push_status', JSON.stringify({ status: 'processing', timestamp: Date.now() }));
+                showProgressLog();
+
+                if (window.gemini_rpc) window.gemini_rpc("push_data:" + JSON.stringify(payload));
+            };
+        }else{
+            const loginBtn = document.createElement('button');
+
+            loginBtn.textContent = 'Login';
+            loginBtn.style.cssText = 'padding: 8px; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; cursor: pointer;';
+            loginBtn.onclick = () => {
+                if (window.is_authenticated) {
+                    window.location.href = "https://terminal.logis.center/";
+                } else {
+                    if (window.gemini_rpc) {
+                        // 인증되지 않았을 경우 Rust 백엔드로 CLI 인증 명령어 전달
+                        window.gemini_rpc("login");
+                    }
+                }
+            };
+            
+            header.appendChild(loginBtn);
+        }
+
+
+        
+                
+        
         const stagedList = document.createElement('div');
         stagedList.className = 'content';
         stagedList.id = 'staged-list';
@@ -184,22 +233,36 @@ const OVERLAY_SCRIPT: &str = r#"
         const extractBtn = document.createElement('button');
         extractBtn.id = 'extract-btn';
         extractBtn.textContent = '추출';
-        const pushBtn = document.createElement('button');
-        pushBtn.id = 'push-btn';
-        pushBtn.textContent = 'Push Selected';
+        
         actionDiv.appendChild(extractBtn);
-        actionDiv.appendChild(pushBtn);
+        
 
         const chatDiv = document.createElement('div');
         chatDiv.style.cssText = 'display: flex; gap: 5px;';
+        
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.id = 'file-input';
+        fileInput.accept = 'image/*,application/pdf';
+        fileInput.style.cssText = 'display: none;';
+        
+        const attachBtn = document.createElement('button');
+        attachBtn.id = 'attach-btn';
+        attachBtn.textContent = '📎';
+        attachBtn.title = '파일 첨부 (이미지/PDF)';
+        
         const cliInput = document.createElement('input');
         cliInput.type = 'text';
         cliInput.id = 'cli-input';
         cliInput.placeholder = '메시지 입력...';
         cliInput.style.cssText = 'flex: 1;';
+        
         const sendBtn = document.createElement('button');
         sendBtn.id = 'send-btn';
         sendBtn.textContent = '전송';
+        
+        chatDiv.appendChild(fileInput);
+        chatDiv.appendChild(attachBtn);
         chatDiv.appendChild(cliInput);
         chatDiv.appendChild(sendBtn);
         
@@ -207,7 +270,6 @@ const OVERLAY_SCRIPT: &str = r#"
         footer.appendChild(chatDiv);
 
         agentContainer.appendChild(header);
-        agentContainer.appendChild(domainFilterBar); // 도메인 필터 바 추가
         agentContainer.appendChild(stagedList);
         agentContainer.appendChild(footer);
 
@@ -215,8 +277,7 @@ const OVERLAY_SCRIPT: &str = r#"
         shadow.appendChild(agentContainer);
 
         let stagedItems = [];
-        let currentStatusFilter = 'DRAFT';
-        let currentDomainFilter = 'ALL';
+        let currentTabFilter = window.default_tab || 'DRAFT';
 
         // UI 리스트를 갱신하는 독립 렌더링 함수
         function renderStagedList() {
@@ -224,27 +285,41 @@ const OVERLAY_SCRIPT: &str = r#"
             const items = stagedList.querySelectorAll('.staged-item, .login-container');
             items.forEach(item => item.remove());
 
-            // 필터링 로직 적용
+            // 필터링 로직 적용 (DRAFT 탭이면 status가 DRAFT, 그 외면 status가 MAIN이면서 도메인 매칭)
             const filtered = stagedItems.filter(item => {
-                const statusMatch = item.status === currentStatusFilter;
-                const domainMatch = currentDomainFilter === 'ALL' || item.domain === currentDomainFilter;
-                return statusMatch && domainMatch;
+                if (currentTabFilter === 'DRAFT') {
+                    return item.status === 'DRAFT';
+                } else {
+                    return item.status === 'MAIN' && item.domain === currentTabFilter;
+                }
             });
 
             filtered.forEach(item => {
                 const itemDiv = document.createElement('div');
                 if (item.is_progressing) {
-                    itemDiv.className = 'user draft progressing';
+                    itemDiv.className = 'staged-item user draft progressing';
                 } else if (item.status === 'DRAFT') {
-                    itemDiv.className = 'user draft';
+                    itemDiv.className = 'staged-item user draft';
                 } else {
-                    itemDiv.className = 'user ' + item.domain;
+                    itemDiv.className = 'staged-item user ' + item.domain;
                 }
                 const checkbox = document.createElement('input');
                 checkbox.type = 'checkbox';
                 checkbox.dataset.id = item.id;
                 itemDiv.appendChild(checkbox);
                 itemDiv.appendChild(document.createTextNode(' ' + item.id.substring(0,8) + '... (v' + item.version + ')'));
+                
+                // 삭제 버튼 추가
+                const deleteBtn = document.createElement('button');
+                deleteBtn.textContent = '❌';
+                deleteBtn.style.cssText = 'margin-left: auto; background: transparent; border: none; font-size: 12px; cursor: pointer; padding: 0 5px; color: #999;';
+                deleteBtn.onclick = () => {
+                    stagedItems = stagedItems.filter(i => i.id !== item.id);
+                    renderStagedList();
+                    if (window.gemini_rpc) window.gemini_rpc("delete_data:" + item.id);
+                };
+                itemDiv.appendChild(deleteBtn);
+                
                 stagedList.appendChild(itemDiv);
             });
 
@@ -259,32 +334,7 @@ const OVERLAY_SCRIPT: &str = r#"
 
             // (기존 로그인 폼 생성 로직이 이어서 위치함)
 
-            // 로그인 폼 생성 및 하단 배치
-            const loginContainer = document.createElement('div');
-            loginContainer.className = 'login-container';
-            loginContainer.style.cssText = 'margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee; display: flex; flex-direction: column; gap: 10px;';
             
-            const loginTitle = document.createElement('div');
-            loginTitle.textContent = window.is_authenticated ? 'Account: Authenticated' : 'Account: Not Authenticated';
-            loginTitle.style.cssText = 'font-weight: bold; font-size: 13px;';
-
-            const loginBtn = document.createElement('button');
-            loginBtn.textContent = window.is_authenticated ? 'Go to AI Studio' : 'Login';
-            loginBtn.style.cssText = 'padding: 8px; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; cursor: pointer;';
-            loginBtn.onclick = () => {
-                if (window.is_authenticated) {
-                    window.location.href = "https://terminal.logis.center/";
-                } else {
-                    if (window.gemini_rpc) {
-                        // 인증되지 않았을 경우 Rust 백엔드로 CLI 인증 명령어 전달
-                        window.gemini_rpc("login");
-                    }
-                }
-            };
-
-            loginContainer.appendChild(loginTitle);
-            loginContainer.appendChild(loginBtn);
-            stagedList.appendChild(loginContainer);
         }
 
         // 초기 로드 시 백엔드에 기존 DRAFT 목록 요청
@@ -293,13 +343,20 @@ const OVERLAY_SCRIPT: &str = r#"
         // 자동 추출 함수
         async function autoExtract() {
             const pageId = await generatePageId(window.location.href);
-            const yaml = cleanAndConvertToYaml(document.body);
+            
+            const ogTitle = document.querySelector('meta[property="og:title"]')?.content || document.title || 'No Title';
+            const ogDesc = document.querySelector('meta[property="og:description"]')?.content || 'No Description';
+            const bodyYaml = cleanAndConvertToYaml(document.body);
+            
+            // OG 태그 메타데이터와 정제된 본문 YAML을 하나의 컨텍스트로 결합
+            const yaml = `og_title: ${ogTitle}\nog_description: ${ogDesc}\n---\n${bodyYaml}`;
             
             // 1. 동일한 ID(주소)의 DRAFT가 있는지 확인하고, 내용이 완전히 동일하면 건너뜁니다.
             const existingIndex = stagedItems.findIndex(i => i.id === pageId && i.status === 'DRAFT');
             if (existingIndex !== -1 && stagedItems[existingIndex].context === yaml) {
                 const skipLogDiv = document.createElement('div');
-                skipLogDiv.style.cssText = 'color: gray; font-size: 11px; margin-top: 5px;';
+                skipLogDiv.className = 'user draft';
+                skipLogDiv.style.cssText = 'color: gray; font-size: 11px; margin-top: 5px; display: block !important;';
                 skipLogDiv.textContent = '[Auto-Extracted]: 내용이 동일하여 추가/업데이트를 생략합니다.';
                 log.appendChild(skipLogDiv);
                 log.scrollTop = log.scrollHeight;
@@ -308,7 +365,8 @@ const OVERLAY_SCRIPT: &str = r#"
             
             // 2. UI 로그에 YAML 표시 (Trusted Types 우회)
             const autoLogDiv = document.createElement('div');
-            autoLogDiv.style.cssText = 'white-space: pre-wrap; font-size: 11px; margin-top: 5px;';
+            autoLogDiv.className = 'user draft';
+            autoLogDiv.style.cssText = 'white-space: pre-wrap; font-size: 11px; margin-top: 5px; display: block !important;';
             const strongText = document.createElement('strong');
             strongText.textContent = '[Auto-Extracted]:\n';
             autoLogDiv.appendChild(strongText);
@@ -319,8 +377,9 @@ const OVERLAY_SCRIPT: &str = r#"
                 id: pageId, 
                 host: window.location.hostname, 
                 url: window.location.href, 
-                title: document.title, 
-                domain: 'COMMERCE', 
+                title: ogTitle, 
+                // DRAFT 탭일 때는 기본값인 COMMERCE를 넣고, 그 외 탭에서는 현재 탭 이름을 도메인으로 사용
+                domain: currentTabFilter === 'DRAFT' ? 'COMMERCE' : currentTabFilter, 
                 context: yaml, 
                 status: 'DRAFT', 
                 track: 'MAIN', 
@@ -345,27 +404,12 @@ const OVERLAY_SCRIPT: &str = r#"
             if (window.gemini_rpc) window.gemini_rpc("sync_data:" + JSON.stringify(item));
         }
 
-        // 상태 토글 이벤트 연결
-        draftTab.onclick = () => {
-            draftTab.className = 'active';
-            mainTab.className = '';
-            currentStatusFilter = 'DRAFT';
-            renderStagedList();
-        };
-        
-        mainTab.onclick = () => {
-            mainTab.className = 'active';
-            draftTab.className = '';
-            currentStatusFilter = 'MAIN';
-            renderStagedList();
-        };
-
-        // 도메인 필터 이벤트 연결
-        domainFilterBar.querySelectorAll('button').forEach(btn => {
-            btn.onclick = () => {
-                domainFilterBar.querySelectorAll('button').forEach(b => b.className = '');
-                btn.className = 'active';
-                currentDomainFilter = btn.textContent;
+        // 통합 탭 토글 이벤트 연결
+        statusToggle.querySelectorAll('span').forEach(tab => {
+            tab.onclick = () => {
+                statusToggle.querySelectorAll('span').forEach(s => s.className = '');
+                tab.className = 'active';
+                currentTabFilter = tab.textContent;
                 renderStagedList();
             };
         });
@@ -385,12 +429,6 @@ const OVERLAY_SCRIPT: &str = r#"
             }
         });
 
-        closeBtn.onclick = () => { 
-            agentContainer.classList.remove('open'); 
-            const items = stagedList.querySelectorAll('.staged-item, .login-container');
-            items.forEach(item => item.remove());
-        };
-        
         extractBtn.onclick = autoExtract;
 
         // 대기 상태 표시 UI 관리 함수
@@ -412,25 +450,7 @@ const OVERLAY_SCRIPT: &str = r#"
             if (progressLog) progressLog.remove();
         }
 
-        pushBtn.onclick = () => {
-            const selected = Array.from(shadow.querySelectorAll('input:checked')).map(cb => cb.dataset.id);
-            if (selected.length === 0) return;
-            
-            stagedItems.forEach(item => {
-                if (selected.includes(item.id)) {
-                    item.is_progressing = true;
-                }
-            });
-            renderStagedList();
-
-            const payload = stagedItems.filter(i => selected.includes(i.id));
-            
-            // 탭 간 상태 공유를 위해 localStorage 사용 및 진행 상태 표시
-            localStorage.setItem('gemini_push_status', JSON.stringify({ status: 'processing', timestamp: Date.now() }));
-            showProgressLog();
-
-            if (window.gemini_rpc) window.gemini_rpc("push_data:" + JSON.stringify(payload));
-        };
+        
 
         function sendChatMessage() {
             const text = cliInput.value.trim();
@@ -461,6 +481,58 @@ const OVERLAY_SCRIPT: &str = r#"
             // 스트리밍 응답을 새 영역에 쓰기 위해 초기화
             window._currentAiMessageDiv = null;
         }
+
+        attachBtn.onclick = () => fileInput.click();
+
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                const base64Data = event.target.result;
+                // 파일 이름과 현재 시간을 기반으로 고유 ID 생성
+                const pageId = await generatePageId(file.name + Date.now());
+                
+                const yaml = `file_name: ${file.name}\ntype: ${file.type}\nsize: ${file.size}\ndata: ${base64Data}`;
+                
+                // 파일 첨부 완료를 로그 화면에 표시
+                const autoLogDiv = document.createElement('div');
+                autoLogDiv.className = 'user draft';
+                autoLogDiv.style.cssText = 'white-space: pre-wrap; font-size: 11px; margin-top: 5px; color: purple; display: block !important;';
+                const strongText = document.createElement('strong');
+                strongText.textContent = '[File-Attached]:\n';
+                autoLogDiv.appendChild(strongText);
+                autoLogDiv.appendChild(document.createTextNode(file.name + ' (' + file.type + ') 첨부 완료'));
+                log.appendChild(autoLogDiv);
+                log.scrollTop = log.scrollHeight;
+                
+                // 파일 데이터를 DRAFT 속성으로 정의
+                const item = { 
+                    id: pageId, 
+                    host: 'local_file', 
+                    url: 'file://' + file.name, 
+                    title: file.name, 
+                    // DRAFT 탭일 때는 기본값인 COMMERCE를 넣고, 그 외 탭에서는 현재 탭 이름을 도메인으로 사용
+                    domain: currentTabFilter === 'DRAFT' ? 'COMMERCE' : currentTabFilter, 
+                    context: yaml, 
+                    status: 'DRAFT', 
+                    track: 'MAIN', 
+                    version: 1, 
+                    created_at: Date.now(), 
+                    updated_at: Date.now() 
+                };
+                
+                stagedItems.push(item);
+                renderStagedList();
+                
+                // Rust 백엔드로 DRAFT 상태 저장 요청
+                if (window.gemini_rpc) window.gemini_rpc("sync_data:" + JSON.stringify(item));
+                
+                fileInput.value = ''; // 연속 선택이 가능하도록 input 값 초기화
+            };
+            reader.readAsDataURL(file);
+        });
 
         sendBtn.onclick = sendChatMessage;
         cliInput.addEventListener('keypress', (e) => {
@@ -515,7 +587,7 @@ const OVERLAY_SCRIPT: &str = r#"
 
         window.addEventListener('gemini_rpc_response', (e) => {
             try {
-                // JSON 형태의 응답(fetch_drafts) 처리
+                // JSON 형태의 응답(fetch_drafts, sync_success) 처리
                 const data = JSON.parse(e.detail);
                 if (data.type === 'drafts_loaded') {
                     data.payload.forEach(draft => {
@@ -526,6 +598,21 @@ const OVERLAY_SCRIPT: &str = r#"
                     });
                     renderStagedList();
                     return; // 데이터 응답이므로 채팅 로그에 출력하지 않고 종료
+                } else if (data.type === 'sync_success') {
+                    // 백엔드에서 LLM 전처리 후 확정된 도메인 업데이트
+                    const idx = stagedItems.findIndex(i => i.id === data.id);
+                    if (idx !== -1) {
+                        stagedItems[idx].domain = data.domain;
+                        renderStagedList();
+                    }
+                    
+                    const rpcLogDiv = document.createElement('div');
+                    rpcLogDiv.className = 'system';
+                    rpcLogDiv.style.cssText = 'font-size: 11px; margin-top: 5px; opacity: 0.7; line-height: 1.4;';
+                    rpcLogDiv.innerHTML = `<strong>System: </strong>Data synced [Domain: ${data.domain}]`;
+                    log.appendChild(rpcLogDiv);
+                    log.scrollTop = log.scrollHeight;
+                    return;
                 }
             } catch(err) {
                 // JSON 파싱 실패 시 일반 텍스트 응답으로 간주하여 아래 로그 출력 진행
@@ -628,8 +715,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     // RPC 바인딩 등록
     let _ = page.execute(AddBindingParams::new("gemini_rpc")).await;
     
-    // 인증 상태 변수와 UI 스크립트를 하나로 묶어 레이스 컨디션(주입 지연) 방지
-    let full_script = format!("window.is_authenticated = {};\n{}", is_authenticated, OVERLAY_SCRIPT);
+    let default_tab = load_default_tab();
+    
+    // 인증 상태 변수, 기본 탭 변수, UI 스크립트를 하나로 묶어 레이스 컨디션(주입 지연) 방지
+    let full_script = format!(
+        "window.is_authenticated = {};\nwindow.default_tab = \"{}\";\n{}", 
+        is_authenticated, default_tab, OVERLAY_SCRIPT
+    );
     
     // 이미 로드된 현재 페이지 상태에서 UI가 즉시 나타나도록 강제 실행
     let _ = page.evaluate(full_script).await;
@@ -643,14 +735,57 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                 let response = if payload.starts_with("sync_data:") {
                     let data = &payload["sync_data:".len()..];
                     match serde_json::from_str::<db::CommerceRecord>(data) {
-                        Ok(record) => {
+                        Ok(mut record) => {
+                            // LLM 전처리 파이프라인 연동
+                            let categorizer = gemini_gui_lib::categorizer::Categorizer::new(gemini::client::GeminiClient::new("gemini-3.1-flash-lite-preview".to_string()));
+                            
+                            if record.host == "local_file" {
+                                // 이미지 전처리: YAML 텍스트 내부에 들어있는 type과 base64 데이터 추출
+                                let lines: Vec<&str> = record.context.lines().collect();
+                                let mime_type = lines.iter().find(|l| l.starts_with("type: ")).map(|l| l.replace("type: ", "")).unwrap_or_default();
+                                let base64_data = lines.iter().find(|l| l.starts_with("data: ")).map(|l| l.replace("data: ", "")).unwrap_or_default();
+                                
+                                if !mime_type.is_empty() && !base64_data.is_empty() {
+                                    if let Ok(json_res) = categorizer.preprocess_image(&mime_type, &base64_data).await {
+                                        record.domain = json_res.get("domain").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("OTHER").to_uppercase();
+                                        // OCR 텍스트로 컨텍스트 교체 (Base64 데이터 제거하여 용량 확보)
+                                        let ocr_text = json_res.get("ocr_full_text").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("");
+                                        record.context = format!("File: {}\n\n[OCR Data]\n{}", record.title, ocr_text);
+                                    }
+                                }
+                            } else {
+                                // 웹페이지 전처리: YAML 컨텍스트 분석
+                                if let Ok(json_res) = categorizer.preprocess_web(&record.context).await {
+                                    record.domain = json_res.get("domain").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("OTHER").to_uppercase();
+                                }
+                            }
+
+                            let updated_domain = record.domain.clone();
+                            let record_id = record.id.clone();
+
                             // 임시 저장(DRAFT) 시에는 임베딩 모델을 로드하지 않습니다.
                             match db::save_records(vec![record], None).await {
-                                Ok(_) => "Data synced to LanceDB (DRAFT).".to_string(),
+                                Ok(_) => {
+                                    json!({
+                                        "type": "sync_success",
+                                        "id": record_id,
+                                        "domain": updated_domain
+                                    }).to_string()
+                                },
                                 Err(e) => format!("DB Error: {}", e),
                             }
                         },
                         Err(e) => format!("JSON Error: {}", e),
+                    }
+                } else if payload.starts_with("delete_data:") {
+                    let id_to_delete = &payload["delete_data:".len()..];
+                    match db::get_or_create_table().await {
+                        Ok(table) => {
+                            let expr = format!("id = '{}'", id_to_delete);
+                            let _ = table.delete(&expr).await;
+                            format!("Item deleted from LanceDB: {}", id_to_delete)
+                        },
+                        Err(e) => format!("DB Error: {}", e),
                     }
                 } else if payload == "fetch_drafts" {
                     match db::fetch_drafts().await {
@@ -836,16 +971,20 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 사용자가 요청한 클로저 기반 설정 로직 반영
+    // 인증 여부에 따른 초기 URL 설정 (URL을 먼저 계산합니다)
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    let auth_path = std::path::PathBuf::from(home).join(".gemini/oauth_creds.json");
+    let is_authenticated = auth_path.exists();
+    let start_url = if is_authenticated { "about:blank" } else { "https://terminal.logis.center/" };
+
     let args = vec![
-        "--window-size=1920,1080", // 창 크기 강제 지정
+        "--window-size=640,480", // 창 크기 강제 지정
         "--window-position=0,0",
         "--start-maximized", 
         "--no-first-run",
         "--disable-notifications",
         "--disable-extensions",
         "--disable-popup-blocking",
-        "--blink-settings=imagesEnabled=false",
         "--disable-blink-features=AutomationControlled",
         "--password-store=basic",
         "--no-default-browser-check",
@@ -853,16 +992,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "--enable-features=WebUIDarkMode",
         "--remote-allow-origins=*",
         "--disable-dev-shm-usage",
+        start_url, // 브라우저 실행 인자에 URL을 직접 포함하여 단 1개의 정상 탭만 생성되도록 유도
     ];
-
-    // 인증 여부에 따른 초기 URL 설정
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
-    let auth_path = std::path::PathBuf::from(home).join(".gemini/oauth_creds.json");
-    let is_authenticated = auth_path.exists();
-    let start_url = if is_authenticated { "https://www.google.com" } else { "https://terminal.logis.center/" };
-
-    // chromiumoxide가 자체적으로 디버깅 포트와 초기 타겟(about:blank)을 
-    // 충돌 없이 할당하도록 포트 플래그 및 about:blank 인자를 제거했습니다.
 
     let config = BrowserConfig::builder()
         .with_head()
@@ -902,7 +1033,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 페이지 객체 확보 후 바인딩 및 주입 설정을 즉시 수행하여 '페이지 로드 시작' 단계부터 스크립트가 살아있게 함
                         let _ = page.execute(EnableParams::default()).await;
                         
-                        let full_script = format!("window.is_authenticated = {};\n{}", is_auth_inner, OVERLAY_SCRIPT);
+                        let default_tab = load_default_tab();
+                        let full_script = format!(
+                            "window.is_authenticated = {};\nwindow.default_tab = \"{}\";\n{}", 
+                            is_auth_inner, default_tab, OVERLAY_SCRIPT
+                        );
                         let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(full_script)).await;
                         
                         // 특정 페이지 로딩 상태(예: DOMContentLoaded)까지 기다리지 않고 즉시 셋업 시도
@@ -917,24 +1052,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[Rust] Authentication required. Redirecting to login...");
     }
 
-    // 이미 열려있는 최초 빈 탭(about:blank)을 가져와 스크립트 환경을 완벽하게 주입합니다.
+    // 브라우저 실행 인자로 주입한 시작 URL이 로드된 유일한 최초 탭을 가져와 환경을 설정합니다.
+    // about:blank를 경유하지 않으므로 Target ID가 변경되지 않아 Esc 키와 RPC 통신이 영구적으로 보장됩니다.
     if let Ok(pages) = browser.pages().await {
         if let Some(page) = pages.first() {
             let _ = page.execute(EnableParams::default()).await;
             
-            let full_script = format!("window.is_authenticated = {};\n{}", is_authenticated, OVERLAY_SCRIPT);
+            let default_tab = load_default_tab();
+            let full_script = format!(
+                "window.is_authenticated = {};\nwindow.default_tab = \"{}\";\n{}", 
+                is_authenticated, default_tab, OVERLAY_SCRIPT
+            );
             // 모든 새 문서에 스크립트가 자동 실행되도록 브라우저 내부 설정
             let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(full_script)).await;
             // RPC 바인딩 및 이벤트 리스너 세팅
             let _ = setup_page(browser.clone(), page.clone(), is_authenticated).await;
-            
-            // 모든 세팅이 완료된 이후에 수동으로 타겟 URL로 이동시킵니다.
-            // 이렇게 해야 페이지가 새로 로드되면서 이미 예약된 스크립트가 100% 동작하여 버튼이 노출됩니다.
-            let _ = page.goto(start_url).await;
         }
     }
-
-    // 하단의 goto 및 new_page 로직을 제거하여 탭이 중복으로 생성되거나 이동되는 현상을 차단합니다.
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => println!("\n[Rust] Shutting down..."),
