@@ -18,12 +18,14 @@ pub struct CommerceRecord {
     pub title: String,
     pub domain: String,
     pub context: String,
+    #[serde(default)]
     pub masking: String,
     pub status: String,
     pub track: String,
     pub version: i32,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
     pub vector: Vec<f32>,
 }
 

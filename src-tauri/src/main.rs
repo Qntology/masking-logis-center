@@ -92,7 +92,7 @@ const OVERLAY_SCRIPT: &str = r#"
 
         const host = document.createElement('div');
         host.id = 'gemini-agent-host';
-        host.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; z-index:2147483647; pointer-events:none; overflow:hidden;';
+        // host.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; z-index:2147483647; pointer-events:none; overflow:hidden;';
         
         // body에 안전하게 추가
         try {
@@ -107,6 +107,7 @@ const OVERLAY_SCRIPT: &str = r#"
         const style = document.createElement('style');
         style.textContent = `
             :host { all: initial; }
+            * { box-sizing: border-box !important; }
             #agent-container { 
                 position: fixed; top: 0; right: 0; bottom: 0; 
                 width: 350px; z-index: 2147483648;
@@ -116,7 +117,6 @@ const OVERLAY_SCRIPT: &str = r#"
                 box-shadow: -5px 0 15px rgba(0,0,0,0.2);
                 pointer-events: auto;
             }
-            #agent-container.open { transform: translateX(0); }
             #toggle-btn { 
                 all: unset;
                 position: fixed; bottom: 30px; right: 30px; 
@@ -135,10 +135,10 @@ const OVERLAY_SCRIPT: &str = r#"
                 transition: all 0.2s ease;
             }
             #toggle-btn:hover { background: #0056b3 !important; transform: scale(1.05); }
-            header { padding: 15px; background: #f0f0f0 !important; font-weight: bold !important; color: #000 !important; border-bottom: 1px solid #ddd; display: flex !important; justify-content: space-between; align-items: center; }
-            .content { flex: 1; padding: 15px; overflow-y: auto; background: #ffffff !important; color: #000000 !important; box-sizing: border-box !important; }
+            header { padding: 15px; background: #f0f0f0 !important; font-weight: bold !important; color: #000 !important; border-bottom: 1px solid #ddd; display: flex !important; justify-content: space-between; align-items: center; flex-shrink: 0; }
+            .content { flex: 1; padding: 15px; overflow-y: auto; background: #ffffff !important; color: #000000 !important; min-height: 0 !important; }
             .footer { padding: 15px; background: #f8f9fa !important; border-top: 1px solid #eee; flex-shrink: 0; }
-            input { width: 100%; padding: 10px; border: 1px solid #ddd !important; border-radius: 4px; box-sizing: border-box !important; background: white !important; color: black !important; }
+            input { width: 100%; padding: 10px; border: 1px solid #ddd !important; border-radius: 4px; background: white !important; color: black !important; }
             button { cursor: pointer; padding: 5px 10px; }
             .staged-item { display: flex !important; align-items: center !important; margin-bottom: 10px; color: black !important; }
         `;
@@ -363,7 +363,7 @@ const OVERLAY_SCRIPT: &str = r#"
             // 백엔드로 채팅 요청 전송
             if (window.gemini_rpc) {
                 const payload = {
-                    messages: [{ role: 'user', content: { parts: [{ text: text }] } }],
+                    messages: [{ role: 'user', parts: [{ text: text }] }],
                     model: 'gemini-3.1-flash-lite-preview'
                 };
                 console.log("[JS] Sending gemini_chat payload:", payload);
@@ -399,7 +399,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 setTimeout(autoExtract, 1000);
             }
         });
-        urlObserver.observe(document.documentElement, { childList: true, subtree: true });
+        urlObserver.observe(document, { childList: true, subtree: true });
 
         // 다른 브라우저 탭에 상태 전파를 위한 storage 이벤트 리스너
         window.addEventListener('storage', (e) => {
@@ -512,7 +512,7 @@ const OVERLAY_SCRIPT: &str = r#"
             }
         });
         
-        observer.observe(document.documentElement, { childList: true, subtree: true });
+        observer.observe(document, { childList: true, subtree: true });
 
         window.addEventListener('pageshow', runOnce);
     }
@@ -625,23 +625,33 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 let mut model = v["model"].as_str().unwrap_or("gemini-3.1-flash-lite-preview").to_string();
                                 
                                 // Gemini API의 /models 엔드포인트를 조회하여 제공 가능한 모델 중 가장 낮은 버전의 flash-lite를 동적으로 선택합니다.
-                                if let Ok(token) = gemini::auth::get_auth_token() {
-                                    let url = "https://generativelanguage.googleapis.com/v1beta/models";
-                                    let http_client = reqwest::Client::new();
-                                    if let Ok(res) = http_client.get(url).bearer_auth(token).send().await {
-                                        if let Ok(models_resp) = res.json::<serde_json::Value>().await {
-                                            if let Some(models_array) = models_resp["models"].as_array() {
-                                                let mut flash_lite_models: Vec<String> = models_array.iter()
-                                                    .filter_map(|m| m["name"].as_str())
-                                                    .map(|name| name.strip_prefix("models/").unwrap_or(name).to_string())
-                                                    .filter(|name| name.contains("flash-lite"))
-                                                    .collect();
-                                                
-                                                // 알파벳 및 숫자 정렬을 수행하면 낮은 버전(예: 2.0)이 배열의 가장 앞으로 오게 됩니다.
-                                                flash_lite_models.sort();
-                                                if let Some(lowest_version) = flash_lite_models.first() {
-                                                    println!("[Rust] API 목록에서 가장 낮은 버전의 flash-lite 모델을 동적 선택했습니다: {}", lowest_version);
-                                                    model = lowest_version.clone();
+                                let token_opt = gemini::auth::get_auth_token().await.ok();
+                                if let Some(token) = token_opt {
+                                    if token.starts_with("ya29.") || token.starts_with("ya29_") {
+                                        // CLI OAuth 토큰은 generativelanguage 권한이 없으므로 API 조회를 생략합니다.
+                                        println!("[Rust] OAuth 토큰 감지됨. 모델 목록 조회를 건너뛰고 기본 모델을 사용합니다.");
+                                    } else {
+                                        let url = "https://generativelanguage.googleapis.com/v1beta/models";
+                                        let http_client = reqwest::Client::new();
+                                        
+                                        let request = http_client.get(url);
+                                        let request = request.header("x-goog-api-key", &token);
+                                        
+                                        if let Ok(res) = request.send().await {
+                                            if let Ok(models_resp) = res.json::<serde_json::Value>().await {
+                                                if let Some(models_array) = models_resp["models"].as_array() {
+                                                    let mut flash_lite_models: Vec<String> = models_array.iter()
+                                                        .filter_map(|m| m["name"].as_str())
+                                                        .map(|name| name.strip_prefix("models/").unwrap_or(name).to_string())
+                                                        .filter(|name| name.contains("flash-lite"))
+                                                        .collect();
+                                                    
+                                                    // 알파벳 및 숫자 정렬을 수행하면 낮은 버전(예: 2.0)이 배열의 가장 앞으로 오게 됩니다.
+                                                    flash_lite_models.sort();
+                                                    if let Some(lowest_version) = flash_lite_models.first() {
+                                                        println!("[Rust] API 목록에서 가장 낮은 버전의 flash-lite 모델을 동적 선택했습니다: {}", lowest_version);
+                                                        model = lowest_version.clone();
+                                                    }
                                                 }
                                             }
                                         }
@@ -651,7 +661,12 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 println!("[Rust] Using model: {}", model);
                                 let client = gemini::client::GeminiClient::new(model);
                                
-                                let stream_result = client.stream_message(messages, move |chunk| {
+                                // 에러 처리에 사용할 브라우저 페이지 객체를 클로저 이동 전에 미리 복제합니다.
+                                let page_c_err = page_c.clone();
+                                
+                                // Send 트레이트 에러를 방지하기 위해 stream_message의 결과를 바로 match로 평가하여
+                                // Error 객체가 await 지점까지 생존하지 않도록 스코프를 완전히 분리(소비)합니다.
+                                let err_script_opt = match client.stream_message(messages, move |chunk| {
                                     let script = format!(
                                         "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
                                         json!(chunk)
@@ -663,10 +678,20 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             eprintln!("[Rust] Evaluate error in stream: {}", e);
                                         }
                                     });
-                                }).await;
+                                }).await {
+                                    Err(e) => {
+                                        eprintln!("[Rust] Stream execute error: {}", e);
+                                        Some(format!(
+                                            "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
+                                            json!(format!("Error: {}", e))
+                                        ))
+                                    }
+                                    Ok(_) => None,
+                                };
 
-                                if let Err(e) = stream_result {
-                                    eprintln!("[Rust] Stream execute error: {}", e);
+                                // 비동기(.await) 호출은 에러 객체가 메모리에서 완전히 해제된 안전한 스코프에서 진행합니다.
+                                if let Some(error_script) = err_script_opt {
+                                    let _ = page_c_err.evaluate(error_script).await;
                                 }
                             },
                             Err(e) => eprintln!("[Rust] Failed to parse gemini_chat json: {}", e),

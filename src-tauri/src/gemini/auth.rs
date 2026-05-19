@@ -4,20 +4,60 @@ use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OAuthCredentials {
-    pub refresh_token: String,
-    pub client_id: String,
-    pub client_secret: String,
+    pub refresh_token: Option<String>,
+    pub access_token: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
 }
 
-pub fn get_auth_token() -> Result<String, Box<dyn std::error::Error>> {
+pub async fn get_auth_token() -> Result<String, Box<dyn std::error::Error>> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))?;
     let path = PathBuf::from(home).join(".gemini/oauth_creds.json");
     
-    let content = fs::read_to_string(path)?;
-    let creds: OAuthCredentials = serde_json::from_str(&content)?;
+    let content = fs::read_to_string(&path)?;
+    let mut creds: OAuthCredentials = serde_json::from_str(&content)?;
 
-    // 실제로는 refresh_token을 사용하여 새로운 access_token을 받아야 합니다.
-    // 여기서는 간단한 구현을 위해 refresh_token을 리턴하지만, 
-    // 실제 운영 환경에서는 아래 refresh 로직이 필요합니다.
-    Ok(creds.refresh_token)
+    // refresh_token, client_id, client_secret이 모두 존재하면 새로운 access_token을 발급받습니다.
+    if let (Some(refresh_token), Some(client_id), Some(client_secret)) = (&creds.refresh_token, &creds.client_id, &creds.client_secret) {
+        let client = reqwest::Client::new();
+        
+        // .form() 메서드 대신 직접 urlencoded 규격의 본문 문자열을 생성하여 전송합니다.
+        let body_str = format!(
+            "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
+            client_id, client_secret, refresh_token
+        );
+        
+        let res = client.post("https://oauth2.googleapis.com/token")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body_str)
+            .send()
+            .await?;
+        
+        if res.status().is_success() {
+            let v: serde_json::Value = res.json().await?;
+            if let Some(new_access_token) = v["access_token"].as_str() {
+                creds.access_token = Some(new_access_token.to_string());
+                // 갱신된 토큰을 파일에 저장 (JSON 변환이 성공했을 때만 저장 진행)
+                if let Ok(json_str) = serde_json::to_string_pretty(&creds) {
+                    let _ = fs::write(&path, json_str);
+                }
+                return Ok(new_access_token.to_string());
+            }
+        }
+    }
+
+    // 갱신에 실패하거나 없는 경우 기존 access_token 확인
+    if let Some(access_token) = creds.access_token {
+        Ok(access_token)
+    } else if let Some(refresh_token) = creds.refresh_token {
+        // OAuth refresh_token(1//...) 형태라면 access_token으로 쓸 수 없으므로 에러 반환
+        if refresh_token.starts_with("1//") {
+            Err("Access token is missing and cannot be refreshed (missing client_id). Please check your oauth_creds.json.".into())
+        } else {
+            // 사용자가 API 키를 refresh_token 필드에 잘못 넣었을 경우를 대비한 폴백
+            Ok(refresh_token)
+        }
+    } else {
+        Err("No valid tokens found in credentials file.".into())
+    }
 }

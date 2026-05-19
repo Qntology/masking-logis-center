@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: serde_json::Value,
+    pub parts: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
