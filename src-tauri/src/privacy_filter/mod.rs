@@ -1,5 +1,6 @@
 pub mod config;
 pub mod viterbi;
+pub mod masking;
 
 use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::{linear, VarBuilder, Embedding};
@@ -52,7 +53,7 @@ struct RotaryEmbedding {
 }
 
 impl RotaryEmbedding {
-    fn new_yarn(cfg: &config::RopeParameters, head_dim: usize, max_seq_len: usize, dtype: DType, device: &Device) -> Result<Self> {
+    fn new_yarn(cfg: &config::RopeParameters, head_dim: usize, _max_seq_len: usize, dtype: DType, device: &Device) -> Result<Self> {
         let dim = head_dim;
         let half_dim = dim / 2;
         let theta = cfg.rope_theta;

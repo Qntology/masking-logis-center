@@ -1,6 +1,13 @@
-use gemini_gui_lib::{db, embedding, privacy_filter};
+use gemini_gui_lib::{db, embedding, privacy_filter, gemini};
 use privacy_filter::{PrivacyFilterModel, viterbi::PrivacySpan};
 use candle_core::Device;
+use tauri::command;
+...
+#[command]
+async fn get_chat_completion(messages: Vec<gemini::types::ChatMessage>, api_key: String, model: String) -> Result<String, String> {
+    let client = gemini::client::GeminiClient::new(api_key, model);
+    client.send_message(messages).await.map_err(|e| e.to_string())
+}
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams};
@@ -385,7 +392,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
                                 println!("[Rust] Privacy Filter Loaded. Masking PII...");
                                 for record in &mut records {
                                     if let Ok(spans) = privacy_engine.predict(&record.context) {
-                                        record.context = mask_pii(&record.context, &spans);
+                                        record.masking = mask_pii(&record.context, &spans);
                                     }
                                 }
                             } else {
@@ -397,7 +404,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
                             match embedding::EmbeddingModel::new_with_device(model_path, &device) {
                                 Ok(model) => {
                                     for record in &mut records {
-                                        match model.embed(&record.context) {
+                                        match model.embed(&record.masking) {
                                             Ok(vector) => record.vector = vector,
                                             Err(e) => eprintln!("Embedding Error: {}", e),
                                         }
@@ -418,6 +425,25 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
                     let url = format!("devtools://devtools/bundled/inspector.html?ws=localhost:9222/devtools/page/{:?}", tid);
                     let _ = browser_clone.execute(chromiumoxide::cdp::browser_protocol::target::CreateTargetParams::new(url)).await;
                     "DevTools opened".to_string()
+                } else if payload.starts_with("gemini_chat:") {
+                    let data = &payload["gemini_chat:".len()..];
+                    let page_c = page_clone.clone();
+                    tokio::spawn(async move {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                           let messages: Vec<gemini::types::ChatMessage> = serde_json::from_value(v["messages"].clone()).unwrap_or_default();
+                           let model = v["model"].as_str().unwrap_or("gemini-1.5-flash").to_string();
+                           let client = gemini::client::GeminiClient::new(model);
+                           
+                           let _ = client.stream_message(messages, |chunk| {
+                               let script = format!(
+                                   "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
+                                   json!(chunk)
+                               );
+                               let _ = page_c.evaluate(script);
+                           }).await;
+                        }
+                    });
+                    "Streaming started".to_string()
                 } else {
                     match execute_cli(payload.to_string()).await {
                         Ok(res) => res,

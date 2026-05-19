@@ -5,6 +5,7 @@ export interface ConversationLog {
   channel_id: string; // 'trunk' or branch ID
   role: 'user' | 'assistant';
   content: string;
+  masking: string;
   timestamp: number;
   status: 'pending' | 'committed'; // Sync status
 }
