@@ -291,7 +291,18 @@ const OVERLAY_SCRIPT: &str = r#"
             const pageId = await generatePageId(window.location.href);
             const yaml = cleanAndConvertToYaml(document.body);
             
-            // 1. UI 로그에 YAML 표시 (Trusted Types 우회)
+            // 1. 동일한 ID(주소)의 DRAFT가 있는지 확인하고, 내용이 완전히 동일하면 건너뜁니다.
+            const existingIndex = stagedItems.findIndex(i => i.id === pageId && i.status === 'DRAFT');
+            if (existingIndex !== -1 && stagedItems[existingIndex].context === yaml) {
+                const skipLogDiv = document.createElement('div');
+                skipLogDiv.style.cssText = 'color: gray; font-size: 11px; margin-top: 5px;';
+                skipLogDiv.textContent = '[Auto-Extracted]: 내용이 동일하여 추가/업데이트를 생략합니다.';
+                log.appendChild(skipLogDiv);
+                log.scrollTop = log.scrollHeight;
+                return;
+            }
+            
+            // 2. UI 로그에 YAML 표시 (Trusted Types 우회)
             const autoLogDiv = document.createElement('div');
             autoLogDiv.style.cssText = 'white-space: pre-wrap; font-size: 11px; margin-top: 5px;';
             const strongText = document.createElement('strong');
@@ -314,11 +325,10 @@ const OVERLAY_SCRIPT: &str = r#"
                 updated_at: Date.now() 
             };
             
-            // 2. 동일한 ID의 DRAFT가 있으면 덮어쓰기(버전업), 없으면 신규 추가
-            const existingIndex = stagedItems.findIndex(i => i.id === pageId && i.status === 'DRAFT');
+            // 3. 동일한 ID의 DRAFT가 있으면 덮어쓰기(업데이트), 없으면 신규 추가
             if (existingIndex !== -1) {
                 stagedItems[existingIndex].context = yaml;
-                stagedItems[existingIndex].updated_at = item.updated_at;
+                stagedItems[existingIndex].updated_at = Date.now();
                 stagedItems[existingIndex].version += 1;
                 Object.assign(item, stagedItems[existingIndex]); 
             } else {
@@ -327,7 +337,7 @@ const OVERLAY_SCRIPT: &str = r#"
             
             renderStagedList();
             
-            // 3. Rust 백엔드(LanceDB)로 DRAFT 상태 동기화 (Upsert) 요청
+            // 4. Rust 백엔드(LanceDB)로 DRAFT 상태 동기화 (Upsert) 요청
             if (window.gemini_rpc) window.gemini_rpc("sync_data:" + JSON.stringify(item));
         }
 
