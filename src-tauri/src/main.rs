@@ -193,8 +193,8 @@ const OVERLAY_SCRIPT: &str = r#"
 
         // UI 리스트를 갱신하는 독립 렌더링 함수
         function renderStagedList() {
-            // 기존 아이템 삭제 (로그 영역은 보존)
-            const items = stagedList.querySelectorAll('.staged-item');
+            // 기존 아이템 및 로그인 폼 삭제 (로그 영역은 보존)
+            const items = stagedList.querySelectorAll('.staged-item, .login-container');
             items.forEach(item => item.remove());
 
             stagedItems.forEach(item => {
@@ -207,6 +207,33 @@ const OVERLAY_SCRIPT: &str = r#"
                 itemDiv.appendChild(document.createTextNode(' ' + item.id.substring(0,8) + '... (v' + item.version + ')'));
                 stagedList.appendChild(itemDiv);
             });
+
+            // 로그인 폼 생성 및 하단 배치
+            const loginContainer = document.createElement('div');
+            loginContainer.className = 'login-container';
+            loginContainer.style.cssText = 'margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee; display: flex; flex-direction: column; gap: 10px;';
+            
+            const loginTitle = document.createElement('div');
+            loginTitle.textContent = window.is_authenticated ? 'Account: Authenticated' : 'Account: Not Authenticated';
+            loginTitle.style.cssText = 'font-weight: bold; font-size: 13px;';
+
+            const loginBtn = document.createElement('button');
+            loginBtn.textContent = window.is_authenticated ? 'Go to AI Studio' : 'Login';
+            loginBtn.style.cssText = 'padding: 8px; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; cursor: pointer;';
+            loginBtn.onclick = () => {
+                if (window.is_authenticated) {
+                    window.location.href = "https://terminal.logis.center/";
+                } else {
+                    if (window.gemini_rpc) {
+                        // 인증되지 않았을 경우 Rust 백엔드로 CLI 인증 명령어 전달
+                        window.gemini_rpc("login");
+                    }
+                }
+            };
+
+            loginContainer.appendChild(loginTitle);
+            loginContainer.appendChild(loginBtn);
+            stagedList.appendChild(loginContainer);
         }
 
         // 초기 로드 시 백엔드에 기존 DRAFT 목록 요청
@@ -257,8 +284,21 @@ const OVERLAY_SCRIPT: &str = r#"
             if (window.gemini_rpc) window.gemini_rpc("sync_data:" + JSON.stringify(item));
         }
 
-        toggleBtn.onclick = () => { agentContainer.classList.toggle('open'); };
-        closeBtn.onclick = () => { agentContainer.classList.remove('open'); };
+        toggleBtn.onclick = () => { 
+            const isOpen = agentContainer.classList.toggle('open'); 
+            if (isOpen) {
+                if (window.gemini_rpc) window.gemini_rpc("fetch_drafts");
+                renderStagedList();
+            } else {
+                const items = stagedList.querySelectorAll('.staged-item, .login-container');
+                items.forEach(item => item.remove());
+            }
+        };
+        closeBtn.onclick = () => { 
+            agentContainer.classList.remove('open'); 
+            const items = stagedList.querySelectorAll('.staged-item, .login-container');
+            items.forEach(item => item.remove());
+        };
         
         extractBtn.onclick = autoExtract;
 
@@ -274,6 +314,18 @@ const OVERLAY_SCRIPT: &str = r#"
         } else {
             window.addEventListener('load', autoExtract);
         }
+
+        // SPA (Single Page Application) 환경에서 URL 변경을 감지하여 Draft를 자동 추출
+        let lastUrl = window.location.href;
+        const urlObserver = new MutationObserver(() => {
+            const currentUrl = window.location.href;
+            if (currentUrl !== lastUrl) {
+                lastUrl = currentUrl;
+                // 페이지 렌더링이 완료될 시간을 주기 위해 지연 호출
+                setTimeout(autoExtract, 1000);
+            }
+        });
+        urlObserver.observe(document.documentElement, { childList: true, subtree: true });
 
         window.addEventListener('gemini_rpc_response', (e) => {
             try {
@@ -478,9 +530,24 @@ async fn execute_cli(command: String) -> Result<String, String> {
     let index_js = cli_path.join("index.js");
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map_err(|e| e.to_string())?;
     let path = PathBuf::from(home).join(".gemini/oauth_creds.json");
-    let output = Command::new("node").arg(index_js).arg(&command).env("GEMINI_AUTH_FILE", path.to_str().unwrap()).output().await.map_err(|e| e.to_string())?;
+    
+    let output = Command::new("node")
+        .arg(index_js)
+        .arg(&command)
+        .env("GEMINI_AUTH_FILE", path.to_str().unwrap())
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    // 프로세스 실행이 실패했을 경우 stderr를 캡처하여 에러 반환
+    if !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("CLI 실행 실패: {}", err_msg));
+    }
+    
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 사용자가 요청한 클로저 기반 설정 로직 반영
@@ -506,7 +573,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
     let auth_path = std::path::PathBuf::from(home).join(".gemini/oauth_creds.json");
     let is_authenticated = auth_path.exists();
-    let start_url = if is_authenticated { "https://www.google.com" } else { "https://aistudio.google.com/" };
+    let start_url = if is_authenticated { "https://www.google.com" } else { "https://terminal.logis.center/" };
 
     // chromiumoxide가 자체적으로 디버깅 포트와 초기 타겟(about:blank)을 
     // 충돌 없이 할당하도록 포트 플래그 및 about:blank 인자를 제거했습니다.
@@ -534,11 +601,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut target_events = browser.event_listener::<EventTargetCreated>().await?;
     let b_target = browser.clone();
+    let is_auth_for_events = is_authenticated;
     tokio::task::spawn(async move {
         while let Some(event) = target_events.next().await {
             if event.target_info.r#type == "page" {
                 let tid = event.target_info.target_id.clone();
                 let b_inner = b_target.clone();
+                let is_auth_inner = is_auth_for_events;
                 tokio::task::spawn(async move {
                     // CDP 연결 확보를 위한 최소한의 시간 대기
                     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -549,7 +618,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await;
                         
                         // 특정 페이지 로딩 상태(예: DOMContentLoaded)까지 기다리지 않고 즉시 셋업 시도
-                        let _ = setup_page(b_inner.clone(), page).await;
+                        let _ = setup_page(b_inner.clone(), page, is_auth_inner).await;
                     }
                 });
             }
@@ -567,7 +636,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 모든 새 문서에 스크립트가 자동 실행되도록 브라우저 내부 설정
             let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await;
             // RPC 바인딩 및 이벤트 리스너 세팅
-            let _ = setup_page(browser.clone(), page.clone()).await;
+            let _ = setup_page(browser.clone(), page.clone(), is_authenticated).await;
             
             // 모든 세팅이 완료된 이후에 수동으로 타겟 URL로 이동시킵니다.
             // 이렇게 해야 페이지가 새로 로드되면서 이미 예약된 스크립트가 100% 동작하여 버튼이 노출됩니다.
