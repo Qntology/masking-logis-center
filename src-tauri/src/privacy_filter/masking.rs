@@ -1,9 +1,59 @@
 use anyhow::Result;
 use std::path::Path;
+use std::collections::HashMap;
 use crate::privacy_filter::PrivacyFilterModel;
 
 pub struct PrivacyManager {
-    model: PrivacyFilterModel,
+    pub model: PrivacyFilterModel,
+}
+
+pub struct PrivacySession {
+    entity_map: HashMap<String, String>, // Original text -> Placeholder
+    reverse_map: HashMap<String, String>, // Placeholder -> Original text
+    counter_map: HashMap<String, usize>, // Label -> Count
+}
+
+impl PrivacySession {
+    pub fn new() -> Self {
+        Self {
+            entity_map: HashMap::new(),
+            reverse_map: HashMap::new(),
+            counter_map: HashMap::new(),
+        }
+    }
+
+    pub fn get_or_create_placeholder(&mut self, text: &str, label: &str, record_idx: usize) -> String {
+        let clean_label = if label.contains('-') {
+            label.split('-').nth(1).unwrap_or(label)
+        } else {
+            label
+        };
+
+        if let Some(placeholder) = self.entity_map.get(text) {
+            placeholder.clone()
+        } else {
+            let count = self.counter_map.entry(clean_label.to_string()).or_insert(0);
+            *count += 1;
+            let placeholder = format!("[RECORD_{}][{}_{}]", record_idx, clean_label, count);
+            self.entity_map.insert(text.to_string(), placeholder.clone());
+            self.reverse_map.insert(placeholder.clone(), text.to_string());
+            placeholder
+        }
+    }
+
+    pub fn unmask_text(&self, text: &str) -> String {
+        let mut result = text.to_string();
+        // Replace longest placeholders first to avoid partial matches
+        let mut placeholders: Vec<_> = self.reverse_map.keys().collect();
+        placeholders.sort_by(|a, b| b.len().cmp(&a.len()));
+
+        for placeholder in placeholders {
+            if let Some(original) = self.reverse_map.get(placeholder) {
+                result = result.replace(placeholder, original);
+            }
+        }
+        result
+    }
 }
 
 impl PrivacyManager {
@@ -13,12 +63,41 @@ impl PrivacyManager {
         Ok(Self { model })
     }
 
-    pub fn mask_text(&self, text: &str) -> Result<String> {
-        let spans = self.model.predict(text)?;
-        let mut masked_text = text.to_string();
-        for span in spans.iter().rev() {
-            masked_text.replace_range(span.start..span.end, "[MASKED]");
+    pub fn mask_records(&self, texts: Vec<String>) -> Result<Vec<String>> {
+        let mut session = PrivacySession::new();
+        let mut results = Vec::new();
+
+        for (idx, text) in texts.into_iter().enumerate() {
+            let spans = self.model.predict(&text)?;
+            let mut masked_text = text.clone();
+            
+            // Sort spans by start position in reverse to replace correctly
+            let mut sorted_spans = spans;
+            sorted_spans.sort_by(|a, b| b.start.cmp(&a.start));
+
+            for span in sorted_spans {
+                let label = span.label.to_uppercase();
+                
+                // Selective Exposure Logic
+                // White-listed labels (Plain text)
+                if matches!(label.as_str(), "B-CITY" | "I-CITY" | "E-CITY" | "S-CITY" | 
+                                           "B-COUNTY" | "I-COUNTY" | "E-COUNTY" | "S-COUNTY" |
+                                           "B-STATE" | "I-STATE" | "E-STATE" | "S-STATE") {
+                    continue; 
+                }
+
+                // Masking targets
+                let placeholder = session.get_or_create_placeholder(&span.text, &label, idx);
+                masked_text.replace_range(span.start..span.end, &placeholder);
+            }
+            results.push(masked_text);
         }
-        Ok(masked_text)
+
+        Ok(results)
+    }
+
+    pub fn mask_text(&self, text: &str) -> Result<String> {
+        let results = self.mask_records(vec![text.to_string()])?;
+        Ok(results[0].clone())
     }
 }

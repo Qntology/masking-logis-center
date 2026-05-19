@@ -65,13 +65,21 @@ pub async fn get_or_create_table() -> Result<lancedb::Table, lancedb::Error> {
     }
 }
 
-pub async fn save_records(records: Vec<CommerceRecord>) -> Result<(), lancedb::Error> {
+pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&crate::categorizer::Categorizer>) -> Result<(), lancedb::Error> {
     let table = get_or_create_table().await?;
     let privacy_manager = crate::privacy_filter::masking::PrivacyManager::new("models/privacy-filter").map_err(|e: anyhow::Error| lancedb::Error::Runtime { message: e.to_string() })?;
 
     let mut records = records;
     for record in &mut records {
+        // 1. Privacy Masking
         record.masking = privacy_manager.mask_text(&record.context).map_err(|e: anyhow::Error| lancedb::Error::Runtime { message: e.to_string() })?;
+        
+        // 2. Domain Categorization
+        if let Some(cat) = categorizer {
+            if let Ok(domain) = cat.classify_text(&record.context).await {
+                record.domain = domain.as_str().to_string();
+            }
+        }
     }
     
     for record in &records {
@@ -191,12 +199,62 @@ pub async fn fetch_drafts() -> Result<Vec<CommerceRecord>, lancedb::Error> {
 }
 
 #[allow(dead_code)]
-pub async fn search_context(query: &str) -> Result<Vec<CommerceRecord>, lancedb::Error> {
+pub async fn search_context(query: &str, domain_filter: Option<&str>) -> Result<Vec<CommerceRecord>, lancedb::Error> {
     let table = get_or_create_table().await?;
-    let _results = table
-        .query()
-        .full_text_search(FullTextSearchQuery::new(query.to_string()))
-        .execute()
-        .await?;
-    Ok(vec![])
+    let mut search_query = table.query()
+        .full_text_search(FullTextSearchQuery::new(query.to_string()));
+    
+    if let Some(domain) = domain_filter {
+        let filter = format!("domain = '{}'", domain.to_uppercase());
+        search_query = search_query.only_if(filter);
+    }
+    
+    let mut stream = search_query.execute().await?;
+    let mut results = Vec::new();
+
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result.map_err(|e| lancedb::Error::Runtime { message: e.to_string() })?;
+        
+        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let hosts = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        let urls = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        let titles = batch.column(3).as_any().downcast_ref::<StringArray>().unwrap();
+        let domains = batch.column(4).as_any().downcast_ref::<StringArray>().unwrap();
+        let contexts = batch.column(5).as_any().downcast_ref::<StringArray>().unwrap();
+        let maskings = batch.column(6).as_any().downcast_ref::<StringArray>().unwrap();
+        let statuses = batch.column(7).as_any().downcast_ref::<StringArray>().unwrap();
+        let tracks = batch.column(8).as_any().downcast_ref::<StringArray>().unwrap();
+        let versions = batch.column(9).as_any().downcast_ref::<Int32Array>().unwrap();
+        let created_ats = batch.column(10).as_any().downcast_ref::<Int64Array>().unwrap();
+        let updated_ats = batch.column(11).as_any().downcast_ref::<Int64Array>().unwrap();
+        let vectors_list = batch.column(12).as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+        let vectors_values = vectors_list.values().as_any().downcast_ref::<Float32Array>().unwrap();
+
+        for i in 0..batch.num_rows() {
+            let start_idx = i * 768;
+            let end_idx = start_idx + 768;
+            let mut vector_data = Vec::with_capacity(768);
+            for j in start_idx..end_idx {
+                vector_data.push(vectors_values.value(j));
+            }
+
+            results.push(CommerceRecord {
+                id: ids.value(i).to_string(),
+                host: hosts.value(i).to_string(),
+                url: urls.value(i).to_string(),
+                title: titles.value(i).to_string(),
+                domain: domains.value(i).to_string(),
+                context: contexts.value(i).to_string(),
+                masking: maskings.value(i).to_string(),
+                status: statuses.value(i).to_string(),
+                track: tracks.value(i).to_string(),
+                version: versions.value(i),
+                created_at: created_ats.value(i),
+                updated_at: updated_ats.value(i),
+                vector: vector_data,
+            });
+        }
+    }
+    
+    Ok(results)
 }

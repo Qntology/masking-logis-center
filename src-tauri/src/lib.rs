@@ -7,4 +7,5 @@ pub mod harness;
 pub mod queue;
 pub mod domain;
 pub mod categorizer;
+pub mod assistant;
 
