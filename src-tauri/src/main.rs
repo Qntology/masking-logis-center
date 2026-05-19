@@ -166,20 +166,33 @@ const OVERLAY_SCRIPT: &str = r#"
 
         const footer = document.createElement('div');
         footer.className = 'footer';
+        
+        const actionDiv = document.createElement('div');
+        actionDiv.style.cssText = 'display: flex; gap: 5px; margin-bottom: 10px;';
         const extractBtn = document.createElement('button');
         extractBtn.id = 'extract-btn';
         extractBtn.textContent = '추출';
         const pushBtn = document.createElement('button');
         pushBtn.id = 'push-btn';
         pushBtn.textContent = 'Push Selected';
+        actionDiv.appendChild(extractBtn);
+        actionDiv.appendChild(pushBtn);
+
+        const chatDiv = document.createElement('div');
+        chatDiv.style.cssText = 'display: flex; gap: 5px;';
         const cliInput = document.createElement('input');
         cliInput.type = 'text';
         cliInput.id = 'cli-input';
         cliInput.placeholder = '메시지 입력...';
+        cliInput.style.cssText = 'flex: 1;';
+        const sendBtn = document.createElement('button');
+        sendBtn.id = 'send-btn';
+        sendBtn.textContent = '전송';
+        chatDiv.appendChild(cliInput);
+        chatDiv.appendChild(sendBtn);
         
-        footer.appendChild(extractBtn);
-        footer.appendChild(pushBtn);
-        footer.appendChild(cliInput);
+        footer.appendChild(actionDiv);
+        footer.appendChild(chatDiv);
 
         agentContainer.appendChild(header);
         agentContainer.appendChild(stagedList);
@@ -302,11 +315,72 @@ const OVERLAY_SCRIPT: &str = r#"
         
         extractBtn.onclick = autoExtract;
 
+        // 대기 상태 표시 UI 관리 함수
+        function showProgressLog() {
+            if (shadow.getElementById('progress-log')) return;
+            const rpcLogDiv = document.createElement('div');
+            rpcLogDiv.id = 'progress-log';
+            rpcLogDiv.style.color = '#ff9800'; // 진행 중임을 나타내는 주황색
+            const rpcStrong = document.createElement('strong');
+            rpcStrong.textContent = 'AI (Processing): ';
+            rpcLogDiv.appendChild(rpcStrong);
+            rpcLogDiv.appendChild(document.createTextNode('데이터 마스킹 및 임베딩 생성 중입니다... 잠시만 기다려주세요.'));
+            log.appendChild(rpcLogDiv);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function hideProgressLog() {
+            const progressLog = shadow.getElementById('progress-log');
+            if (progressLog) progressLog.remove();
+        }
+
         pushBtn.onclick = () => {
             const selected = Array.from(shadow.querySelectorAll('input:checked')).map(cb => cb.dataset.id);
+            if (selected.length === 0) return;
             const payload = stagedItems.filter(i => selected.includes(i.id));
+            
+            // 탭 간 상태 공유를 위해 localStorage 사용 및 진행 상태 표시
+            localStorage.setItem('gemini_push_status', JSON.stringify({ status: 'processing', timestamp: Date.now() }));
+            showProgressLog();
+
             if (window.gemini_rpc) window.gemini_rpc("push_data:" + JSON.stringify(payload));
         };
+
+        function sendChatMessage() {
+            const text = cliInput.value.trim();
+            if (!text) return;
+
+            // UI에 사용자 메시지 표시
+            const userLogDiv = document.createElement('div');
+            userLogDiv.style.cssText = 'color: green; margin-top: 10px; white-space: pre-wrap;';
+            const userStrong = document.createElement('strong');
+            userStrong.textContent = 'You: ';
+            userLogDiv.appendChild(userStrong);
+            userLogDiv.appendChild(document.createTextNode(text));
+            log.appendChild(userLogDiv);
+            log.scrollTop = log.scrollHeight;
+
+            // 백엔드로 채팅 요청 전송
+            if (window.gemini_rpc) {
+                const payload = {
+                    messages: [{ role: 'user', content: { parts: [{ text: text }] } }],
+                    model: 'gemini-3.1-flash-lite-preview'
+                };
+                console.log("[JS] Sending gemini_chat payload:", payload);
+                window.gemini_rpc("gemini_chat:" + JSON.stringify(payload));
+            }
+            cliInput.value = '';
+            
+            // 스트리밍 응답을 새 영역에 쓰기 위해 초기화
+            window._currentAiMessageDiv = null;
+        }
+
+        sendBtn.onclick = sendChatMessage;
+        cliInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendChatMessage();
+            }
+        });
 
         // 자동 실행 및 상태 유지
         if (document.readyState === 'complete') {
@@ -327,6 +401,31 @@ const OVERLAY_SCRIPT: &str = r#"
         });
         urlObserver.observe(document.documentElement, { childList: true, subtree: true });
 
+        // 다른 브라우저 탭에 상태 전파를 위한 storage 이벤트 리스너
+        window.addEventListener('storage', (e) => {
+            if (e.key === 'gemini_push_status' && e.newValue) {
+                try {
+                    const data = JSON.parse(e.newValue);
+                    if (data.status === 'processing') {
+                        showProgressLog();
+                    } else if (data.status === 'complete') {
+                        hideProgressLog();
+                        // 이벤트 발생 탭 외의 다른 탭에서도 최종 완료 메시지를 동기화 출력
+                        if (log) {
+                            const rpcLogDiv = document.createElement('div');
+                            rpcLogDiv.style.color = 'blue';
+                            const rpcStrong = document.createElement('strong');
+                            rpcStrong.textContent = 'AI: ';
+                            rpcLogDiv.appendChild(rpcStrong);
+                            rpcLogDiv.appendChild(document.createTextNode(data.message));
+                            log.appendChild(rpcLogDiv);
+                            log.scrollTop = log.scrollHeight;
+                        }
+                    }
+                } catch(err) {}
+            }
+        });
+
         window.addEventListener('gemini_rpc_response', (e) => {
             try {
                 // JSON 형태의 응답(fetch_drafts) 처리
@@ -345,14 +444,47 @@ const OVERLAY_SCRIPT: &str = r#"
                 // JSON 파싱 실패 시 일반 텍스트 응답으로 간주하여 아래 로그 출력 진행
             }
 
+            // Push 데이터 처리 완료 응답일 경우 상태 초기화 전파
+            if (typeof e.detail === 'string' && (e.detail.includes('Data pushed successfully') || e.detail.includes('DB Error:'))) {
+                localStorage.setItem('gemini_push_status', JSON.stringify({ status: 'complete', message: e.detail, timestamp: Date.now() }));
+                hideProgressLog();
+            }
+
             if (log) {
-                const rpcLogDiv = document.createElement('div');
-                rpcLogDiv.style.color = 'blue';
-                const rpcStrong = document.createElement('strong');
-                rpcStrong.textContent = 'AI: ';
-                rpcLogDiv.appendChild(rpcStrong);
-                rpcLogDiv.appendChild(document.createTextNode(e.detail));
-                log.appendChild(rpcLogDiv);
+                if (e.detail === 'Streaming started') {
+                    window._currentAiMessageDiv = null;
+                    return;
+                }
+                
+                const isSystemMessage = typeof e.detail === 'string' && (
+                    e.detail.includes('Data synced') || 
+                    e.detail.includes('Data pushed successfully') || 
+                    e.detail.includes('DB Error:') ||
+                    e.detail.includes('DevTools opened') ||
+                    e.detail.includes('Error:')
+                );
+
+                if (isSystemMessage) {
+                    window._currentAiMessageDiv = null; // 시스템 로그 발생 시 스트리밍 텍스트 분리
+                }
+
+                if (!isSystemMessage && window._currentAiMessageDiv) {
+                    // 동일한 대화 응답의 스트리밍 데이터 이어서 붙이기
+                    window._currentAiMessageDiv.appendChild(document.createTextNode(e.detail));
+                } else {
+                    const rpcLogDiv = document.createElement('div');
+                    rpcLogDiv.style.cssText = isSystemMessage ? 'color: gray; font-size: 11px; margin-top: 5px;' : 'color: blue; margin-top: 5px; white-space: pre-wrap; line-height: 1.4;';
+                    const rpcStrong = document.createElement('strong');
+                    rpcStrong.textContent = isSystemMessage ? 'System: ' : 'AI: ';
+                    rpcLogDiv.appendChild(rpcStrong);
+                    rpcLogDiv.appendChild(document.createTextNode(e.detail));
+                    log.appendChild(rpcLogDiv);
+                    
+                    if (!isSystemMessage) {
+                        window._currentAiMessageDiv = rpcLogDiv;
+                    }
+                }
+                log.scrollTop = log.scrollHeight;
             }
         });
     }
@@ -486,18 +618,58 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     let data = payload["gemini_chat:".len()..].to_string();
                     let page_c = page_clone.clone();
                     tokio::spawn(async move {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-                           let messages: Vec<gemini::types::ChatMessage> = serde_json::from_value(v["messages"].clone()).unwrap_or_default();
-                           let model = v["model"].as_str().unwrap_or("gemini-1.5-flash").to_string();
-                           let client = gemini::client::GeminiClient::new(model);
-                           
-                           let _ = client.stream_message(messages, |chunk| {
-                               let script = format!(
-                                   "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
-                                   json!(chunk)
-                               );
-                               let _ = page_c.evaluate(script);
-                           }).await;
+                        println!("[Rust] Received gemini_chat payload: {}", data);
+                        match serde_json::from_str::<serde_json::Value>(&data) {
+                            Ok(v) => {
+                                let messages: Vec<gemini::types::ChatMessage> = serde_json::from_value(v["messages"].clone()).unwrap_or_default();
+                                let mut model = v["model"].as_str().unwrap_or("gemini-3.1-flash-lite-preview").to_string();
+                                
+                                // Gemini API의 /models 엔드포인트를 조회하여 제공 가능한 모델 중 가장 낮은 버전의 flash-lite를 동적으로 선택합니다.
+                                if let Ok(token) = gemini::auth::get_auth_token() {
+                                    let url = "https://generativelanguage.googleapis.com/v1beta/models";
+                                    let http_client = reqwest::Client::new();
+                                    if let Ok(res) = http_client.get(url).bearer_auth(token).send().await {
+                                        if let Ok(models_resp) = res.json::<serde_json::Value>().await {
+                                            if let Some(models_array) = models_resp["models"].as_array() {
+                                                let mut flash_lite_models: Vec<String> = models_array.iter()
+                                                    .filter_map(|m| m["name"].as_str())
+                                                    .map(|name| name.strip_prefix("models/").unwrap_or(name).to_string())
+                                                    .filter(|name| name.contains("flash-lite"))
+                                                    .collect();
+                                                
+                                                // 알파벳 및 숫자 정렬을 수행하면 낮은 버전(예: 2.0)이 배열의 가장 앞으로 오게 됩니다.
+                                                flash_lite_models.sort();
+                                                if let Some(lowest_version) = flash_lite_models.first() {
+                                                    println!("[Rust] API 목록에서 가장 낮은 버전의 flash-lite 모델을 동적 선택했습니다: {}", lowest_version);
+                                                    model = lowest_version.clone();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                println!("[Rust] Using model: {}", model);
+                                let client = gemini::client::GeminiClient::new(model);
+                               
+                                let stream_result = client.stream_message(messages, move |chunk| {
+                                    let script = format!(
+                                        "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
+                                        json!(chunk)
+                                    );
+                                    // evaluate는 비동기 함수(Future)이므로 동기 클로저 내에서 tokio::spawn으로 감싸 실행을 보장합니다.
+                                    let page_inner = page_c.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = page_inner.evaluate(script).await {
+                                            eprintln!("[Rust] Evaluate error in stream: {}", e);
+                                        }
+                                    });
+                                }).await;
+
+                                if let Err(e) = stream_result {
+                                    eprintln!("[Rust] Stream execute error: {}", e);
+                                }
+                            },
+                            Err(e) => eprintln!("[Rust] Failed to parse gemini_chat json: {}", e),
                         }
                     });
                     "Streaming started".to_string()
