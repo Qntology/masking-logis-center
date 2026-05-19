@@ -2557,6 +2557,7 @@ dependencies = [
  "safetensors 0.7.0",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.11.0",
  "similar",
  "tantivy",
