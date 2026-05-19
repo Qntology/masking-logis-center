@@ -1,17 +1,16 @@
 use lancedb::connect;
 use lancedb::index::scalar::{FtsIndexBuilder, FullTextSearchQuery};
 use lancedb::index::Index;
-use lancedb::query::QueryBase;
-use lancedb::query::ExecutableQuery;
+use lancedb::query::{ExecutableQuery, QueryBase};
 use serde::{Deserialize, Serialize};
 use lance_tokenizer::Language;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, Int32Type, Int64Type, Float32Type};
 use arrow::record_batch::RecordBatch;
-use arrow::array::{ArrayRef, StringArray, Int32Array, Int64Array, Float32Array, Float32Builder, FixedSizeListArray, FixedSizeListBuilder};
-use futures::StreamExt;
+use arrow::array::{ArrayRef, StringArray, Int32Array, Int64Array, Float32Builder, FixedSizeListBuilder, AsArray};
 use std::sync::Arc;
+use futures::StreamExt;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CommerceRecord {
     pub id: String,
     pub host: String,
@@ -25,15 +24,14 @@ pub struct CommerceRecord {
     pub version: i32,
     pub created_at: i64,
     pub updated_at: i64,
-    #[serde(default)]
     pub vector: Vec<f32>,
 }
 
-#[allow(dead_code)]
 pub async fn get_or_create_table() -> Result<lancedb::Table, lancedb::Error> {
-    let db = connect("data/commerce-db").execute().await?;
+    let db = connect("data/universal-db").execute().await?;
+    let table_name = "entities_v3"; // Use v3 to ensure schema compatibility
 
-    match db.open_table("commerce_records").execute().await {
+    match db.open_table(table_name).execute().await {
         Ok(table) => Ok(table),
         Err(_) => {
             let schema = Arc::new(Schema::new(vec![
@@ -52,7 +50,7 @@ pub async fn get_or_create_table() -> Result<lancedb::Table, lancedb::Error> {
                 Field::new("vector", DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 768), true),
             ]));
             let empty_batch = RecordBatch::new_empty(schema);
-            let table = db.create_table("commerce_records", empty_batch).execute().await?;
+            let table = db.create_table(table_name, empty_batch).execute().await?;
 
             let fts_builder = FtsIndexBuilder::new("ngram".to_string(), Language::English)
                 .ngram_min_length(2)
@@ -153,46 +151,7 @@ pub async fn fetch_drafts() -> Result<Vec<CommerceRecord>, lancedb::Error> {
 
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result.map_err(|e| lancedb::Error::Runtime { message: e.to_string() })?;
-        
-        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let hosts = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-        let urls = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
-        let titles = batch.column(3).as_any().downcast_ref::<StringArray>().unwrap();
-        let domains = batch.column(4).as_any().downcast_ref::<StringArray>().unwrap();
-        let contexts = batch.column(5).as_any().downcast_ref::<StringArray>().unwrap();
-        let maskings = batch.column(6).as_any().downcast_ref::<StringArray>().unwrap();
-        let statuses = batch.column(7).as_any().downcast_ref::<StringArray>().unwrap();
-        let tracks = batch.column(8).as_any().downcast_ref::<StringArray>().unwrap();
-        let versions = batch.column(9).as_any().downcast_ref::<Int32Array>().unwrap();
-        let created_ats = batch.column(10).as_any().downcast_ref::<Int64Array>().unwrap();
-        let updated_ats = batch.column(11).as_any().downcast_ref::<Int64Array>().unwrap();
-        let vectors_list = batch.column(12).as_any().downcast_ref::<FixedSizeListArray>().unwrap();
-        let vectors_values = vectors_list.values().as_any().downcast_ref::<Float32Array>().unwrap();
-
-        for i in 0..batch.num_rows() {
-            let start_idx = i * 768;
-            let end_idx = start_idx + 768;
-            let mut vector_data = Vec::with_capacity(768);
-            for j in start_idx..end_idx {
-                vector_data.push(vectors_values.value(j));
-            }
-
-            results.push(CommerceRecord {
-                id: ids.value(i).to_string(),
-                host: hosts.value(i).to_string(),
-                url: urls.value(i).to_string(),
-                title: titles.value(i).to_string(),
-                domain: domains.value(i).to_string(),
-                context: contexts.value(i).to_string(),
-                masking: maskings.value(i).to_string(),
-                status: statuses.value(i).to_string(),
-                track: tracks.value(i).to_string(),
-                version: versions.value(i),
-                created_at: created_ats.value(i),
-                updated_at: updated_ats.value(i),
-                vector: vector_data,
-            });
-        }
+        extract_from_batch(&batch, &mut results)?;
     }
     
     Ok(results)
@@ -214,47 +173,49 @@ pub async fn search_context(query: &str, domain_filter: Option<&str>) -> Result<
 
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result.map_err(|e| lancedb::Error::Runtime { message: e.to_string() })?;
-        
-        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let hosts = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-        let urls = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
-        let titles = batch.column(3).as_any().downcast_ref::<StringArray>().unwrap();
-        let domains = batch.column(4).as_any().downcast_ref::<StringArray>().unwrap();
-        let contexts = batch.column(5).as_any().downcast_ref::<StringArray>().unwrap();
-        let maskings = batch.column(6).as_any().downcast_ref::<StringArray>().unwrap();
-        let statuses = batch.column(7).as_any().downcast_ref::<StringArray>().unwrap();
-        let tracks = batch.column(8).as_any().downcast_ref::<StringArray>().unwrap();
-        let versions = batch.column(9).as_any().downcast_ref::<Int32Array>().unwrap();
-        let created_ats = batch.column(10).as_any().downcast_ref::<Int64Array>().unwrap();
-        let updated_ats = batch.column(11).as_any().downcast_ref::<Int64Array>().unwrap();
-        let vectors_list = batch.column(12).as_any().downcast_ref::<FixedSizeListArray>().unwrap();
-        let vectors_values = vectors_list.values().as_any().downcast_ref::<Float32Array>().unwrap();
-
-        for i in 0..batch.num_rows() {
-            let start_idx = i * 768;
-            let end_idx = start_idx + 768;
-            let mut vector_data = Vec::with_capacity(768);
-            for j in start_idx..end_idx {
-                vector_data.push(vectors_values.value(j));
-            }
-
-            results.push(CommerceRecord {
-                id: ids.value(i).to_string(),
-                host: hosts.value(i).to_string(),
-                url: urls.value(i).to_string(),
-                title: titles.value(i).to_string(),
-                domain: domains.value(i).to_string(),
-                context: contexts.value(i).to_string(),
-                masking: maskings.value(i).to_string(),
-                status: statuses.value(i).to_string(),
-                track: tracks.value(i).to_string(),
-                version: versions.value(i),
-                created_at: created_ats.value(i),
-                updated_at: updated_ats.value(i),
-                vector: vector_data,
-            });
-        }
+        extract_from_batch(&batch, &mut results)?;
     }
     
     Ok(results)
+}
+
+fn extract_from_batch(batch: &RecordBatch, results: &mut Vec<CommerceRecord>) -> Result<(), lancedb::Error> {
+    let ids = batch.column(0).as_string::<i32>();
+    let hosts = batch.column(1).as_string::<i32>();
+    let urls = batch.column(2).as_string::<i32>();
+    let titles = batch.column(3).as_string::<i32>();
+    let domains = batch.column(4).as_string::<i32>();
+    let contexts = batch.column(5).as_string::<i32>();
+    let maskings = batch.column(6).as_string::<i32>();
+    let statuses = batch.column(7).as_string::<i32>();
+    let tracks = batch.column(8).as_string::<i32>();
+    let versions = batch.column(9).as_primitive::<Int32Type>();
+    let created_ats = batch.column(10).as_primitive::<Int64Type>();
+    let updated_ats = batch.column(11).as_primitive::<Int64Type>();
+    let vectors_list = batch.column(12).as_fixed_size_list();
+    let vectors_values = vectors_list.values().as_primitive::<Float32Type>();
+
+    for i in 0..batch.num_rows() {
+        let mut vector_data = Vec::with_capacity(768);
+        for j in 0..768 {
+            vector_data.push(vectors_values.value(i * 768 + j));
+        }
+
+        results.push(CommerceRecord {
+            id: ids.value(i).to_string(),
+            host: hosts.value(i).to_string(),
+            url: urls.value(i).to_string(),
+            title: titles.value(i).to_string(),
+            domain: domains.value(i).to_string(),
+            context: contexts.value(i).to_string(),
+            masking: maskings.value(i).to_string(),
+            status: statuses.value(i).to_string(),
+            track: tracks.value(i).to_string(),
+            version: versions.value(i),
+            created_at: created_ats.value(i),
+            updated_at: updated_ats.value(i),
+            vector: vector_data,
+        });
+    }
+    Ok(())
 }

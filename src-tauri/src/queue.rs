@@ -33,7 +33,7 @@ pub struct TaskProcessor {
 }
 
 impl TaskProcessor {
-    pub async fn run(mut self, mut state: State) {
+    pub async fn run(mut self, state: State) {
         while let Some(event) = self.receiver.recv().await {
             match event {
                 Event::UpdateState { event_name, responder } => {

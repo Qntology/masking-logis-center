@@ -336,10 +336,14 @@ const OVERLAY_SCRIPT: &str = r#"
 })();
 "#;
 
-async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<(), Box<dyn std::error::Error>> {
+async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authenticated: bool) -> Result<(), Box<dyn std::error::Error>> {
     // RPC 바인딩 등록
     let _ = page.execute(AddBindingParams::new("gemini_rpc")).await;
     
+    // 인증 상태를 전역 변수로 주입
+    let auth_script = format!("window.is_authenticated = {};", is_authenticated);
+    let _ = page.evaluate(auth_script).await;
+
     // 이미 로드된 현재 페이지 상태에서 UI가 즉시 나타나도록 강제 실행
     let _ = page.evaluate(OVERLAY_SCRIPT).await;
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
@@ -451,10 +455,18 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page) -> Result<
                         Err(e) => format!("Error: {}", e),
                     }
                 };
-                let script = format!(
-                    "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
-                    json!(response)
-                );
+                let script = if response.starts_with('{') && response.ends_with('}') {
+                    // response is already a JSON string (likely from json!().to_string())
+                    format!(
+                        "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
+                        response
+                    )
+                } else {
+                    format!(
+                        "window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));",
+                        json!(response)
+                    )
+                };
                 let _ = page_clone.evaluate(script).await;
             }
         }

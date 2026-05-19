@@ -40,7 +40,7 @@ reqwest = { version = "0.13.3", features = ["json", "stream"] }
 bytes = "1.11.1"
 
 [features]
-default = ["cuda"]
+default = ["cpu"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 cpu = []
