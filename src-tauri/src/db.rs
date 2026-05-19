@@ -69,14 +69,16 @@ pub async fn get_or_create_table() -> Result<lancedb::Table, lancedb::Error> {
 
 pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&crate::categorizer::Categorizer>) -> Result<(), lancedb::Error> {
     let table = get_or_create_table().await?;
-    let privacy_manager = crate::privacy_filter::masking::PrivacyManager::new("models/privacy-filter").map_err(|e: anyhow::Error| lancedb::Error::Runtime { message: e.to_string() })?;
 
     let mut records = records;
     for record in &mut records {
-        // 1. Privacy Masking
-        record.masking = privacy_manager.mask_text(&record.context).map_err(|e: anyhow::Error| lancedb::Error::Runtime { message: e.to_string() })?;
+        // DRAFT 상태이거나 아직 마스킹 로직을 타지 않아 비어있는 경우 context 텍스트를 기본값으로 채워줍니다.
+        // (실제 정규 마스킹 처리는 push_data 시점 백엔드에서 수행됨)
+        if record.masking.is_empty() {
+            record.masking = record.context.clone();
+        }
         
-        // 2. Domain Categorization
+        // Domain Categorization
         if let Some(cat) = categorizer {
             if let Ok(domain) = cat.classify_text(&record.context).await {
                 record.domain = domain.as_str().to_string();
