@@ -109,33 +109,24 @@ const OVERLAY_SCRIPT: &str = r#"
             :host { all: initial; }
             * { box-sizing: border-box !important; }
             #agent-container { 
-                position: fixed; top: 0; right: 0; bottom: 0; 
-                width: 350px; z-index: 2147483648;
+                position: fixed; top: 50px; left: 50px; right: 50px; bottom: 50px; 
+                margin: auto; border-radius: 10px; overflow: hidden;
+                min-width: 300px; max-width: 760px; width:100%; z-index: 2147483648;
                 background: white !important; border-left: 1px solid #ccc;
                 display: flex !important; flex-direction: column;
-                transition: transform 0.3s ease-in-out; transform: translateX(100%);
+                transition: opacity 0.3s ease-in-out; 
                 box-shadow: -5px 0 15px rgba(0,0,0,0.2);
-                pointer-events: auto;
+                pointer-events: none;
+                opacity:0;
             }
-            #toggle-btn { 
-                all: unset;
-                position: fixed; bottom: 30px; right: 30px; 
-                width: 60px !important; height: 60px !important; 
-                background: #007bff !important; color: white !important;
-                border-radius: 50% !important; cursor: pointer !important; 
-                z-index: 2147483649;
-                display: flex !important; align-items: center !important; 
-                justify-content: center !important;
-                border: 4px solid white !important; 
-                font-weight: bold !important; 
-                font-family: sans-serif !important;
-                font-size: 16px !important;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
-                pointer-events: auto;
-                transition: all 0.2s ease;
-            }
-            #toggle-btn:hover { background: #0056b3 !important; transform: scale(1.05); }
-            header { padding: 15px; background: #f0f0f0 !important; font-weight: bold !important; color: #000 !important; border-bottom: 1px solid #ddd; display: flex !important; justify-content: space-between; align-items: center; flex-shrink: 0; }
+            #agent-container.open { opacity: 1; pointer-events: auto; }
+            header { padding: 12px; background: #f0f0f0 !important; font-weight: bold !important; color: #000 !important; border-bottom: 1px solid #ddd; display: flex !important; justify-content: space-between; align-items: center; flex-shrink: 0; gap: 10px; }
+            .status-toggle { display: flex; background: #ddd; border-radius: 15px; padding: 2px; font-size: 11px; }
+            .status-toggle span { padding: 4px 8px; cursor: pointer; border-radius: 13px; transition: background 0.2s; }
+            .status-toggle span.active { background: #007bff; color: white; }
+            .domain-filter { display: flex; gap: 5px; padding: 10px 15px; background: #fff; border-bottom: 1px solid #eee; flex-shrink: 0; overflow-x: auto; }
+            .domain-filter button { padding: 4px 10px; border-radius: 20px; border: 1px solid #ddd; background: #f9f9f9; font-size: 11px; white-space: nowrap; }
+            .domain-filter button.active { background: #333; color: white; border-color: #333; }
             .content { flex: 1; padding: 15px; overflow-y: auto; background: #ffffff !important; color: #000000 !important; min-height: 0 !important; }
             .footer { padding: 15px; background: #f8f9fa !important; border-top: 1px solid #eee; flex-shrink: 0; }
             input { width: 100%; padding: 10px; border: 1px solid #ddd !important; border-radius: 4px; background: white !important; color: black !important; }
@@ -143,19 +134,42 @@ const OVERLAY_SCRIPT: &str = r#"
             .staged-item { display: flex !important; align-items: center !important; margin-bottom: 10px; color: black !important; }
         `;
 
-        const toggleBtn = document.createElement('div');
-        toggleBtn.id = 'toggle-btn';
-        toggleBtn.textContent = 'AI';
-
         const agentContainer = document.createElement('div');
         agentContainer.id = 'agent-container';
 
+        // 헤더 구성 (타이틀 + 상태 토글 + 닫기 버튼)
         const header = document.createElement('header');
-        header.textContent = 'Staging Area (LanceDB) ';
+        const headerTitle = document.createElement('span');
+        headerTitle.textContent = 'LDB';
+        
+        const statusToggle = document.createElement('div');
+        statusToggle.className = 'status-toggle';
+        const draftTab = document.createElement('span');
+        draftTab.textContent = 'DRAFT';
+        draftTab.className = 'active';
+        const mainTab = document.createElement('span');
+        mainTab.textContent = 'MAIN';
+        statusToggle.appendChild(draftTab);
+        statusToggle.appendChild(mainTab);
+
         const closeBtn = document.createElement('button');
         closeBtn.id = 'close-btn';
         closeBtn.textContent = 'X';
+        
+        header.appendChild(headerTitle);
+        header.appendChild(statusToggle);
         header.appendChild(closeBtn);
+
+        // 도메인 필터 바 구성
+        const domainFilterBar = document.createElement('div');
+        domainFilterBar.className = 'domain-filter';
+        const domains = ['ALL', 'COMMERCE', 'LOGISTICS', 'TRADE'];
+        domains.forEach(d => {
+            const btn = document.createElement('button');
+            btn.textContent = d;
+            if (d === 'ALL') btn.className = 'active';
+            domainFilterBar.appendChild(btn);
+        });
 
         const stagedList = document.createElement('div');
         stagedList.className = 'content';
@@ -195,14 +209,16 @@ const OVERLAY_SCRIPT: &str = r#"
         footer.appendChild(chatDiv);
 
         agentContainer.appendChild(header);
+        agentContainer.appendChild(domainFilterBar); // 도메인 필터 바 추가
         agentContainer.appendChild(stagedList);
         agentContainer.appendChild(footer);
 
         shadow.appendChild(style);
-        shadow.appendChild(toggleBtn);
         shadow.appendChild(agentContainer);
 
         let stagedItems = [];
+        let currentStatusFilter = 'DRAFT';
+        let currentDomainFilter = 'ALL';
 
         // UI 리스트를 갱신하는 독립 렌더링 함수
         function renderStagedList() {
@@ -210,7 +226,14 @@ const OVERLAY_SCRIPT: &str = r#"
             const items = stagedList.querySelectorAll('.staged-item, .login-container');
             items.forEach(item => item.remove());
 
-            stagedItems.forEach(item => {
+            // 필터링 로직 적용
+            const filtered = stagedItems.filter(item => {
+                const statusMatch = item.status === currentStatusFilter;
+                const domainMatch = currentDomainFilter === 'ALL' || item.domain === currentDomainFilter;
+                return statusMatch && domainMatch;
+            });
+
+            filtered.forEach(item => {
                 const itemDiv = document.createElement('div');
                 itemDiv.className = 'staged-item';
                 const checkbox = document.createElement('input');
@@ -220,6 +243,17 @@ const OVERLAY_SCRIPT: &str = r#"
                 itemDiv.appendChild(document.createTextNode(' ' + item.id.substring(0,8) + '... (v' + item.version + ')'));
                 stagedList.appendChild(itemDiv);
             });
+
+            // 필터가 없을 때 안내 메시지
+            if (filtered.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'staged-item';
+                empty.style.color = '#999';
+                empty.textContent = 'No items found.';
+                stagedList.appendChild(empty);
+            }
+
+            // (기존 로그인 폼 생성 로직이 이어서 위치함)
 
             // 로그인 폼 생성 및 하단 배치
             const loginContainer = document.createElement('div');
@@ -297,16 +331,46 @@ const OVERLAY_SCRIPT: &str = r#"
             if (window.gemini_rpc) window.gemini_rpc("sync_data:" + JSON.stringify(item));
         }
 
-        toggleBtn.onclick = () => { 
-            const isOpen = agentContainer.classList.toggle('open'); 
-            if (isOpen) {
-                if (window.gemini_rpc) window.gemini_rpc("fetch_drafts");
-                renderStagedList();
-            } else {
-                const items = stagedList.querySelectorAll('.staged-item, .login-container');
-                items.forEach(item => item.remove());
-            }
+        // 상태 토글 이벤트 연결
+        draftTab.onclick = () => {
+            draftTab.className = 'active';
+            mainTab.className = '';
+            currentStatusFilter = 'DRAFT';
+            renderStagedList();
         };
+        
+        mainTab.onclick = () => {
+            mainTab.className = 'active';
+            draftTab.className = '';
+            currentStatusFilter = 'MAIN';
+            renderStagedList();
+        };
+
+        // 도메인 필터 이벤트 연결
+        domainFilterBar.querySelectorAll('button').forEach(btn => {
+            btn.onclick = () => {
+                domainFilterBar.querySelectorAll('button').forEach(b => b.className = '');
+                btn.className = 'active';
+                currentDomainFilter = btn.textContent;
+                renderStagedList();
+            };
+        });
+
+        // Esc 키 입력 시 사이드바 패널 전체를 열고 닫습니다.
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && !e.repeat) {
+                e.preventDefault();
+                const isOpen = agentContainer.classList.toggle('open'); 
+                if (isOpen) {
+                    if (window.gemini_rpc) window.gemini_rpc("fetch_drafts");
+                    renderStagedList();
+                } else {
+                    const items = stagedList.querySelectorAll('.staged-item, .login-container');
+                    items.forEach(item => item.remove());
+                }
+            }
+        });
+
         closeBtn.onclick = () => { 
             agentContainer.classList.remove('open'); 
             const items = stagedList.querySelectorAll('.staged-item, .login-container');

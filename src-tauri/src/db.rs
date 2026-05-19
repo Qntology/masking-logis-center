@@ -30,8 +30,10 @@ pub struct CommerceRecord {
 }
 
 pub async fn get_or_create_table() -> Result<lancedb::Table, lancedb::Error> {
-    let db = connect("data/universal-db").execute().await?;
-    let table_name = "entities_v3"; // Use v3 to ensure schema compatibility
+    // LanceDB 저장 폴더가 없으면 os error 3이 발생할 수 있으므로 상위 디렉토리를 미리 생성해줍니다.
+    let _ = std::fs::create_dir_all("data/db");
+    let db = connect("data/db").execute().await?;
+    let table_name = "terminal"; // Use v3 to ensure schema compatibility
 
     match db.open_table(table_name).execute().await {
         Ok(table) => Ok(table),
