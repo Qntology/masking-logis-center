@@ -130,20 +130,31 @@ const OVERLAY_SCRIPT: &str = r#"
                 opacity:0;
             }
             #agent-container.open { opacity: 1; pointer-events: auto; }
-            header { padding: 12px; background: #f0f0f0 !important; font-weight: bold !important; color: #000 !important; border-bottom: 1px solid #ddd; display: flex !important; justify-content: space-between; align-items: center; flex-shrink: 0; gap: 10px; }
-            .status-toggle { display: flex; background: #ddd; border-radius: 15px; padding: 2px; font-size: 11px; }
-            .status-toggle span { padding: 4px 8px; cursor: pointer; border-radius: 13px; transition: background 0.2s; }
-            .status-toggle span.active { background: #007bff; color: white; }
+            header { padding: 12px; background: #f0f0f0 !important; font-weight: bold !important; color: #000 !important; display: flex !important; justify-content: space-between; align-items: center; flex-shrink: 0; gap: 10px; }
+            #status-select { 
+                padding: 4px 8px; 
+                border-radius: 8px; 
+                border: 1px solid #ccc; 
+                background: #fff; 
+                font-size: 12px; 
+                cursor: pointer; 
+                outline: none;
+                font-weight: bold;
+                color: #333;
+            }
+            #status-select:focus { border-color: #000; }
             .domain-filter { display: flex; gap: 5px; padding: 10px 15px; background: #fff; border-bottom: 1px solid #eee; flex-shrink: 0; overflow-x: auto; }
             .domain-filter button { padding: 4px 10px; border-radius: 20px; border: 1px solid #ddd; background: #f9f9f9; font-size: 11px; white-space: nowrap; }
             .domain-filter button.active { background: #333; color: white; border-color: #333; }
-            .content { flex: 1; padding: 15px; overflow-y: auto; background: #ffffff !important; color: #000000 !important; min-height: 0 !important; }
+            .content { flex: 1; padding: 15px; overflow: hidden; overflow-y: scroll; background: #ffffff !important; color: #000000 !important; min-height: 0 !important; }
             #log { display: flex !important; flex-direction: column !important; gap: 10px; width: 100%; }
             #log .system { align-self: flex-start !important; text-align: left !important; color: blue !important; max-width: 85%; white-space: pre-wrap; }
             #log .user { align-self: flex-end !important; text-align: right !important; color: green !important; max-width: 85%; white-space: pre-wrap; }
-            .footer { padding: 15px; background: #f8f9fa !important; border-top: 1px solid #eee; flex-shrink: 0; }
+            .footer { padding: 15px; flex-shrink: 0; }
             input { width: 100%; padding: 10px; border: 1px solid #ddd !important; border-radius: 4px; background: white !important; color: black !important; }
-            button { cursor: pointer; padding: 5px 10px; }
+            input:disabled { background: #eee !important; cursor: not-allowed !important; color: #888 !important; }
+            button { cursor: pointer; padding: 5px 10px; border:0; }
+            button:disabled { cursor: not-allowed !important; opacity: 0.6; }
             .staged-item, .user.draft, .user.draft.progressing, .user.COMMERCE, .user.LOGISTICS, .user.TRADE { display: flex !important; align-items: center !important; margin-bottom: 10px; color: black !important; }
         `;
 
@@ -153,28 +164,112 @@ const OVERLAY_SCRIPT: &str = r#"
         // 헤더 구성 (타이틀 + 상태 토글 + 닫기 버튼)
         const header = document.createElement('header');
         
-        const statusToggle = document.createElement('div');
-        statusToggle.className = 'status-toggle';
-        const tabs = ['DRAFT', 'COMMERCE', 'LOGISTICS', 'TRADE', 'OTHER'];
+        const statusSelect = document.createElement('select');
+        statusSelect.id = 'status-select';
+        const tabs = ['DRAFT', 'COMMERCE', 'LOGISTICS', 'TRADE'];
         const defaultTab = window.default_tab || 'DRAFT';
         
         tabs.forEach(t => {
-            const tabSpan = document.createElement('span');
-            tabSpan.textContent = t;
-            if (t === defaultTab) tabSpan.className = 'active';
-            statusToggle.appendChild(tabSpan);
+            const option = document.createElement('option');
+            option.value = t;
+            option.textContent = t;
+            if (t === defaultTab) option.selected = true;
+            statusSelect.appendChild(option);
         });
 
-        header.appendChild(statusToggle);
+        header.appendChild(statusSelect);
+
+        // 자동 추출 함수
+        async function autoExtract() {
+            const pageId = await generatePageId(window.location.href);
+            
+            const ogTitle = document.querySelector('meta[property="og:title"]')?.content || document.title || 'No Title';
+            const ogDesc = document.querySelector('meta[property="og:description"]')?.content || 'No Description';
+            const bodyYaml = cleanAndConvertToYaml(document.body);
+            
+            // OG 태그 메타데이터와 정제된 본문 YAML을 하나의 컨텍스트로 결합
+            const yaml = `og_title: ${ogTitle}\nog_description: ${ogDesc}\n---\n${bodyYaml}`;
+            
+            // 1. 동일한 ID(주소)의 DRAFT가 있는지 확인하고, 내용이 완전히 동일하면 건너뜁니다.
+            const existingIndex = stagedItems.findIndex(i => i.id === pageId && i.status === 'DRAFT');
+            if (existingIndex !== -1 && stagedItems[existingIndex].context === yaml) {
+                const skipLogDiv = document.createElement('div');
+                skipLogDiv.className = 'user draft';
+                skipLogDiv.style.cssText = 'color: gray; font-size: 11px; margin-top: 5px; display: block !important;';
+                skipLogDiv.textContent = '[Auto-Extracted]: 내용이 동일하여 추가/업데이트를 생략합니다.';
+                log.appendChild(skipLogDiv);
+                log.scrollTop = log.scrollHeight;
+                return;
+            }
+            
+            // 2. UI 로그에 YAML 표시 (텍스트 노드 분리 및 가독성 개선)
+            const autoLogDiv = document.createElement('div');
+            autoLogDiv.className = 'user draft';
+            autoLogDiv.style.cssText = 'white-space: pre-wrap; font-size: 11px; margin-top: 5px; display: block !important;';
+            
+            const strongText = document.createElement('strong');
+            strongText.textContent = '[Auto-Extracted]:';
+            autoLogDiv.appendChild(strongText);
+            
+            // 줄바꿈을 포함한 내용 영역 추가
+            const contentSpan = document.createElement('div');
+            contentSpan.style.marginTop = '2px';
+            contentSpan.textContent = yaml.substring(0, 200) + (yaml.length > 200 ? '...' : '');
+            
+            autoLogDiv.appendChild(contentSpan);
+            log.appendChild(autoLogDiv);
+            
+            const item = { 
+                id: pageId, 
+                host: window.location.hostname, 
+                url: window.location.href, 
+                title: ogTitle, 
+                // DRAFT 탭일 때는 기본값인 COMMERCE를 넣고, 그 외 탭에서는 현재 탭 이름을 도메인으로 사용
+                domain: currentTabFilter === 'DRAFT' ? 'COMMERCE' : currentTabFilter, 
+                context: yaml, 
+                status: 'DRAFT', 
+                track: 'MAIN', 
+                version: 1, 
+                created_at: Date.now(), 
+                updated_at: Date.now() 
+            };
+            
+            // 3. UI에 즉시 추가하지 않고 백엔드로 원본 데이터만 전송 (비동기 처리 위임)
+            const draftMessage = document.createElement('div');
+            draftMessage.className = 'system';
+            draftMessage.style.fontSize = '11px';
+            draftMessage.style.opacity = '0.7';
+            draftMessage.textContent = 'System: 분석 및 저장 중...';
+            log.appendChild(draftMessage);
+            log.scrollTop = log.scrollHeight;
+
+            if (window.gemini_rpc) window.gemini_rpc("sync_data:" + JSON.stringify(item));
+            // renderStagedList() 호출은 백엔드 응답 수신 시점으로 미룸
+        }
 
         
 
         if(window.is_authenticated){
+            const rightDiv = document.createElement('div');
+
+            const extractBtn = document.createElement('button');
+            extractBtn.style.cssText = 'margin-right:10px; padding: 4px 8px; background: #ddd; color: #000; border: none; border-radius: 13px; font-weight: bold; cursor: pointer;';
+            extractBtn.id = 'extract-btn';
+            extractBtn.textContent = 'Draft';
+            extractBtn.onclick = autoExtract;
+            
+            rightDiv.appendChild(extractBtn);
+
+
             const pushBtn = document.createElement('button');
             pushBtn.id = 'push-btn';
             pushBtn.style.cssText = 'padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 13px; font-weight: bold; cursor: pointer;';
             pushBtn.textContent = 'Push';
-            header.appendChild(pushBtn);
+
+            rightDiv.appendChild(pushBtn);
+
+            header.appendChild(rightDiv);
+
 
             pushBtn.onclick = () => {
                 const selected = Array.from(shadow.querySelectorAll('input:checked')).map(cb => cb.dataset.id);
@@ -228,13 +323,7 @@ const OVERLAY_SCRIPT: &str = r#"
         const footer = document.createElement('div');
         footer.className = 'footer';
         
-        const actionDiv = document.createElement('div');
-        actionDiv.style.cssText = 'display: flex; gap: 5px; margin-bottom: 10px;';
-        const extractBtn = document.createElement('button');
-        extractBtn.id = 'extract-btn';
-        extractBtn.textContent = '추출';
         
-        actionDiv.appendChild(extractBtn);
         
 
         const chatDiv = document.createElement('div');
@@ -244,7 +333,7 @@ const OVERLAY_SCRIPT: &str = r#"
         fileInput.type = 'file';
         fileInput.id = 'file-input';
         fileInput.accept = 'image/*,application/pdf';
-        fileInput.style.cssText = 'display: none;';
+        fileInput.style.cssText = 'display: none; width:38px;';
         
         const attachBtn = document.createElement('button');
         attachBtn.id = 'attach-btn';
@@ -254,19 +343,20 @@ const OVERLAY_SCRIPT: &str = r#"
         const cliInput = document.createElement('input');
         cliInput.type = 'text';
         cliInput.id = 'cli-input';
+        cliInput.disabled = true;
         cliInput.placeholder = '메시지 입력...';
         cliInput.style.cssText = 'flex: 1;';
         
         const sendBtn = document.createElement('button');
         sendBtn.id = 'send-btn';
-        sendBtn.textContent = '전송';
+        sendBtn.style.cssText = 'width:38px;';
+        sendBtn.textContent = '⌲';
         
         chatDiv.appendChild(fileInput);
         chatDiv.appendChild(attachBtn);
         chatDiv.appendChild(cliInput);
         chatDiv.appendChild(sendBtn);
         
-        footer.appendChild(actionDiv);
         footer.appendChild(chatDiv);
 
         agentContainer.appendChild(header);
@@ -345,93 +435,31 @@ const OVERLAY_SCRIPT: &str = r#"
         // 초기 로드 시 백엔드에 기존 DRAFT 목록 요청
         if (window.gemini_rpc) window.gemini_rpc("fetch_drafts");
 
-        // 자동 추출 함수
-        async function autoExtract() {
-            const pageId = await generatePageId(window.location.href);
+        
+
+        // 드롭다운 변경 이벤트 연결
+        statusSelect.onchange = () => {
+            currentTabFilter = statusSelect.value;
             
-            const ogTitle = document.querySelector('meta[property="og:title"]')?.content || document.title || 'No Title';
-            const ogDesc = document.querySelector('meta[property="og:description"]')?.content || 'No Description';
-            const bodyYaml = cleanAndConvertToYaml(document.body);
-            
-            // OG 태그 메타데이터와 정제된 본문 YAML을 하나의 컨텍스트로 결합
-            const yaml = `og_title: ${ogTitle}\nog_description: ${ogDesc}\n---\n${bodyYaml}`;
-            
-            // 1. 동일한 ID(주소)의 DRAFT가 있는지 확인하고, 내용이 완전히 동일하면 건너뜁니다.
-            const existingIndex = stagedItems.findIndex(i => i.id === pageId && i.status === 'DRAFT');
-            if (existingIndex !== -1 && stagedItems[existingIndex].context === yaml) {
-                const skipLogDiv = document.createElement('div');
-                skipLogDiv.className = 'user draft';
-                skipLogDiv.style.cssText = 'color: gray; font-size: 11px; margin-top: 5px; display: block !important;';
-                skipLogDiv.textContent = '[Auto-Extracted]: 내용이 동일하여 추가/업데이트를 생략합니다.';
-                log.appendChild(skipLogDiv);
-                log.scrollTop = log.scrollHeight;
-                return;
-            }
-            
-            // 2. UI 로그에 YAML 표시 (Trusted Types 우회)
-            const autoLogDiv = document.createElement('div');
-            autoLogDiv.className = 'user draft';
-            autoLogDiv.style.cssText = 'white-space: pre-wrap; font-size: 11px; margin-top: 5px; display: block !important;';
-            const strongText = document.createElement('strong');
-            strongText.textContent = '[Auto-Extracted]:\n';
-            autoLogDiv.appendChild(strongText);
-            autoLogDiv.appendChild(document.createTextNode(yaml.substring(0, 100) + '...'));
-            log.appendChild(autoLogDiv);
-            
-            const item = { 
-                id: pageId, 
-                host: window.location.hostname, 
-                url: window.location.href, 
-                title: ogTitle, 
-                // DRAFT 탭일 때는 기본값인 COMMERCE를 넣고, 그 외 탭에서는 현재 탭 이름을 도메인으로 사용
-                domain: currentTabFilter === 'DRAFT' ? 'COMMERCE' : currentTabFilter, 
-                context: yaml, 
-                status: 'DRAFT', 
-                track: 'MAIN', 
-                version: 1, 
-                created_at: Date.now(), 
-                updated_at: Date.now() 
-            };
-            
-            // 3. 동일한 ID의 DRAFT가 있으면 덮어쓰기(업데이트), 없으면 신규 추가
-            if (existingIndex !== -1) {
-                stagedItems[existingIndex].context = yaml;
-                stagedItems[existingIndex].updated_at = Date.now();
-                stagedItems[existingIndex].version += 1;
-                Object.assign(item, stagedItems[existingIndex]); 
+            // DRAFT 상태일 때 입력 차단 로직
+            if (currentTabFilter === 'DRAFT') {
+                cliInput.value = '';
+                cliInput.disabled = true;
+                cliInput.placeholder = 'DRAFT 상태에서는 질의 및 첨부가 불가능합니다.';
+                sendBtn.disabled = true;
+                attachBtn.disabled = true; 
             } else {
-                stagedItems.push(item);
+                cliInput.disabled = false;
+                cliInput.placeholder = '메시지 입력...';
+                sendBtn.disabled = false;
+                attachBtn.disabled = false;
             }
             
             renderStagedList();
-            
-            // 4. Rust 백엔드(LanceDB)로 DRAFT 상태 동기화 (Upsert) 요청
-            if (window.gemini_rpc) window.gemini_rpc("sync_data:" + JSON.stringify(item));
-        }
+        };
 
-        // 통합 탭 토글 이벤트 연결
-        statusToggle.querySelectorAll('span').forEach(tab => {
-            tab.onclick = () => {
-                statusToggle.querySelectorAll('span').forEach(s => s.className = '');
-                tab.className = 'active';
-                currentTabFilter = tab.textContent;
-                
-                // DRAFT 탭일 때는 입력창 비활성화 및 안내 문구 표시
-                if (currentTabFilter === 'DRAFT') {
-                    cliInput.disabled = true;
-                    cliInput.placeholder = 'DRAFT 상태에서는 질의가 불가능합니다.';
-                    sendBtn.disabled = true;
-                    attachBtn.disabled = true;
-                } else {
-                    cliInput.disabled = false;
-                    cliInput.placeholder = '메시지 입력...';
-                    sendBtn.disabled = false;
-                    attachBtn.disabled = false;
-                }
-                
-                renderStagedList();
-            };
-        });
+        // 초기 상태 로드를 위한 강제 1회 실행
+        statusSelect.onchange();
 
         // Esc 키 입력 시 사이드바 패널 전체를 열고 닫습니다.
         window.addEventListener('keydown', (e) => {
@@ -448,7 +476,7 @@ const OVERLAY_SCRIPT: &str = r#"
             }
         });
 
-        extractBtn.onclick = autoExtract;
+        
 
         // 대기 상태 표시 UI 관리 함수
         function showProgressLog() {
@@ -510,6 +538,13 @@ const OVERLAY_SCRIPT: &str = r#"
         attachBtn.onclick = () => fileInput.click();
 
         fileInput.addEventListener('change', async (e) => {
+            // DRAFT 탭에서는 파일 처리 로직이 실행되지 않도록 차단
+            if (currentTabFilter === 'DRAFT') {
+                alert('도메인 탭을 선택한 후 파일을 첨부해주세요.');
+                fileInput.value = ''; // 선택된 파일 초기화
+                return;
+            }
+
             const file = e.target.files[0];
             if (!file) return;
 
@@ -562,6 +597,11 @@ const OVERLAY_SCRIPT: &str = r#"
         sendBtn.onclick = sendChatMessage;
         cliInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
+                // 비활성화 상태에서는 엔터 키 동작 차단
+                if (currentTabFilter === 'DRAFT') {
+                    e.preventDefault();
+                    return;
+                }
                 sendChatMessage();
             }
         });
@@ -624,19 +664,26 @@ const OVERLAY_SCRIPT: &str = r#"
                     renderStagedList();
                     return; // 데이터 응답이므로 채팅 로그에 출력하지 않고 종료
                 } else if (data.type === 'sync_success') {
-                    // 백엔드에서 LLM 전처리 후 확정된 도메인 업데이트
-                    const idx = stagedItems.findIndex(i => i.id === data.id);
-                    if (idx !== -1) {
-                        stagedItems[idx].domain = data.domain;
-                        renderStagedList();
-                    }
+                    const record = data.payload;
+                    // 기존 리스트에서 동일 ID 제거 후 분석 완료된 새 레코드 추가 (일원화)
+                    stagedItems = stagedItems.filter(i => i.id !== record.id);
+                    stagedItems.push(record);
+                    
+                    // 드롭다운 값을 분석된 도메인으로 변경하고 리스트 갱신
+                    statusSelect.value = record.domain;
+                    statusSelect.onchange(); 
+                    
+                    renderStagedList();
                     
                     const rpcLogDiv = document.createElement('div');
                     rpcLogDiv.className = 'system';
-                    rpcLogDiv.style.cssText = 'font-size: 11px; margin-top: 5px; opacity: 0.7; line-height: 1.4;';
-                    rpcLogDiv.innerHTML = `<strong>System: </strong>Data synced [Domain: ${data.domain}]`;
+                    rpcLogDiv.style.cssText = 'font-size: 11px; margin-top: 5px; opacity: 0.8; color: #28a745 !important;';
+                    rpcLogDiv.innerHTML = `<strong>System:</strong> [${record.domain}] 분석 완료 및 DRAFT 저장됨.`;
                     log.appendChild(rpcLogDiv);
                     log.scrollTop = log.scrollHeight;
+                    return;
+                } else if (data.type === 'error') {
+                    alert('저장 실패: ' + data.message);
                     return;
                 }
             } catch(err) {
@@ -683,9 +730,15 @@ const OVERLAY_SCRIPT: &str = r#"
                     window._currentAiMessageDiv = null; // 시스템 로그 발생 시 스트리밍 텍스트 분리
                 }
 
+                // 전달된 데이터(e.detail)가 객체인 경우 텍스트 추출 로직 추가
+                const rawContent = e.detail;
+                const textContent = (typeof rawContent === 'object' && rawContent !== null) 
+                    ? (rawContent.text || JSON.stringify(rawContent)) 
+                    : rawContent;
+
                 if (!isSystemMessage && window._currentAiMessageDiv) {
                     // 동일한 대화 응답의 스트리밍 데이터 이어서 붙이기
-                    window._currentAiMessageDiv.appendChild(document.createTextNode(e.detail));
+                    window._currentAiMessageDiv.appendChild(document.createTextNode(textContent));
                 } else {
                     const rpcLogDiv = document.createElement('div');
                     rpcLogDiv.className = 'system';
@@ -693,7 +746,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     const rpcStrong = document.createElement('strong');
                     rpcStrong.textContent = isSystemMessage ? 'System: ' : 'AI: ';
                     rpcLogDiv.appendChild(rpcStrong);
-                    rpcLogDiv.appendChild(document.createTextNode(e.detail));
+                    rpcLogDiv.appendChild(document.createTextNode(textContent));
                     log.appendChild(rpcLogDiv);
                     
                     if (!isSystemMessage) {
@@ -761,46 +814,38 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     let data = &payload["sync_data:".len()..];
                     match serde_json::from_str::<db::CommerceRecord>(data) {
                         Ok(mut record) => {
-                            // LLM 전처리 파이프라인 연동
                             let categorizer = gemini_gui_lib::categorizer::Categorizer::new(gemini::client::GeminiClient::new("gemini-3.1-flash-lite-preview".to_string()));
                             
                             if record.host == "local_file" {
-                                // 이미지 전처리: YAML 텍스트 내부에 들어있는 type과 base64 데이터 추출
                                 let lines: Vec<&str> = record.context.lines().collect();
                                 let mime_type = lines.iter().find(|l| l.starts_with("type: ")).map(|l| l.replace("type: ", "")).unwrap_or_default();
                                 let base64_data = lines.iter().find(|l| l.starts_with("data: ")).map(|l| l.replace("data: ", "")).unwrap_or_default();
                                 
                                 if !mime_type.is_empty() && !base64_data.is_empty() {
                                     if let Ok(json_res) = categorizer.preprocess_image(&mime_type, &base64_data).await {
-                                        record.domain = json_res.get("domain").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("OTHER").to_uppercase();
-                                        // OCR 텍스트로 컨텍스트 교체 (Base64 데이터 제거하여 용량 확보)
+                                        record.domain = json_res.get("domain").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("DRAFT").to_uppercase();
                                         let ocr_text = json_res.get("ocr_full_text").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("");
                                         record.context = format!("File: {}\n\n[OCR Data]\n{}", record.title, ocr_text);
                                     }
                                 }
                             } else {
-                                // 웹페이지 전처리: YAML 컨텍스트 분석
                                 if let Ok(json_res) = categorizer.preprocess_web(&record.context).await {
-                                    record.domain = json_res.get("domain").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("OTHER").to_uppercase();
+                                    record.domain = json_res.get("domain").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("DRAFT").to_uppercase();
                                 }
                             }
 
-                            let updated_domain = record.domain.clone();
-                            let record_id = record.id.clone();
-
-                            // 임시 저장(DRAFT) 시에는 임베딩 모델을 로드하지 않습니다.
+                            let updated_record = record.clone();
                             match db::save_records(vec![record], None).await {
                                 Ok(_) => {
                                     json!({
                                         "type": "sync_success",
-                                        "id": record_id,
-                                        "domain": updated_domain
+                                        "payload": updated_record
                                     }).to_string()
                                 },
-                                Err(e) => format!("DB Error: {}", e),
+                                Err(e) => json!({"type": "error", "message": format!("DB Error: {}", e)}).to_string(),
                             }
                         },
-                        Err(e) => format!("JSON Error: {}", e),
+                        Err(e) => json!({"type": "error", "message": format!("JSON Error: {}", e)}).to_string(),
                     }
                 } else if payload.starts_with("delete_data:") {
                     let id_to_delete = &payload["delete_data:".len()..];

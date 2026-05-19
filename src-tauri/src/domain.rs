@@ -14,7 +14,7 @@ impl Domain {
             Domain::Commerce => "COMMERCE",
             Domain::Logistics => "LOGISTICS",
             Domain::Trade => "TRADE",
-            Domain::Other => "OTHER",
+            Domain::Other => "DRAFT",
         }
     }
 
@@ -23,7 +23,7 @@ impl Domain {
             "COMMERCE" => Some(Domain::Commerce),
             "LOGISTICS" => Some(Domain::Logistics),
             "TRADE" => Some(Domain::Trade),
-            "OTHER" => Some(Domain::Other),
+            "DRAFT" => Some(Domain::Other),
             _ => Some(Domain::Other), // 매칭 실패 시 기본값을 Other로 안전하게 처리
         }
     }

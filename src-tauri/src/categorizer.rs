@@ -14,7 +14,7 @@ impl Categorizer {
         let prompt = format!(
             "[TASK]\n\
              You are a classification parser.\n\
-             Analyze the provided YAML content and classify it into exactly one of the following domains: COMMERCE, LOGISTICS, TRADE, OTHER.\n\
+             Analyze the provided YAML content and classify it into exactly one of the following domains: COMMERCE, LOGISTICS, TRADE, DRAFT.\n\
              You MUST respond with a valid JSON object containing ONLY the \"domain\" key. Do not include markdown formatting.\n\n\
              [INPUT]\n\
              {}",
@@ -23,7 +23,7 @@ impl Categorizer {
 
         let response = self.client.generate_content(&prompt, None).await?;
         let clean_json = response.trim().trim_matches(|c| c == '`' || c == '\n');
-        let parsed: serde_json::Value = serde_json::from_str(clean_json).unwrap_or_else(|_| serde_json::json!({"domain": "OTHER"}));
+        let parsed: serde_json::Value = serde_json::from_str(clean_json).unwrap_or_else(|_| serde_json::json!({"domain": "DRAFT"}));
         
         Ok(parsed)
     }
@@ -36,12 +36,12 @@ impl Categorizer {
              Then, classify the image into one of the allowed domains specified in the [INPUT] block.\n\
              You MUST respond with a valid JSON object containing ONLY \"domain\" and \"ocr_full_text\" keys. Do not include markdown formatting.\n\n\
              [INPUT]\n\
-             Allowed Domains: COMMERCE, LOGISTICS, TRADE, OTHER";
+             Allowed Domains: COMMERCE, LOGISTICS, TRADE, DRAFT";
 
         let response = self.client.generate_content_with_image(prompt, mime_type, base64_data).await?;
         let clean_json = response.trim().trim_matches(|c| c == '`' || c == '\n');
         let parsed: serde_json::Value = serde_json::from_str(clean_json).unwrap_or_else(|_| serde_json::json!({
-            "domain": "OTHER",
+            "domain": "DRAFT",
             "ocr_full_text": "Failed to parse OCR data."
         }));
         
