@@ -17,6 +17,16 @@ pub async fn get_auth_token() -> Result<String, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(&path)?;
     let mut creds: OAuthCredentials = serde_json::from_str(&content)?;
 
+    if creds.client_id.is_none() || creds.client_secret.is_none() || creds.refresh_token.is_none() {
+        if let Ok(env_val) = std::env::var("GCP_SERVICE_ACCOUNT") {
+            if let Ok(env_creds) = serde_json::from_str::<OAuthCredentials>(&env_val) {
+                if creds.client_id.is_none() { creds.client_id = env_creds.client_id; }
+                if creds.client_secret.is_none() { creds.client_secret = env_creds.client_secret; }
+                if creds.refresh_token.is_none() { creds.refresh_token = env_creds.refresh_token; }
+            }
+        }
+    }
+
     // refresh_token, client_id, client_secret이 모두 존재하면 새로운 access_token을 발급받습니다.
     if let (Some(refresh_token), Some(client_id), Some(client_secret)) = (&creds.refresh_token, &creds.client_id, &creds.client_secret) {
         let client = reqwest::Client::new();

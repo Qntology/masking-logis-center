@@ -26,7 +26,6 @@ impl GeminiClient {
     async fn get_project_id(&self, token: &str) -> anyhow::Result<String> {
         let url = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
         
-        // bb.rs의 discoverProjectId 로직을 Rust식으로 재구현
         let payload = json!({
             "cloudaicompanionProject": serde_json::Value::Null,
             "metadata": {
@@ -50,7 +49,6 @@ impl GeminiClient {
 
         let v: serde_json::Value = res.json().await?;
         
-        // 응답에서 프로젝트 ID 추출 (bb.rs와 동일한 로직)
         if let Some(project) = v["cloudaicompanionProject"].as_str() {
             println!("[Gemini] 프로젝트 ID 발견: {}", project);
             Ok(project.to_string())
@@ -133,7 +131,6 @@ impl GeminiClient {
                         "temperature": 0.7,
                         "maxOutputTokens": 2048
                     }
-                    // 필요 시 여기에 tools나 safetySettings 추가 가능 (bb.rs 방식)
                 }
             })
         } else {

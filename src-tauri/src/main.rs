@@ -15,14 +15,9 @@ use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumen
 use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, SetDiscoverTargetsParams};
 use chromiumoxide::cdp::js_protocol::runtime::{AddBindingParams, EventBindingCalled};
 use futures::StreamExt;
-use tokio::process::Command;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-fn extract_cli() -> PathBuf {
-    PathBuf::new() 
-}
 
 fn mask_pii(text: &str, spans: &[PrivacySpan]) -> String {
     let mut masked_text = text.to_string();
@@ -128,10 +123,13 @@ const OVERLAY_SCRIPT: &str = r#"
             .domain-filter button { padding: 4px 10px; border-radius: 20px; border: 1px solid #ddd; background: #f9f9f9; font-size: 11px; white-space: nowrap; }
             .domain-filter button.active { background: #333; color: white; border-color: #333; }
             .content { flex: 1; padding: 15px; overflow-y: auto; background: #ffffff !important; color: #000000 !important; min-height: 0 !important; }
+            #log { display: flex !important; flex-direction: column !important; gap: 10px; width: 100%; }
+            #log .system { align-self: flex-start !important; text-align: left !important; color: blue !important; max-width: 85%; white-space: pre-wrap; }
+            #log .user { align-self: flex-end !important; text-align: right !important; color: green !important; max-width: 85%; white-space: pre-wrap; }
             .footer { padding: 15px; background: #f8f9fa !important; border-top: 1px solid #eee; flex-shrink: 0; }
             input { width: 100%; padding: 10px; border: 1px solid #ddd !important; border-radius: 4px; background: white !important; color: black !important; }
             button { cursor: pointer; padding: 5px 10px; }
-            .staged-item { display: flex !important; align-items: center !important; margin-bottom: 10px; color: black !important; }
+            .staged-item, .user.draft, .user.draft.progressing, .user.COMMERCE, .user.LOGISTICS, .user.TRADE { display: flex !important; align-items: center !important; margin-bottom: 10px; color: black !important; }
         `;
 
         const agentContainer = document.createElement('div');
@@ -235,7 +233,13 @@ const OVERLAY_SCRIPT: &str = r#"
 
             filtered.forEach(item => {
                 const itemDiv = document.createElement('div');
-                itemDiv.className = 'staged-item';
+                if (item.is_progressing) {
+                    itemDiv.className = 'user draft progressing';
+                } else if (item.status === 'DRAFT') {
+                    itemDiv.className = 'user draft';
+                } else {
+                    itemDiv.className = 'user ' + item.domain;
+                }
                 const checkbox = document.createElement('input');
                 checkbox.type = 'checkbox';
                 checkbox.dataset.id = item.id;
@@ -411,6 +415,14 @@ const OVERLAY_SCRIPT: &str = r#"
         pushBtn.onclick = () => {
             const selected = Array.from(shadow.querySelectorAll('input:checked')).map(cb => cb.dataset.id);
             if (selected.length === 0) return;
+            
+            stagedItems.forEach(item => {
+                if (selected.includes(item.id)) {
+                    item.is_progressing = true;
+                }
+            });
+            renderStagedList();
+
             const payload = stagedItems.filter(i => selected.includes(i.id));
             
             // 탭 간 상태 공유를 위해 localStorage 사용 및 진행 상태 표시
@@ -426,7 +438,8 @@ const OVERLAY_SCRIPT: &str = r#"
 
             // UI에 사용자 메시지 표시
             const userLogDiv = document.createElement('div');
-            userLogDiv.style.cssText = 'color: green; margin-top: 10px; white-space: pre-wrap;';
+            userLogDiv.className = 'user';
+            userLogDiv.style.cssText = 'margin-top: 10px;';
             const userStrong = document.createElement('strong');
             userStrong.textContent = 'You: ';
             userLogDiv.appendChild(userStrong);
@@ -522,6 +535,22 @@ const OVERLAY_SCRIPT: &str = r#"
             if (typeof e.detail === 'string' && (e.detail.includes('Data pushed successfully') || e.detail.includes('DB Error:'))) {
                 localStorage.setItem('gemini_push_status', JSON.stringify({ status: 'complete', message: e.detail, timestamp: Date.now() }));
                 hideProgressLog();
+                
+                if (e.detail.includes('Data pushed successfully')) {
+                    stagedItems.forEach(item => {
+                        if (item.is_progressing) {
+                            item.is_progressing = false;
+                            item.status = 'MAIN';
+                        }
+                    });
+                } else {
+                    stagedItems.forEach(item => {
+                        if (item.is_progressing) {
+                            item.is_progressing = false;
+                        }
+                    });
+                }
+                renderStagedList();
             }
 
             if (log) {
@@ -547,7 +576,8 @@ const OVERLAY_SCRIPT: &str = r#"
                     window._currentAiMessageDiv.appendChild(document.createTextNode(e.detail));
                 } else {
                     const rpcLogDiv = document.createElement('div');
-                    rpcLogDiv.style.cssText = isSystemMessage ? 'color: gray; font-size: 11px; margin-top: 5px;' : 'color: blue; margin-top: 5px; white-space: pre-wrap; line-height: 1.4;';
+                    rpcLogDiv.className = 'system';
+                    rpcLogDiv.style.cssText = isSystemMessage ? 'font-size: 11px; margin-top: 5px; opacity: 0.7;' : 'margin-top: 5px; line-height: 1.4;';
                     const rpcStrong = document.createElement('strong');
                     rpcStrong.textContent = isSystemMessage ? 'System: ' : 'AI: ';
                     rpcLogDiv.appendChild(rpcStrong);
@@ -598,12 +628,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     // RPC 바인딩 등록
     let _ = page.execute(AddBindingParams::new("gemini_rpc")).await;
     
-    // 인증 상태를 전역 변수로 주입
-    let auth_script = format!("window.is_authenticated = {};", is_authenticated);
-    let _ = page.evaluate(auth_script).await;
-
+    // 인증 상태 변수와 UI 스크립트를 하나로 묶어 레이스 컨디션(주입 지연) 방지
+    let full_script = format!("window.is_authenticated = {};\n{}", is_authenticated, OVERLAY_SCRIPT);
+    
     // 이미 로드된 현재 페이지 상태에서 UI가 즉시 나타나도록 강제 실행
-    let _ = page.evaluate(OVERLAY_SCRIPT).await;
+    let _ = page.evaluate(full_script).await;
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
     let browser_clone = browser.clone();
@@ -772,11 +801,19 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         }
                     });
                     "Streaming started".to_string()
-                } else {
-                    match execute_cli(payload.to_string()).await {
-                        Ok(res) => res,
-                        Err(e) => format!("Error: {}", e),
+                } else if payload == "login" {
+                    println!("[Rust] Login command received via RPC. Spawning auth process...");
+                    // Windows 환경에서 새 cmd 창을 열어 구글 인증 프로세스를 실행합니다.
+                    // bb.rs의 가이드라인에 따라 npx 대신 로컬에 설치된 gemini CLI를 호출합니다.
+                    match std::process::Command::new("cmd")
+                        .args(&["/C", "start", "cmd", "/K", "echo 구글 로그인을 진행합니다. 브라우저가 열리면 인증을 완료해주세요. && gemini auth"])
+                        .spawn() 
+                    {
+                        Ok(_) => "Authentication terminal opened. Please complete the login in the browser, then restart or refresh.".to_string(),
+                        Err(e) => format!("Failed to open login terminal: {}", e),
                     }
+                } else {
+                    format!("Unknown RPC command: {}", payload)
                 };
                 let script = if response.starts_with('{') && response.ends_with('}') {
                     // response is already a JSON string (likely from json!().to_string())
@@ -795,28 +832,6 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
         }
     });
     Ok(())
-}
-async fn execute_cli(command: String) -> Result<String, String> {
-    let cli_path = extract_cli();
-    let index_js = cli_path.join("index.js");
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map_err(|e| e.to_string())?;
-    let path = PathBuf::from(home).join(".gemini/oauth_creds.json");
-    
-    let output = Command::new("node")
-        .arg(index_js)
-        .arg(&command)
-        .env("GEMINI_AUTH_FILE", path.to_str().unwrap())
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-        
-    // 프로세스 실행이 실패했을 경우 stderr를 캡처하여 에러 반환
-    if !output.status.success() {
-        let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(format!("CLI 실행 실패: {}", err_msg));
-    }
-    
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 #[tokio::main]
@@ -886,7 +901,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Ok(page) = b_inner.get_page(tid).await {
                         // 페이지 객체 확보 후 바인딩 및 주입 설정을 즉시 수행하여 '페이지 로드 시작' 단계부터 스크립트가 살아있게 함
                         let _ = page.execute(EnableParams::default()).await;
-                        let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await;
+                        
+                        let full_script = format!("window.is_authenticated = {};\n{}", is_auth_inner, OVERLAY_SCRIPT);
+                        let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(full_script)).await;
                         
                         // 특정 페이지 로딩 상태(예: DOMContentLoaded)까지 기다리지 않고 즉시 셋업 시도
                         let _ = setup_page(b_inner.clone(), page, is_auth_inner).await;
@@ -904,8 +921,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(pages) = browser.pages().await {
         if let Some(page) = pages.first() {
             let _ = page.execute(EnableParams::default()).await;
+            
+            let full_script = format!("window.is_authenticated = {};\n{}", is_authenticated, OVERLAY_SCRIPT);
             // 모든 새 문서에 스크립트가 자동 실행되도록 브라우저 내부 설정
-            let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(OVERLAY_SCRIPT.to_string())).await;
+            let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(full_script)).await;
             // RPC 바인딩 및 이벤트 리스너 세팅
             let _ = setup_page(browser.clone(), page.clone(), is_authenticated).await;
             
