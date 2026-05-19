@@ -1,3 +1,4 @@
+use crate::domain::Domain;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -8,6 +9,7 @@ pub struct State {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Entity {
+    pub domain: Domain,
     pub info: Info,
     pub status: String,
     pub components: Vec<Component>,
