@@ -210,7 +210,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     }
                 }
             };
-            
+
             header.appendChild(loginBtn);
         }
 
@@ -285,29 +285,34 @@ const OVERLAY_SCRIPT: &str = r#"
             const items = stagedList.querySelectorAll('.staged-item, .login-container');
             items.forEach(item => item.remove());
 
-            // 필터링 로직 적용 (DRAFT 탭이면 status가 DRAFT, 그 외면 status가 MAIN이면서 도메인 매칭)
+            // 필터링 로직 수정: status(DRAFT/MAIN)에 상관없이 현재 선택된 도메인 탭에 해당하면 모두 표시하도록 변경
             const filtered = stagedItems.filter(item => {
                 if (currentTabFilter === 'DRAFT') {
+                    // DRAFT 탭은 명시적으로 status가 DRAFT인 것들만 모아보기
                     return item.status === 'DRAFT';
                 } else {
-                    return item.status === 'MAIN' && item.domain === currentTabFilter;
+                    // 도메인 탭(COMMERCE 등)은 해당 도메인으로 분류된 모든 항목(DRAFT 포함)을 표시
+                    return item.domain === currentTabFilter;
                 }
             });
 
             filtered.forEach(item => {
                 const itemDiv = document.createElement('div');
+                // 클래스 부여 시 현재 아이템의 도메인을 명시적으로 포함하여 스타일 적용 보장
                 if (item.is_progressing) {
-                    itemDiv.className = 'staged-item user draft progressing';
-                } else if (item.status === 'DRAFT') {
-                    itemDiv.className = 'staged-item user draft';
+                    itemDiv.className = `staged-item user ${item.domain.toLowerCase()} progressing`;
                 } else {
-                    itemDiv.className = 'staged-item user ' + item.domain;
+                    itemDiv.className = `staged-item user ${item.domain.toLowerCase()} ${item.status.toLowerCase()}`;
                 }
+                
                 const checkbox = document.createElement('input');
                 checkbox.type = 'checkbox';
                 checkbox.dataset.id = item.id;
                 itemDiv.appendChild(checkbox);
-                itemDiv.appendChild(document.createTextNode(' ' + item.id.substring(0,8) + '... (v' + item.version + ')'));
+                
+                // 리스트에서 식별이 쉽도록 도메인 정보를 텍스트에 포함
+                const infoText = ` [${item.domain}] ${item.id.substring(0,8)}... (v${item.version})`;
+                itemDiv.appendChild(document.createTextNode(infoText));
                 
                 // 삭제 버튼 추가
                 const deleteBtn = document.createElement('button');
@@ -410,6 +415,20 @@ const OVERLAY_SCRIPT: &str = r#"
                 statusToggle.querySelectorAll('span').forEach(s => s.className = '');
                 tab.className = 'active';
                 currentTabFilter = tab.textContent;
+                
+                // DRAFT 탭일 때는 입력창 비활성화 및 안내 문구 표시
+                if (currentTabFilter === 'DRAFT') {
+                    cliInput.disabled = true;
+                    cliInput.placeholder = 'DRAFT 상태에서는 질의가 불가능합니다.';
+                    sendBtn.disabled = true;
+                    attachBtn.disabled = true;
+                } else {
+                    cliInput.disabled = false;
+                    cliInput.placeholder = '메시지 입력...';
+                    sendBtn.disabled = false;
+                    attachBtn.disabled = false;
+                }
+                
                 renderStagedList();
             };
         });
@@ -453,6 +472,12 @@ const OVERLAY_SCRIPT: &str = r#"
         
 
         function sendChatMessage() {
+            // DRAFT 탭에서는 전송 로직이 실행되지 않도록 차단
+            if (currentTabFilter === 'DRAFT') {
+                alert('도메인 탭을 선택해주세요.');
+                return;
+            }
+
             const text = cliInput.value.trim();
             if (!text) return;
 
