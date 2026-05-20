@@ -2754,6 +2754,7 @@ dependencies = [
  "sha2 0.11.0",
  "tokenizers",
  "tokio",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

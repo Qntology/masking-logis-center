@@ -10,77 +10,75 @@ pub trait Harness {
 pub struct DefaultHarness;
 
 impl DefaultHarness {
-    fn clean_html(&self, html: &str) -> String {
+    /// 🚀 모든 태그와 속성을 제거하고 중첩을 평탄화하여 순수 텍스트만 추출합니다.
+    pub fn clean_html(&self, html: &str) -> String {
         let document = Html::parse_document(html);
-        let mut cleaned_html = String::new();
+        let mut cleaned_text = String::new();
 
-        self.process_node(document.root_element().clone(), &mut cleaned_html);
-        cleaned_html
+        // 루트 요소부터 재귀적으로 텍스트만 수집합니다.
+        self.process_node_as_pug(document.root_element().clone(), &mut cleaned_text);
+        
+        // 연속된 줄바꿈이나 공백을 정리하여 결과물을 깔끔하게 만듭니다.
+        cleaned_text.lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
-    fn process_node(&self, element_ref: scraper::ElementRef, output: &mut String) {
+    /// 🚀 태그 중첩을 무시하고 오직 의미 있는 내용만 추출하는 PUG 스타일 재귀 함수입니다.
+    fn process_node_as_pug(&self, element_ref: scraper::ElementRef, output: &mut String) {
         let element = element_ref.value();
         let tag = element.name();
         
-        // Skip forbidden tags
-        if matches!(tag, "script" | "style" | "link" | "noscript" | "iframe" | "svg" | "meta" | "br" | "hr" | "source") {
+        // 1. 데이터적 가치가 없는 메타/리소스 태그들은 자식 노드까지 완전히 무시합니다.
+        if matches!(tag, "script" | "style" | "link" | "noscript" | "iframe" | "svg" | "meta" | "head" | "header" | "footer" | "nav") {
             return;
         }
 
-        // Handle <select> logic
+        // 2. 입력 요소(input, select)의 경우 태그는 버리되 그 안에 담긴 '값'만 텍스트로 취급합니다.
+        if tag == "input" {
+            if let Some(val) = element.attr("value") {
+                output.push_str(val);
+                output.push('\n');
+            }
+            return;
+        }
+
         if tag == "select" {
-            output.push_str("<select>");
             for child in element_ref.children() {
                 if let Node::Element(child_el) = child.value() {
-                    if child_el.name() == "option" {
-                        let is_selected = child_el.attr("selected").is_some();
-                        if is_selected {
-                            output.push_str("<option selected>");
-                            for grandchild in child.children() {
-                                if let Node::Text(text) = grandchild.value() {
-                                    output.push_str(text);
-                                }
-                            }
-                            output.push_str("</option>");
+                    // 선택된 옵션의 텍스트만 추출
+                    if child_el.name() == "option" && child_el.attr("selected").is_some() {
+                        if let Some(child_ref) = scraper::ElementRef::wrap(child) {
+                            output.push_str(&child_ref.text().collect::<Vec<_>>().concat());
+                            output.push('\n');
                         }
                     }
                 }
             }
-            output.push_str("</select>");
             return;
         }
 
-        // Generic tag processing (strip attributes)
-        if tag == "input" {
-            let mut attrs = Vec::new();
-            for attr in &["value", "selected", "checked"] {
-                if let Some(val) = element.attr(attr) {
-                    attrs.push(format!("{}=\"{}\"", attr, val));
-                }
-            }
-            if attrs.is_empty() {
-                output.push_str(&format!("<{}>", tag));
-            } else {
-                output.push_str(&format!("<{} {}>", tag, attrs.join(" ")));
-            }
-        } else {
-            output.push_str(&format!("<{}>", tag));
-        }
-
+        // 3. 일반적인 태그(div, span, p 등)는 무시하고 자식 노드로 파고들어 텍스트를 찾습니다.
         for child in element_ref.children() {
             match child.value() {
                 Node::Element(_) => {
                     if let Some(child_ref) = scraper::ElementRef::wrap(child) {
-                        self.process_node(child_ref, output);
+                        self.process_node_as_pug(child_ref, output);
                     }
                 }
                 Node::Text(text) => {
-                    output.push_str(text);
+                    // 순수 텍스트 노드인 경우 내용만 추가합니다.
+                    let t = text.trim();
+                    if !t.is_empty() {
+                        output.push_str(t);
+                        output.push('\n'); // 평탄화를 위해 줄바꿈 삽입
+                    }
                 }
                 _ => {}
             }
         }
-        output.push_str(&format!("</{}>", tag));
     }
 }
 

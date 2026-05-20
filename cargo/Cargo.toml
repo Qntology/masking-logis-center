@@ -36,3 +36,6 @@ cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 cpu = []
 flash-attn = []
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52.0", features = ["Win32_System_Threading", "Win32_System_Memory", "Win32_Foundation"] }

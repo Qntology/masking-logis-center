@@ -25,6 +25,26 @@ use futures::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
 
+// 🚀 OS 커널 레벨에서 가비지 컬렉터 강제 호출하여 RAM/VRAM 캐시를 즉시 반환하는 헬퍼 함수
+fn force_memory_cleanup() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        // aa.rs의 방식을 따라 SetProcessWorkingSetSizeEx와 플래그를 사용하여 메모리를 강제 해제합니다.
+        // GetCurrentProcess()의 결과값인 -1 핸들을 직접 사용합니다.
+        let handle = -1isize;
+        let min_size = usize::MAX;
+        let max_size = usize::MAX;
+        // QUOTA_LIMITS_HARDWS_MIN_DISABLE (2) | QUOTA_LIMITS_HARDWS_MAX_DISABLE (4) = 6
+        let flags = 6u32; 
+        
+        windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx(handle, min_size, max_size, flags);
+    }
+    #[cfg(target_os = "linux")]
+    unsafe { extern "C" { fn malloc_trim(pad: usize) -> i32; } malloc_trim(0); }
+    #[cfg(target_os = "macos")]
+    unsafe { extern "C" { fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize; } malloc_zone_pressure_relief(std::ptr::null_mut(), 0); }
+}
+
 fn _mask_pii(text: &str, spans: &[PrivacySpan]) -> String {
     let mut masked_text = text.to_string();
     let mut sorted_spans = spans.to_vec();
@@ -68,30 +88,10 @@ const OVERLAY_SCRIPT: &str = r#"
         return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
-    function cleanAndConvertToYaml(node, depth = 0) {
-        if (node.nodeType === Node.TEXT_NODE) {
-            const text = node.textContent.trim();
-            return text ? text + '\n' : '';
-        }
-        if (node.nodeType === Node.ELEMENT_NODE) {
-            const ignoredTags = ['script', 'style', 'link', 'meta', 'noscript', 'svg', 'iframe', 'head', 'title', 'button', 'input', 'nav', 'footer'];
-            if (ignoredTags.includes(node.tagName.toLowerCase())) return '';
-
-            let childYaml = '';
-            node.childNodes.forEach(child => {
-                childYaml += cleanAndConvertToYaml(child, depth);
-            });
-
-            if (!childYaml.trim()) return '';
-
-            const indent = '  '.repeat(depth);
-            if (node.childNodes.length === 1 && node.childNodes[0].nodeType === Node.TEXT_NODE) {
-                 return `${indent}- ${childYaml.trim()}\n`;
-            } else {
-                 return childYaml;
-            }
-        }
-        return '';
+    // 🚀 복잡하고 실패 확률이 높은 커스텀 파서를 제거하고,
+    // 브라우저가 직접 렌더링된 텍스트만 깔끔하게 추출하는 innerText를 활용합니다.
+    function extractVisibleText() {
+        return document.body.innerText || document.body.textContent || '';
     }
 
     function initUI() {
@@ -139,8 +139,12 @@ const OVERLAY_SCRIPT: &str = r#"
             .btn-push:not(:disabled):hover { background: #0069d9 !important; }
             .btn-delete { background: #dc3545 !important; color: white !important; border-color: #dc3545 !important; }
             .btn-delete:hover { background: #c82333 !important; }
-            .item-row { display: flex; align-items: center; gap: 10px; padding: 8px; border-bottom: 1px solid #f0f0f0; }
+            .item-row-wrapper { display: flex; flex-direction: column; border-bottom: 1px solid #f0f0f0; }
+            .item-row { display: flex; align-items: center; gap: 10px; padding: 8px; cursor: pointer; transition: background 0.2s; }
+            .item-row:hover { background: #f9f9f9; }
             .item-row input[type="checkbox"] { cursor: pointer; }
+            .item-detail { display: none; padding: 10px 10px 10px 32px; font-size: 11px; color: #555; background: #fafafa; border-top: 1px dashed #eee; white-space: pre-wrap; max-height: 200px; overflow-y: auto; word-break: break-all; }
+            .item-detail.open { display: block; }
             #main-layout { display: flex !important; flex: 1; overflow: hidden; }
             aside { width: 180px; background: #f0f0f0; border-right: 1px solid #ddd; display: flex; flex-direction: column; padding: 10px 0; flex-shrink: 0; }
             .gnb-menu { display: flex; flex-direction: column; gap: 2px; }
@@ -214,14 +218,14 @@ const OVERLAY_SCRIPT: &str = r#"
         draftBtn.textContent = 'Draft (0)';
         draftBtn.onclick = async () => {
             const pageId = await generatePageId(window.location.href);
-            const yaml = cleanAndConvertToYaml(document.body);
+            const extractedText = extractVisibleText();
             const item = { 
                 id: pageId, 
                 host: window.location.host,
                 url: window.location.href,
                 title: getPageMeta(), 
                 domain: currentTabFilter, // 현재 GNB 탭의 도메인으로 매핑
-                context: yaml, 
+                context: extractedText, 
                 status: 'DRAFT',
                 track: '',
                 version: 1,
@@ -459,16 +463,23 @@ const OVERLAY_SCRIPT: &str = r#"
                 exportContent += `\n--- ID: ${item.id} ---\n[Domain]: ${item.domain}\n[Title]: ${item.title}\n[Content]:\n${item.masking || item.context}\n`;
             });
 
-            // Base64로 인코딩하여 드래그 앤 드롭으로 바탕화면에 export.txt 파일이 떨어질 수 있도록 세팅
+            // 🚀 브라우저 보안 정책상 로컬 경로(temp)를 직접 참조할 수는 없으므로,
+            // 메모리 상에서 즉시 File 객체를 생성하여 드래그 이벤트에 주입합니다.
+            // 이렇게 하면 다른 웹 페이지의 파일 업로드/드롭존에서 실제 파일로 인식하게 됩니다.
+            const file = new File([exportContent], "export.txt", { type: "text/plain" });
+            e.dataTransfer.items.add(file);
+
+            // 기존 일반 텍스트 데이터 유지 (텍스트 입력창 드롭 대비)
+            e.dataTransfer.setData('text/plain', exportContent);
+
+            // OS 바탕화면 등 외부로 드롭할 경우를 위해 DownloadURL 방식도 함께 유지
             const utf8Bytes = new TextEncoder().encode(exportContent);
             let binary = '';
             for (let i = 0; i < utf8Bytes.length; i++) {
                 binary += String.fromCharCode(utf8Bytes[i]);
             }
             const base64Str = btoa(binary);
-
             e.dataTransfer.setData('DownloadURL', `text/plain:export.txt:data:text/plain;base64,${base64Str}`);
-            e.dataTransfer.setData('text/plain', exportContent);
         };
 
         footer.appendChild(fileInputWrapper);
@@ -539,6 +550,9 @@ const OVERLAY_SCRIPT: &str = r#"
                 updatePushBtnState();
             } else {
                 filtered.forEach(item => {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'item-row-wrapper';
+
                     const row = document.createElement('div');
                     row.className = 'item-row';
 
@@ -546,7 +560,10 @@ const OVERLAY_SCRIPT: &str = r#"
                     cb.type = 'checkbox';
                     cb.className = 'item-checkbox';
                     cb.dataset.id = item.id;
-                    cb.onclick = () => updatePushBtnState();
+                    cb.onclick = (e) => {
+                        e.stopPropagation(); // 🚀 체크박스 클릭 시 아코디언이 열리는 것을 방지합니다.
+                        updatePushBtnState();
+                    };
 
                     const textContainer = document.createElement('div');
                     textContainer.style.display = 'flex';
@@ -580,9 +597,19 @@ const OVERLAY_SCRIPT: &str = r#"
                         textContainer.appendChild(descSpan);
                     }
 
+                    // 🚀 전처리 결과를 보여줄 아코디언 상세 뷰를 생성합니다.
+                    const detailView = document.createElement('div');
+                    detailView.className = 'item-detail';
+                    detailView.textContent = item.masking || item.context || '전처리된 텍스트 결과가 없습니다.';
+
+                    // 🚀 row 클릭 시 아코디언 토글 이벤트를 바인딩합니다.
+                    row.onclick = () => detailView.classList.toggle('open');
+
                     row.appendChild(cb);
                     row.appendChild(textContainer);
-                    log.appendChild(row);
+                    wrapper.appendChild(row);
+                    wrapper.appendChild(detailView);
+                    log.appendChild(wrapper);
                 });
                 updatePushBtnState();
             }
@@ -590,14 +617,14 @@ const OVERLAY_SCRIPT: &str = r#"
 
         async function autoExtract() {
             const pageId = await generatePageId(window.location.href);
-            const yaml = cleanAndConvertToYaml(document.body);
+            const extractedText = extractVisibleText();
             const item = { 
                 id: pageId, 
                 host: window.location.host,
                 url: window.location.href,
                 title: getPageMeta(), 
                 domain: 'COMMERCE', 
-                context: yaml, 
+                context: extractedText, 
                 status: 'DRAFT',
                 track: '',
                 version: 1,
@@ -762,6 +789,10 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     let data = &payload["sync_data:".len()..];
                     match serde_json::from_str::<db::CommerceRecord>(data) {
                         Ok(mut record) => {
+                            // 🚀 [Fix] 미사용 트레이트 Harness 임포트를 제거하고 DefaultHarness 구조체만 사용합니다.
+                            use gemini_gui_lib::harness::DefaultHarness;
+                            let harness = DefaultHarness;
+                            
                             if record.url.starts_with("file://") && record.context.contains("data:image/") {
                                 if let Some(base64_part) = record.context.split("data:").nth(1) {
                                     let full_data_url = format!("data:{}", base64_part.trim());
@@ -794,8 +825,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         res
                                     };
                                     record.context = format!("{}\n---\n[OCR]\n{}", record.context, ocr_result);
-                                }
-                            }
+                                } // 🚀 if let Some(base64_part) 블록을 닫습니다.
+                            } // 🚀 [Fix] if record.url.starts_with("file://") 블록을 닫아 괄호 쌍을 맞춥니다.
+
+                            // 🚀 텍스트 아이템이든 OCR 결과든 최종적으로 태그를 걷어냅니다.
+                            let cleaned_context = harness.clean_html(&record.context);
+                            record.context = cleaned_context;
+
                             let updated = record.clone();
                             db::save_records(vec![record], None).await.map(|_| json!({"type":"sync_success","payload":updated}).to_string()).unwrap_or_else(|e| e.to_string())
                         },
@@ -846,6 +882,10 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             }
                                         }
                                     }
+                                    // 🚀 [Fix] 미사용 트레이트 Harness 임포트를 제거하고 DefaultHarness 구조체만 사용합니다.
+                                    use gemini_gui_lib::harness::DefaultHarness;
+                                    let harness = DefaultHarness;
+
                                     for record in &mut target_records {
                                         if record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf") {
                                             if let Some(model) = model_guard.as_mut() {
@@ -860,24 +900,34 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     top_p: None, top_k: None, repeat_penalty: None, repeat_last_n: None, seed: None,
                                                 };
                                                 match model.generate(params) {
-                                                    Ok(res) => record.context = res.choices[0].message.content.clone(),
+                                                    Ok(res) => {
+                                                        // 🚀 OCR 결과 텍스트에서 태그 및 중첩 구조 제거
+                                                        let raw_ocr = res.choices[0].message.content.clone();
+                                                        record.context = harness.clean_html(&raw_ocr);
+                                                    },
                                                     Err(e) => {
                                                         let err_msg = format!("OCR Error: {}", e);
-                                                        println!("[Error] 일괄 OCR 처리 중 예외 발생: {:?}", e); // 🌟 Rust 로그 추가
+                                                        println!("[Error] 일괄 OCR 처리 중 예외 발생: {:?}", e);
                                                         has_error = Some(err_msg);
                                                     }
                                                 }
                                             } else {
                                                 let err_msg = "OCR 모델 로드에 실패했습니다.".to_string();
-                                                println!("[Error] {}", err_msg); // 🌟 Rust 로그 추가
+                                                println!("[Error] {}", err_msg);
                                                 has_error = Some(err_msg);
                                             }
                                         } else {
-                                            // 🚀 텍스트 데이터가 GLM OCR을 안전하게 건너뛰었음을 명확히 보여주는 확인용 로그를 추가합니다.
-                                            println!("[System] 텍스트 아이템 감지됨. GLM OCR 처리를 안전하게 건너뜁니다. (Record ID: {})", record.id);
+                                            // 🚀 [Fix] 텍스트 아이템도 마스킹 전 HTML 태그를 완전히 걷어내고 평탄화합니다.
+                                            let raw_content = record.context.clone();
+                                            record.context = harness.clean_html(&raw_content);
+                                            println!("[System] 텍스트 아이템 태그 제거 및 평탄화 완료. (Record ID: {})", record.id);
                                         }
                                     }
                                     *model_guard = None; // VRAM 완전 해제
+                                    force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
+                                    
+                                    // 🚀 명확한 진행 상황 확인을 위해 OCR 단계 종료 및 VRAM 해제 로그를 추가합니다.
+                                    println!("[System] === Phase 0: GLM OCR 처리 종료 (VRAM 해제됨) ===\n");
                                 }
 
                                 // ★ Phase 1: Privacy Filter 일괄 마스킹 및 VRAM 해제
@@ -897,6 +947,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 has_error = Some(err_str);
                                                 record.context.clone()
                                             });
+                                            // 🚀 LLM 전처리 완료 후 최종 텍스트 결과를 콘솔에 출력합니다.
+                                            println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
                                         } else {
                                             let err_str = "Privacy Filter 모델 로드에 실패했습니다.".to_string();
                                             println!("[Error] {}", err_str);
@@ -904,6 +956,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         }
                                     }
                                     *pm_guard = None; // VRAM 완전 해제
+                                    force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
                                     println!("[System] === Phase 1: Privacy Filter 마스킹 종료 (VRAM 해제됨) ===\n");
                                 }
 
@@ -924,6 +977,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         }
                                     }
                                     *em_guard = None; // VRAM 완전 해제
+                                    force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
                                 }
 
                                 // DB 갱신 처리
@@ -999,6 +1053,10 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         }
                         // ★ VRAM 해제
                         *model_guard = None;
+                        force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
+                        
+                        // 🚀 단일 파일 처리 시에도 VRAM 해제 여부를 즉각 확인할 수 있도록 로그를 추가합니다.
+                        println!("[System] === 단일 파일 GLM OCR 처리 종료 (VRAM 해제됨) ===\n");
                     }
 
                     // 2. Privacy Filter
@@ -1019,11 +1077,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         }
                         // ★ VRAM 해제
                         *pm_guard = None;
+                        force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
                     }
 
                     if let Some(err_msg) = has_error {
                         json!({"type": "error", "message": err_msg}).to_string()
                     } else {
+                        // 🚀 단일 파일 처리 완료 후 최종 텍스트 결과를 콘솔에 출력합니다.
+                        println!("[System] [단일 파일 처리] 최종 전처리 결과:\n{}", masked_result);
                         json!({"type": "file_processed", "payload": {"ocr": ocr_result, "masked": masked_result}}).to_string()
                     }
                 } else if payload.starts_with("gemini_chat:") {
