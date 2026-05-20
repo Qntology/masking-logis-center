@@ -18,9 +18,9 @@ fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     let x2 = x.narrow(candle_core::D::Minus1, last_dim / 2, last_dim / 2)?;
     let rotated = Tensor::cat(&[&x2.neg()?, &x1], candle_core::D::Minus1)?;
     
-    // Broadcast cos and sin
-    let cos = cos.unsqueeze(0)?;
-    let sin = sin.unsqueeze(0)?;
+    // Broadcast cos and sin (num_heads 차원 추가를 위해 index 1에 unsqueeze 적용)
+    let cos = cos.unsqueeze(1)?;
+    let sin = sin.unsqueeze(1)?;
     
     Ok((x.broadcast_mul(&cos)? + rotated.broadcast_mul(&sin)?)?)
 }
