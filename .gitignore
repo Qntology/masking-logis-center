@@ -19,7 +19,7 @@ bin/
 _bin/
 
 # Editor directories and files
-src-tauri/data
+cargo/data
 .vscode/*
 !.vscode/extensions.json
 .idea

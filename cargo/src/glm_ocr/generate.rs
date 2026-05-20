@@ -55,27 +55,40 @@ pub struct GlmOcrGenerateModel {
 
 impl GlmOcrGenerateModel {
     pub fn init(path: &str, device: Option<&Device>, dtype: Option<DType>) -> Result<Self> {
-        // let chat_template = ChatTemplate::init(path)?;
         let tokenizer = TokenizerModel::init(path)?;
-        let config_path = path.to_string() + "/config.json";
+        let config_path = format!("{}/config.json", path);
         let cfg: GlmOcrConfig = serde_json::from_slice(&std::fs::read(config_path)?)?;
         let device = get_device(device);
         let cfg_dtype = cfg.text_config.dtype.as_str();
         let dtype = get_dtype(dtype, cfg_dtype);
         let processor = GlmOcrProcessor::new(path, &device, dtype)?;
-        let model_list = find_type_files(path, "safetensors")?;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&model_list, dtype, &device)? };
-        let generation_config_path = path.to_string() + "/generation_config.json";
-        let generation_config: GlmOcrGenerationConfig =
-            serde_json::from_slice(&std::fs::read(generation_config_path)?)?;
-        let model = GlmOcrModel::new(vb, cfg.clone(), generation_config.eos_token_id.clone())?;
+
+        let gguf_model_path = format!("{}/GLM-OCR-Q8_0.gguf", path);
+        let gguf_mmproj_path = format!("{}/GLM-OCR.mmproj-f16.gguf", path);
+
+        let model = if std::path::Path::new(&gguf_model_path).exists() && std::path::Path::new(&gguf_mmproj_path).exists() {
+            println!("[GlmOcr] Loading from GGUF...");
+            crate::glm_ocr::gguf_loader::load_glm_ocr_gguf(
+                &gguf_model_path,
+                &gguf_mmproj_path,
+                &cfg,
+                &device,
+            )?
+        } else {
+            let model_list = find_type_files(path, "safetensors")?;
+            let vb = unsafe { VarBuilder::from_mmaped_safetensors(&model_list, dtype, &device)? };
+            let generation_config_path = format!("{}/generation_config.json", path);
+            let generation_config: crate::glm_ocr::config::GlmOcrGenerationConfig =
+                serde_json::from_slice(&std::fs::read(generation_config_path)?)?;
+            GlmOcrModel::new(vb, cfg.clone(), generation_config.eos_token_id.clone())?
+        };
+
         let model_name = std::path::Path::new(path)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("ZhipuAI/GLM-OCR")
             .to_string();
         Ok(Self {
-            // chat_template,
             tokenizer,
             processor,
             model,
