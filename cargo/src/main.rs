@@ -135,6 +135,8 @@ const OVERLAY_SCRIPT: &str = r#"
             .header-actions button:disabled { background: #e9ecef !important; color: #6c757d !important; border-color: #dee2e6 !important; cursor: not-allowed; opacity: 0.6; }
             .btn-push { background: #007bff !important; color: white !important; border-color: #0069d9 !important; }
             .btn-push:not(:disabled):hover { background: #0069d9 !important; }
+            .btn-delete { background: #dc3545 !important; color: white !important; border-color: #dc3545 !important; }
+            .btn-delete:hover { background: #c82333 !important; }
             .item-row { display: flex; align-items: center; gap: 10px; padding: 8px; border-bottom: 1px solid #f0f0f0; }
             .item-row input[type="checkbox"] { cursor: pointer; }
             #main-layout { display: flex !important; flex: 1; overflow: hidden; }
@@ -148,7 +150,11 @@ const OVERLAY_SCRIPT: &str = r#"
             #log { display: flex !important; flex-direction: column !important; gap: 10px; width: 100%; }
             #log .system { align-self: flex-start !important; text-align: left !important; color: blue !important; max-width: 85%; white-space: pre-wrap; }
             #log .user { align-self: flex-end !important; text-align: right !important; color: green !important; max-width: 85%; white-space: pre-wrap; }
-            /* footer 및 input 스타일 제거 */
+            footer { padding: 10px 15px; background: #f8f9fa !important; border-top: 1px solid #eee; display: flex !important; gap: 8px; flex-shrink: 0; align-items: center; }
+            footer input[type="file"] { width: 140px; font-size: 12px; cursor: pointer; }
+            footer input[type="text"] { flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+            footer button { padding: 8px 15px; background: #333 !important; color: #fff !important; border: none; border-radius: 4px; font-size: 13px; font-weight: bold; cursor: pointer; }
+            footer button:hover { background: #555 !important; }
             button { cursor: pointer; padding: 5px 10px; border:0; }
         `;
 
@@ -185,6 +191,23 @@ const OVERLAY_SCRIPT: &str = r#"
             return ogDesc ? `${ogTitle}\n${ogDesc}` : ogTitle;
         }
 
+        // Delete 버튼 생성 (초기에는 숨김 처리)
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'btn-delete';
+        deleteBtn.textContent = 'Delete';
+        deleteBtn.style.display = 'none'; 
+        deleteBtn.onclick = () => {
+            const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
+            const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
+            if (window.rpc) {
+                window.rpc("delete_drafts:" + JSON.stringify(selectedIds));
+            }
+            // 선택된 아이템을 UI 데이터 배열에서 즉시 제거하고 화면을 갱신합니다.
+            stagedItems = stagedItems.filter(i => !selectedIds.includes(i.id));
+            updateGnbUI();
+            renderStagedList();
+        };
+
         const draftBtn = document.createElement('button');
         draftBtn.textContent = 'Draft (0)';
         draftBtn.onclick = async () => {
@@ -220,25 +243,42 @@ const OVERLAY_SCRIPT: &str = r#"
             pushBtn.disabled = (checkedCount === 0);
             pushBtn.textContent = `Push (${checkedCount})`; // 선택된 카운트 반영
             
+            // 체크된 항목이 1개 이상일 경우 삭제 버튼을 노출합니다.
+            deleteBtn.style.display = (checkedCount > 0) ? 'inline-block' : 'none';
+            
             const totalCount = log.querySelectorAll('.item-checkbox').length;
             selectAllCheck.checked = (totalCount > 0 && checkedCount === totalCount);
         }
 
+        let spinnerInterval = null;
+
         pushBtn.onclick = async () => {
             const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
-            // 만약 개별 아이템의 전체 데이터를 다시 보내야 하는 구조라면 아래와 같이 구성합니다.
             const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
+            if (selectedIds.length === 0) return;
+            
+            // 전송 중 중복 클릭 방지 및 스피너 시작
+            pushBtn.disabled = true;
+            deleteBtn.disabled = true;
+            draftBtn.disabled = true;
+            
+            let spinnerIdx = 0;
+            const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            
+            spinnerInterval = setInterval(() => {
+                pushBtn.textContent = `${spinnerFrames[spinnerIdx]} Pushing...`;
+                spinnerIdx = (spinnerIdx + 1) % spinnerFrames.length;
+            }, 100);
             
             if (window.rpc) {
-                // 배치 처리 시에도 host 정보가 필요한 경우를 대비해 전송 객체 구조를 확인하십시오.
                 window.rpc("mask_and_push_batch:" + JSON.stringify({ 
                     ids: selectedIds,
-                    host: window.location.host // 필요한 경우 추가
+                    host: window.location.host 
                 }));
-                alert(`${selectedIds.length} items Pushed with masking`);
             }
         };
 
+        actionContainer.appendChild(deleteBtn); // Draft 버튼의 왼쪽에 위치하도록 먼저 append
         actionContainer.appendChild(draftBtn);
         actionContainer.appendChild(pushBtn);
         header.appendChild(actionContainer);
@@ -291,9 +331,26 @@ const OVERLAY_SCRIPT: &str = r#"
         mainLayout.appendChild(aside);
         mainLayout.appendChild(stagedList);
 
+        // Footer UI 생성 (이미지, 텍스트 입력 폼)
+        const footer = document.createElement('footer');
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = 'image/*';
+        
+        const textInput = document.createElement('input');
+        textInput.type = 'text';
+        textInput.placeholder = '프롬프트 텍스트를 입력하세요...';
+        
+        const submitBtn = document.createElement('button');
+        submitBtn.textContent = 'Submit';
+        
+        footer.appendChild(fileInput);
+        footer.appendChild(textInput);
+        footer.appendChild(submitBtn);
+
         agentContainer.appendChild(header);
         agentContainer.appendChild(mainLayout);
-        // agentContainer.appendChild(footer); // footer 추가 코드 제거
+        agentContainer.appendChild(footer); // 생성한 footer 영역 마운트
         shadow.appendChild(style);
         shadow.appendChild(agentContainer);
 
@@ -405,6 +462,18 @@ const OVERLAY_SCRIPT: &str = r#"
                     renderStagedList();
                     return;
                 }
+                // 마스킹 및 Push 대기열 작업 완료 응답인 경우
+                else if (data.type === 'push_success') {
+                    if (spinnerInterval) clearInterval(spinnerInterval);
+                    deleteBtn.disabled = false;
+                    draftBtn.disabled = false;
+                    
+                    const pushedIds = data.payload || [];
+                    stagedItems = stagedItems.filter(i => !pushedIds.includes(i.id));
+                    updateGnbUI();
+                    renderStagedList();
+                    return;
+                }
             } catch (err) {
                 // JSON 파싱 실패시 일반 시스템 로그로 처리
             }
@@ -421,15 +490,33 @@ const OVERLAY_SCRIPT: &str = r#"
         });
 
         autoExtract();
+        
+        // 새로고침 시 저장된 Draft 데이터를 LanceDB에서 불러옵니다.
+        setTimeout(() => {
+            if (window.rpc) {
+                window.rpc("fetch_drafts");
+            }
+        }, 300);
     }
     initUI();
 })();
 "#;
 
 async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authenticated: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = page.execute(AddBindingParams::new("rpc")).await; // 바인딩명 변경
+    // 외부 스크립트 차단 우회를 위해 예측 불가능한 랜덤 바인딩명 및 전역 변수명 생성
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let rpc_binding_name = format!("__sys_rpc_{:x}", now);
+    let sidebar_var_name = format!("__sys_sidebar_{:x}", now);
+
+    let _ = page.execute(AddBindingParams::new(&rpc_binding_name)).await; // 바인딩명 변경
     let default_tab = load_default_tab();
-    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\n{}", is_authenticated, default_tab, OVERLAY_SCRIPT);
+    
+    // OVERLAY_SCRIPT 내의 예측 가능한 전역 변수(window.rpc 등)를 랜덤 생성한 이름으로 동적 치환
+    let overlay_script_replaced = OVERLAY_SCRIPT
+        .replace("window.rpc", &format!("window.{}", rpc_binding_name))
+        .replace("window.geminiSidebarLoaded", &format!("window.{}", sidebar_var_name));
+
+    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\n{}", is_authenticated, default_tab, overlay_script_replaced);
     let _ = page.evaluate(full_script).await;
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
@@ -437,7 +524,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     
     tokio::task::spawn(async move {
         while let Some(event) = bindings.next().await {
-            if event.name == "rpc" { // 이벤트 수신명 변경
+            if event.name == rpc_binding_name { // 이벤트 수신명 변경
                 let payload = event.payload.trim_matches('"').to_string();
                 let response = if payload.starts_with("sync_data:") {
                     let data = &payload["sync_data:".len()..];
@@ -479,6 +566,41 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     }
                 } else if payload == "fetch_drafts" {
                     db::fetch_drafts().await.map(|d| json!({"type":"drafts_loaded","payload":d}).to_string()).unwrap_or_else(|e| e.to_string())
+                } else if payload.starts_with("delete_drafts:") {
+                    let data = &payload["delete_drafts:".len()..];
+                    if let Ok(ids) = serde_json::from_str::<Vec<String>>(data) {
+                        if let Ok(table) = db::get_or_create_table().await {
+                            for id in ids {
+                                let expr = format!("id = '{}'", id);
+                                let _ = table.delete(&expr).await;
+                            }
+                        }
+                    }
+                    json!({"type":"delete_success"}).to_string()
+                } else if payload.starts_with("mask_and_push_batch:") {
+                    let data = &payload["mask_and_push_batch:".len()..];
+                    let mut pushed_ids: Vec<String> = Vec::new();
+                    
+                    if let Ok(req) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(ids) = req.get("ids").and_then(|i| i.as_array()) {
+                            let id_strings: Vec<String> = ids.iter().filter_map(|i| i.as_str().map(String::from)).collect();
+                            pushed_ids = id_strings.clone();
+                            
+                            // 🚀 마스킹 모델 추론 및 대기열 지연 시뮬레이션 (1.5초 대기)
+                            // 프론트엔드의 스피너가 돌아가는 것을 시각적으로 확인하기 위한 조치입니다.
+                            tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+                            
+                            if let Ok(table) = db::get_or_create_table().await {
+                                for id in id_strings {
+                                    // 실제 큐나 마스킹 파이프라인 연동은 이곳에서 이루어집니다.
+                                    // 현재는 Push 처리된 대상을 임시 목록(DRAFT)에서 지워줍니다.
+                                    let expr = format!("id = '{}'", id);
+                                    let _ = table.delete(&expr).await;
+                                }
+                            }
+                        }
+                    }
+                    json!({"type":"push_success", "payload": pushed_ids}).to_string()
                 } else if payload.starts_with("gemini_chat:") {
                     "[System] Gemini 서비스 비활성화됨".to_string()
                 } else { "Unknown command".to_string() };
