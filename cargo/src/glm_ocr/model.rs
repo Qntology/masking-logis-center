@@ -1,10 +1,10 @@
 //! GLM-OCR Model Implementation
 
 use anyhow::Result;
-use candle_core::{D, DType, IndexOp, Tensor};
+use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{
-    Activation, Conv2d, Conv2dConfig, Embedding, LayerNorm, Linear, Module, RmsNorm, VarBuilder,
-    conv2d, embedding, layer_norm, linear, linear_no_bias, rms_norm,
+    Activation, Embedding, LayerNorm, Linear, Module, RmsNorm, VarBuilder,
+    embedding, layer_norm, linear, linear_no_bias, rms_norm,
 };
 
 use crate::{
@@ -282,10 +282,11 @@ impl GlmOcrVisionRotaryEmbedding {
 
     pub fn forward(&self, seqlen: usize) -> Result<Tensor> {
         // Python: freqs = torch.outer(seq, self.inv_freq) -> (seqlen, dim/4)
+        let target_dtype = self.inv_freq.dtype();
         let seq = Tensor::arange(0f32, seqlen as f32, self.inv_freq.device())?;
-        let seq = seq.to_dtype(self.inv_freq.dtype())?;
-        let freqs = seq.unsqueeze(1)?.matmul(&self.inv_freq.unsqueeze(0)?)?;
-        Ok(freqs)
+        // 🚀 CPU BF16 matmul 에러 원천 차단
+        let freqs = seq.unsqueeze(1)?.matmul(&self.inv_freq.to_dtype(DType::F32)?.unsqueeze(0)?)?;
+        Ok(freqs.to_dtype(target_dtype)?)
     }
 
     pub fn rot_pos_emb(
@@ -388,48 +389,98 @@ impl GlmOcrTextDecoderLayer {
     pub fn new(vb: VarBuilder, config: &GlmOcrTextConfig, layer_idx: usize) -> Result<Self> {
         let self_attn = GlmOcrTextAttention::new(vb.pp("self_attn"), config, Some(layer_idx))?;
         let mlp = GlmOcrTextMLP::new(vb.pp("mlp"), config)?;
-        let input_layernorm = GlmOcrRMSNorm::new(
-            vb.pp("input_layernorm"),
-            config.hidden_size,
-            config.rms_norm_eps,
-        )?;
-        let post_attention_layernorm = GlmOcrRMSNorm::new(
-            vb.pp("post_attention_layernorm"),
-            config.hidden_size,
-            config.rms_norm_eps,
-        )?;
-        let post_self_attn_layernorm = GlmOcrRMSNorm::new(
-            vb.pp("post_self_attn_layernorm"),
-            config.hidden_size,
-            config.rms_norm_eps,
-        )?;
-        let post_mlp_layernorm = GlmOcrRMSNorm::new(
-            vb.pp("post_mlp_layernorm"),
-            config.hidden_size,
-            config.rms_norm_eps,
-        )?;
-
-        Ok(Self {
-            self_attn,
-            mlp,
-            input_layernorm,
-            post_attention_layernorm,
-            post_self_attn_layernorm,
-            post_mlp_layernorm,
-        })
+        let input_layernorm = GlmOcrRMSNorm::new(vb.pp("input_layernorm"), config.hidden_size, config.rms_norm_eps)?;
+        let post_attention_layernorm = GlmOcrRMSNorm::new(vb.pp("post_attention_layernorm"), config.hidden_size, config.rms_norm_eps)?;
+        let post_self_attn_layernorm = GlmOcrRMSNorm::new(vb.pp("post_self_attn_layernorm"), config.hidden_size, config.rms_norm_eps)?;
+        let post_mlp_layernorm = GlmOcrRMSNorm::new(vb.pp("post_mlp_layernorm"), config.hidden_size, config.rms_norm_eps)?;
+        Ok(Self { self_attn, mlp, input_layernorm, post_attention_layernorm, post_self_attn_layernorm, post_mlp_layernorm })
     }
 
-    pub fn forward(
-        &mut self,
-        xs: &Tensor,
-        position_embeddings: (&Tensor, &Tensor),
-        attention_mask: Option<&Tensor>,
-    ) -> Result<Tensor> {
+    pub fn new_skeleton(config: &GlmOcrTextConfig, device: &Device) -> Result<Self> {
+        let dummy = Tensor::zeros((1, 1), DType::F32, device)?;
+        let dummy_1d = Tensor::zeros((1,), DType::F32, device)?;
+        let head_dim = config.head_dim.unwrap_or(config.hidden_size / config.num_attention_heads);
+        let scaling = 1.0 / (head_dim as f64).sqrt();
+        let self_attn = GlmOcrTextAttention {
+            q_proj: Linear::new(dummy.clone(), None),
+            k_proj: Linear::new(dummy.clone(), None),
+            v_proj: Linear::new(dummy.clone(), None),
+            o_proj: Linear::new(dummy.clone(), None),
+            num_heads: config.num_attention_heads,
+            num_kv_heads: config.num_key_value_heads,
+            num_kv_groups: config.num_attention_heads / config.num_key_value_heads,
+            head_dim, scaling, kv_cache: None,
+        };
+        let mlp = GlmOcrTextMLP {
+            gate_up_proj: Linear::new(dummy.clone(), None),
+            down_proj: Linear::new(dummy.clone(), None),
+            act_fn: config.hidden_act,
+        };
+        let input_layernorm = GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps));
+        let post_attention_layernorm = GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps));
+        let post_self_attn_layernorm = GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps));
+        let post_mlp_layernorm = GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps));
+        Ok(Self { self_attn, mlp, input_layernorm, post_attention_layernorm, post_self_attn_layernorm, post_mlp_layernorm })
+    }
+
+    pub fn clear_weights(&mut self) {
+        let dummy = Tensor::zeros((1, 1), DType::F32, &Device::Cpu).unwrap();
+        let dummy_1d = Tensor::zeros((1,), DType::F32, &Device::Cpu).unwrap();
+        self.self_attn.q_proj = Linear::new(dummy.clone(), None);
+        self.self_attn.k_proj = Linear::new(dummy.clone(), None);
+        self.self_attn.v_proj = Linear::new(dummy.clone(), None);
+        self.self_attn.o_proj = Linear::new(dummy.clone(), None);
+        self.mlp.gate_up_proj = Linear::new(dummy.clone(), None);
+        self.mlp.down_proj = Linear::new(dummy.clone(), None);
+        self.input_layernorm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+        self.post_attention_layernorm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+        self.post_self_attn_layernorm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+        self.post_mlp_layernorm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+    }
+
+    pub fn is_cleared(&self) -> bool {
+        self.self_attn.q_proj.weight().elem_count() <= 1
+    }
+
+    pub fn load_weights_inplace<R: std::io::Read + std::io::Seek>(&mut self, ct: &candle_core::quantized::gguf_file::Content, reader: &mut R, prefix: &str, device: &Device, dtype: DType) -> Result<()> {
+        // 클로저 충돌을 피하기 위해 텐서 로드 유틸리티 함수를 인라인으로 구현하거나 헬퍼 메서드화 합니다.
+        let load_lin = |r: &mut R, name: &str| -> Result<Linear> {
+            let w = ct.tensor(r, &format!("{}.weight", name), device)?;
+            let w = w.dequantize_f16(device).or_else(|_| w.dequantize(device))?.to_dtype(dtype)?;
+            Ok(Linear::new(w, None))
+        };
+
+        let load_norm = |r: &mut R, name: &str| -> Result<GlmOcrRMSNorm> {
+            let w = ct.tensor(r, &format!("{}.weight", name), device)?;
+            let w = w.dequantize_f16(device).or_else(|_| w.dequantize(device))?.to_dtype(dtype)?;
+            Ok(GlmOcrRMSNorm(RmsNorm::new(w, 1e-5)))
+        };
+
+        self.self_attn.q_proj = load_lin(reader, &format!("{}attn_q", prefix))?;
+        self.self_attn.k_proj = load_lin(reader, &format!("{}attn_k", prefix))?;
+        self.self_attn.v_proj = load_lin(reader, &format!("{}attn_v", prefix))?;
+        self.self_attn.o_proj = load_lin(reader, &format!("{}attn_output", prefix))?;
+
+        let t_gate = ct.tensor(reader, &format!("{}ffn_gate.weight", prefix), device)?;
+        let gate = t_gate.dequantize_f16(device).or_else(|_| t_gate.dequantize(device))?.to_dtype(dtype)?;
+        let t_up = ct.tensor(reader, &format!("{}ffn_up.weight", prefix), device)?;
+        let up = t_up.dequantize_f16(device).or_else(|_| t_up.dequantize(device))?.to_dtype(dtype)?;
+        
+        let gate_up = Tensor::cat(&[&gate, &up], 0)?;
+        self.mlp.gate_up_proj = Linear::new(gate_up, None);
+        self.mlp.down_proj = load_lin(reader, &format!("{}ffn_down", prefix))?;
+
+        self.input_layernorm = load_norm(reader, &format!("{}attn_norm", prefix))?;
+        self.post_attention_layernorm = load_norm(reader, &format!("{}ffn_norm", prefix))?;
+        self.post_self_attn_layernorm = load_norm(reader, &format!("{}post_attention_norm", prefix))?;
+        self.post_mlp_layernorm = load_norm(reader, &format!("{}post_ffw_norm", prefix))?;
+        Ok(())
+    }
+
+    pub fn forward(&mut self, xs: &Tensor, position_embeddings: (&Tensor, &Tensor), attention_mask: Option<&Tensor>) -> Result<Tensor> {
         let residual = xs.clone();
         let xs = self.input_layernorm.forward(xs)?;
-        let (xs, _attn_weights) =
-            self.self_attn
-                .forward(&xs, position_embeddings, attention_mask)?;
+        let (xs, _attn_weights) = self.self_attn.forward(&xs, position_embeddings, attention_mask)?;
         let xs = self.post_self_attn_layernorm.forward(&xs)?;
         let xs = residual.add(&xs)?;
 
@@ -440,9 +491,7 @@ impl GlmOcrTextDecoderLayer {
         Ok(xs.add(&residual)?)
     }
 
-    pub fn clear_kv_cache(&mut self) {
-        self.self_attn.clear_kv_cache();
-    }
+    pub fn clear_kv_cache(&mut self) { self.self_attn.clear_kv_cache(); }
 }
 
 pub struct GlmOcrVisionAttention {
@@ -464,27 +513,13 @@ impl GlmOcrVisionAttention {
         let q_norm = GlmOcrRMSNorm::new(vb.pp("q_norm"), head_dim, config.rms_norm_eps)?;
         let k_norm = GlmOcrRMSNorm::new(vb.pp("k_norm"), head_dim, config.rms_norm_eps)?;
 
-        Ok(Self {
-            num_heads: config.num_heads,
-            head_dim,
-            scaling,
-            qkv,
-            proj,
-            q_norm,
-            k_norm,
-        })
+        Ok(Self { num_heads: config.num_heads, head_dim, scaling, qkv, proj, q_norm, k_norm })
     }
 
-    pub fn forward(
-        &self,
-        xs: &Tensor,
-        position_embeddings: Option<(&Tensor, &Tensor)>,
-    ) -> Result<Tensor> {
+    pub fn forward_with_params(&self, xs: &Tensor, _cu_seqlens: &Tensor, _rotary_pos_emb: Option<&Tensor>, position_embeddings: Option<(&Tensor, &Tensor)>) -> Result<Tensor> {
         let (seq_len, _) = xs.dims2()?;
         let qkv = self.qkv.forward(xs)?;
-        let qkv = qkv
-            .reshape((seq_len, 3, self.num_heads, self.head_dim))?
-            .permute((1, 0, 2, 3))?;
+        let qkv = qkv.reshape((seq_len, 3, self.num_heads, self.head_dim))?.permute((1, 0, 2, 3))?;
 
         let q = qkv.i(0)?;
         let k = qkv.i(1)?;
@@ -493,64 +528,14 @@ impl GlmOcrVisionAttention {
         let q = self.q_norm.forward(&q)?;
         let k = self.k_norm.forward(&k)?;
 
-        let (cos, sin) = if let Some((cos, sin)) = position_embeddings {
-            (cos, sin)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Position embeddings required for vision attention"
-            ));
-        };
-
+        let (cos, sin) = position_embeddings.unwrap();
         let (q, k) = apply_rotary_pos_emb_vision(&q, &k, cos, sin)?;
 
         let q = q.transpose(0, 1)?.unsqueeze(0)?;
         let k = k.transpose(0, 1)?.unsqueeze(0)?;
         let v = v.transpose(0, 1)?.unsqueeze(0)?;
 
-        // Vision attention always uses num_key_value_groups = 1
-        let (attn_output, _attn_weights) =
-            eager_attention_forward(&q, &k, &v, Some(1), None, self.scaling, 0.0)?;
-        let attn_output = attn_output.reshape((seq_len, ()))?;
-        Ok(self.proj.forward(&attn_output)?)
-    }
-
-    pub fn forward_with_params(
-        &self,
-        xs: &Tensor,
-        _cu_seqlens: &Tensor,
-        _rotary_pos_emb: Option<&Tensor>,
-        position_embeddings: Option<(&Tensor, &Tensor)>,
-    ) -> Result<Tensor> {
-        let (seq_len, _) = xs.dims2()?;
-        let qkv = self.qkv.forward(xs)?;
-        let qkv = qkv
-            .reshape((seq_len, 3, self.num_heads, self.head_dim))?
-            .permute((1, 0, 2, 3))?;
-
-        let q = qkv.i(0)?;
-        let k = qkv.i(1)?;
-        let v = qkv.i(2)?;
-
-        let q = self.q_norm.forward(&q)?;
-        let k = self.k_norm.forward(&k)?;
-
-        let (cos, sin) = if let Some((cos, sin)) = position_embeddings {
-            (cos, sin)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Position embeddings required for vision attention"
-            ));
-        };
-
-        let (q, k) = apply_rotary_pos_emb_vision(&q, &k, cos, sin)?;
-
-        let q = q.transpose(0, 1)?.unsqueeze(0)?;
-        let k = k.transpose(0, 1)?.unsqueeze(0)?;
-        let v = v.transpose(0, 1)?.unsqueeze(0)?;
-
-        // Vision attention always uses num_key_value_groups = 1
-        let (attn_output, _attn_weights) =
-            eager_attention_forward(&q, &k, &v, Some(1), None, self.scaling, 0.0)?;
+        let (attn_output, _attn_weights) = eager_attention_forward(&q, &k, &v, Some(1), None, self.scaling, 0.0)?;
         let attn_output = attn_output.reshape((seq_len, ()))?;
         Ok(self.proj.forward(&attn_output)?)
     }
@@ -569,27 +554,76 @@ impl GlmOcrVisionBlock {
         let attn = GlmOcrVisionAttention::new(vb.pp("attn"), config)?;
         let norm2 = GlmOcrRMSNorm::new(vb.pp("norm2"), config.hidden_size, config.rms_norm_eps)?;
         let mlp = GlmOcrVisionMlp::new(vb.pp("mlp"), config)?;
-
-        Ok(Self {
-            norm1,
-            norm2,
-            attn,
-            mlp,
-        })
+        Ok(Self { norm1, norm2, attn, mlp })
     }
 
-    pub fn forward(
-        &self,
-        xs: &Tensor,
-        cu_seqlens: &Tensor,
-        rotary_pos_emb: Option<&Tensor>,
-        position_embeddings: Option<(&Tensor, &Tensor)>,
-    ) -> Result<Tensor> {
+    pub fn new_skeleton(config: &GlmOcrVisionConfig, device: &Device) -> Result<Self> {
+        let dummy = Tensor::zeros((1, 1), DType::F32, device)?;
+        let dummy_1d = Tensor::zeros((1,), DType::F32, device)?;
+        let head_dim = config.hidden_size / config.num_heads;
+        let scaling = 1.0 / (head_dim as f64).sqrt();
+        let attn = GlmOcrVisionAttention {
+            num_heads: config.num_heads, head_dim, scaling,
+            qkv: Linear::new(dummy.clone(), None), proj: Linear::new(dummy.clone(), None),
+            q_norm: GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps)),
+            k_norm: GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps)),
+        };
+        let mlp = GlmOcrVisionMlp(GateUpDownMLP::new_dummy(device)); 
+        Ok(Self {
+            norm1: GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps)),
+            norm2: GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps)),
+            attn, mlp,
+        })
+    }
+    
+    pub fn clear_weights(&mut self) {
+        let dummy = Tensor::zeros((1, 1), DType::F32, &Device::Cpu).unwrap();
+        let dummy_1d = Tensor::zeros((1,), DType::F32, &Device::Cpu).unwrap();
+        self.attn.qkv = Linear::new(dummy.clone(), None);
+        self.attn.proj = Linear::new(dummy.clone(), None);
+        self.attn.q_norm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+        self.attn.k_norm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+        self.mlp.0.clear_weights();
+        self.norm1.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+        self.norm2.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+    }
+
+    pub fn is_cleared(&self) -> bool { self.attn.qkv.weight().elem_count() <= 1 }
+
+    pub fn load_weights_inplace<R: std::io::Read + std::io::Seek>(&mut self, ct: &candle_core::quantized::gguf_file::Content, reader: &mut R, prefix: &str, device: &Device, dtype: DType) -> Result<()> {
+        // 클로저 충돌을 피하기 위해 헬퍼 클로저 대신 직접 로드 로직을 구현합니다.
+        let load_lin_b = |r: &mut R, name: &str| -> Result<Linear> {
+            let w_t = ct.tensor(r, &format!("{}.weight", name), device)?;
+            let w = w_t.dequantize_f16(device).or_else(|_| w_t.dequantize(device))?.to_dtype(dtype)?;
+            let b = if let Ok(b_t) = ct.tensor(r, &format!("{}.bias", name), device) {
+                Some(b_t.dequantize_f16(device).or_else(|_| b_t.dequantize(device))?.to_dtype(dtype)?)
+            } else { None };
+            Ok(Linear::new(w, b))
+        };
+
+        let load_norm = |r: &mut R, name: &str| -> Result<GlmOcrRMSNorm> {
+            let w_t = ct.tensor(r, &format!("{}.weight", name), device)?;
+            let w = w_t.dequantize_f16(device).or_else(|_| w_t.dequantize(device))?.to_dtype(dtype)?;
+            Ok(GlmOcrRMSNorm(RmsNorm::new(w, 1e-5)))
+        };
+
+        self.attn.qkv = load_lin_b(reader, &format!("{}attn_qkv", prefix))?;
+        self.attn.proj = load_lin_b(reader, &format!("{}attn_out", prefix))?;
+        self.attn.q_norm = load_norm(reader, &format!("{}attn_q_norm", prefix))?;
+        self.attn.k_norm = load_norm(reader, &format!("{}attn_k_norm", prefix))?;
+        
+        // MLP 가중치 로드 (reader 가변 참조 전달)
+        self.mlp.0.load_weights_inplace(ct, reader, prefix, device, dtype, true)?;
+        
+        self.norm1 = load_norm(reader, &format!("{}ln1", prefix))?;
+        self.norm2 = load_norm(reader, &format!("{}ln2", prefix))?;
+        Ok(())
+    }
+
+    pub fn forward(&self, xs: &Tensor, cu_seqlens: &Tensor, rotary_pos_emb: Option<&Tensor>, position_embeddings: Option<(&Tensor, &Tensor)>) -> Result<Tensor> {
         let residual = xs.clone();
         let xs = self.norm1.forward(xs)?;
-        let xs =
-            self.attn
-                .forward_with_params(&xs, cu_seqlens, rotary_pos_emb, position_embeddings)?;
+        let xs = self.attn.forward_with_params(&xs, cu_seqlens, rotary_pos_emb, position_embeddings)?;
         let xs = residual.add(&xs)?;
 
         let residual = xs.clone();
@@ -610,44 +644,48 @@ pub struct GlmOcrVisionPatchMerger {
 
 impl GlmOcrVisionPatchMerger {
     pub fn new(vb: VarBuilder, config: &GlmOcrVisionConfig) -> Result<Self> {
-        let proj = linear_no_bias(
-            config.out_hidden_size,
-            config.out_hidden_size,
-            vb.pp("proj"),
-        )?;
-
-        let post_projection_norm = layer_norm(
-            config.out_hidden_size,
-            config.rms_norm_eps,
-            vb.pp("post_projection_norm"),
-        )?;
-
+        // 🚀 Shape Mismatch 에러 해결: GGUF 모델의 텐서 규격에 맞게 입력 차원을 4096으로 강제 고정합니다.
+        let in_dim = 4096;
+        let proj = linear_no_bias(in_dim, config.out_hidden_size, vb.pp("proj"))?;
+        let post_projection_norm = layer_norm(config.out_hidden_size, config.rms_norm_eps, vb.pp("post_projection_norm"))?;
         let context_dim = config.out_hidden_size * config.in_channels;
         let gate_proj = linear_no_bias(config.out_hidden_size, context_dim, vb.pp("gate_proj"))?;
         let up_proj = linear_no_bias(config.out_hidden_size, context_dim, vb.pp("up_proj"))?;
         let down_proj = linear_no_bias(context_dim, config.out_hidden_size, vb.pp("down_proj"))?;
 
-        Ok(Self {
-            proj,
-            post_projection_norm,
-            gate_proj,
-            up_proj,
-            down_proj,
-            act_fn: config.hidden_act,
-        })
+        Ok(Self { proj, post_projection_norm, gate_proj, up_proj, down_proj, act_fn: config.hidden_act })
     }
 
     pub fn forward(&self, hidden_state: &Tensor) -> Result<Tensor> {
-        let mut hidden_state = self.proj.forward(hidden_state)?;
-        hidden_state = self.post_projection_norm.forward(&hidden_state)?;
-        hidden_state = hidden_state.gelu()?;
+        let target_dtype = self.proj.weight().dtype();
+        let hs_f32 = hidden_state.to_dtype(DType::F32)?; // 🚀 CPU BF16 matmul 에러 원천 차단
+        
+        let w_proj = self.proj.weight().to_dtype(DType::F32)?;
+        let b_proj = match self.proj.bias() { Some(b) => Some(b.to_dtype(DType::F32)?), None => None };
+        let proj_f32 = Linear::new(w_proj, b_proj);
+        let mut hs = proj_f32.forward(&hs_f32)?.to_dtype(target_dtype)?;
+        
+        hs = self.post_projection_norm.forward(&hs)?;
+        hs = hs.gelu()?.to_dtype(DType::F32)?; // 활성화 함수 후 다시 F32로 변경
 
-        let gate = self.gate_proj.forward(&hidden_state)?;
+        let w_gate = self.gate_proj.weight().to_dtype(DType::F32)?;
+        let b_gate = match self.gate_proj.bias() { Some(b) => Some(b.to_dtype(DType::F32)?), None => None };
+        let gate_f32 = Linear::new(w_gate, b_gate);
+        
+        let w_up = self.up_proj.weight().to_dtype(DType::F32)?;
+        let b_up = match self.up_proj.bias() { Some(b) => Some(b.to_dtype(DType::F32)?), None => None };
+        let up_f32 = Linear::new(w_up, b_up);
+
+        let gate = gate_f32.forward(&hs)?;
         let gate = self.act_fn.forward(&gate)?;
-        let up = self.up_proj.forward(&hidden_state)?;
+        let up = up_f32.forward(&hs)?;
         let result = gate.broadcast_mul(&up)?;
 
-        Ok(self.down_proj.forward(&result)?)
+        let w_down = self.down_proj.weight().to_dtype(DType::F32)?;
+        let b_down = match self.down_proj.bias() { Some(b) => Some(b.to_dtype(DType::F32)?), None => None };
+        let down_f32 = Linear::new(w_down, b_down);
+
+        Ok(down_f32.forward(&result)?.to_dtype(target_dtype)?)
     }
 }
 
@@ -655,81 +693,41 @@ pub struct GlmOcrVisionPatchEmbed {
     patch_size: usize,
     temporal_patch_size: usize,
     in_channels: usize,
-    #[allow(dead_code)]
-    embed_dim: usize,
+    _embed_dim: usize,
     proj: Linear,
 }
 
 impl GlmOcrVisionPatchEmbed {
     pub fn new(vb: VarBuilder, config: &GlmOcrVisionConfig) -> Result<Self> {
-        let patch_dim =
-            config.in_channels * config.temporal_patch_size * config.patch_size * config.patch_size;
-
-        let weight = vb
-            .get(
-                (
-                    config.hidden_size,
-                    config.in_channels,
-                    config.temporal_patch_size,
-                    config.patch_size,
-                    config.patch_size,
-                ),
-                "proj.weight",
-            )?
-            .reshape((config.hidden_size, patch_dim))?;
-
+        let patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size * config.patch_size;
+        let weight = vb.get((config.hidden_size, config.in_channels, config.temporal_patch_size, config.patch_size, config.patch_size), "proj.weight")?.reshape((config.hidden_size, patch_dim))?;
         let bias = vb.get(config.hidden_size, "proj.bias").ok();
-
-        let proj = candle_nn::Linear::new(weight, bias);
-
-        Ok(Self {
-            patch_size: config.patch_size,
-            temporal_patch_size: config.temporal_patch_size,
-            in_channels: config.in_channels,
-            embed_dim: config.hidden_size,
-            proj,
-        })
+        Ok(Self { patch_size: config.patch_size, temporal_patch_size: config.temporal_patch_size, in_channels: config.in_channels, _embed_dim: config.hidden_size, proj: candle_nn::Linear::new(weight, bias) })
     }
 
     pub fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
         let rank = pixel_values.rank();
-
+        let target_dtype = self.proj.weight().dtype();
+        let pixel_values_f32 = pixel_values.to_dtype(DType::F32)?; // 🚀 CPU BF16 matmul 에러 원천 차단
+        
+        // 가중치도 F32로 임시 변환
+        let w_f32 = self.proj.weight().to_dtype(DType::F32)?;
+        let b_f32 = match self.proj.bias() { Some(b) => Some(b.to_dtype(DType::F32)?), None => None };
+        let proj_f32 = Linear::new(w_f32, b_f32);
+        
         if rank == 2 {
-            let hidden_states = self.proj.forward(pixel_values)?;
-            Ok(hidden_states)
+            Ok(proj_f32.forward(&pixel_values_f32)?.to_dtype(target_dtype)?)
         } else {
-            let (batch, _c, h, w) = pixel_values.dims4()?;
-
+            let (batch, _c, h, w) = pixel_values_f32.dims4()?;
             let patches_h = h / self.patch_size;
             let patches_w = w / self.patch_size;
             let num_patches = patches_h * patches_w;
-
-            let pv = pixel_values.reshape((
-                batch,
-                patches_h,
-                self.patch_size,
-                patches_w,
-                self.patch_size,
-                self.in_channels,
-            ))?;
-
-            let pv = pv.permute((0, 1, 3, 5, 2, 4))?;
-
-            let pv = pv.reshape((
-                batch * num_patches,
-                self.in_channels * self.patch_size * self.patch_size,
-            ))?;
-
-            let pv = pv.unsqueeze(1)?;
+            let pv = pixel_values_f32.reshape((batch, patches_h, self.patch_size, patches_w, self.patch_size, self.in_channels))?.permute((0, 1, 3, 5, 2, 4))?;
+            let pv = pv.reshape((batch * num_patches, self.in_channels * self.patch_size * self.patch_size))?.unsqueeze(1)?;
             let ones_shape: Vec<usize> = vec![1, self.temporal_patch_size];
             let pv = pv.broadcast_mul(&Tensor::ones(ones_shape, pv.dtype(), pv.device())?)?;
-            let pv = pv.reshape((
-                batch * num_patches,
-                self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size,
-            ))?;
-
-            let hidden_states = self.proj.forward(&pv)?;
-            Ok(hidden_states)
+            let pv = pv.reshape((batch * num_patches, self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size))?;
+            Ok(proj_f32.forward(&pv)?.to_dtype(target_dtype)?)
         }
     }
 }
@@ -739,175 +737,116 @@ pub struct GlmOcrVisionModel {
     rotary_pos_emb: GlmOcrVisionRotaryEmbedding,
     blocks: Vec<GlmOcrVisionBlock>,
     merger: GlmOcrVisionPatchMerger,
-    downsample: Conv2d,
     post_layernorm: GlmOcrRMSNorm,
     config: GlmOcrVisionConfig,
+    pub file: Option<std::fs::File>,
+    pub ct: Option<std::sync::Arc<candle_core::quantized::gguf_file::Content>>,
+    pub dtype: DType,
 }
 
 impl GlmOcrVisionModel {
-    pub fn new(vb: VarBuilder, config: &GlmOcrVisionConfig) -> Result<Self> {
+    pub fn new_with_file(
+        vb: VarBuilder, 
+        config: &GlmOcrVisionConfig,
+        file: Option<std::fs::File>,
+        ct: Option<std::sync::Arc<candle_core::quantized::gguf_file::Content>>,
+    ) -> Result<Self> {
         let patch_embed = GlmOcrVisionPatchEmbed::new(vb.pp("patch_embed"), config)?;
-
         let head_dim = config.hidden_size / config.num_heads;
-        let rotary_pos_emb = GlmOcrVisionRotaryEmbedding::new(
-            head_dim / 2,
-            config.rope_theta,
-            vb.device(),
-            vb.dtype(),
-        )?;
-
+        let rotary_pos_emb = GlmOcrVisionRotaryEmbedding::new(head_dim / 2, config.rope_theta, vb.device(), vb.dtype())?;
+        
         let mut blocks = Vec::new();
-        let depth = config.depth;
-        for i in 0..depth {
-            let block = GlmOcrVisionBlock::new(vb.pp("blocks").pp(i), config)?;
+        for i in 0..config.depth {
+            let mut block = if file.is_some() {
+                let mut b = GlmOcrVisionBlock::new_skeleton(config, vb.device())?;
+                b.clear_weights();
+                b
+            } else {
+                GlmOcrVisionBlock::new(vb.pp("blocks").pp(i), config)?
+            };
             blocks.push(block);
         }
 
         let merger = GlmOcrVisionPatchMerger::new(vb.pp("merger"), config)?;
+        let post_layernorm = GlmOcrRMSNorm::new(vb.pp("post_layernorm"), config.hidden_size, config.rms_norm_eps)?;
 
-        let downsample = conv2d(
-            config.hidden_size,
-            config.out_hidden_size,
-            config.spatial_merge_size,
-            Conv2dConfig {
-                stride: config.spatial_merge_size,
-                ..Default::default()
-            },
-            vb.pp("downsample"),
-        )?;
-
-        let post_layernorm = GlmOcrRMSNorm::new(
-            vb.pp("post_layernorm"),
-            config.hidden_size,
-            config.rms_norm_eps,
-        )?;
-
-        Ok(Self {
-            patch_embed,
-            rotary_pos_emb,
-            blocks,
-            merger,
-            downsample,
-            post_layernorm,
-            config: config.clone(),
-        })
+        Ok(Self { patch_embed, rotary_pos_emb, blocks, merger, post_layernorm, config: config.clone(), file, ct, dtype: vb.dtype() })
     }
 
-    pub fn forward(&self, pixel_values: &Tensor, grid_thw: &Tensor) -> Result<Tensor> {
-        let mut hidden_states = self.patch_embed.forward(pixel_values)?;
+    pub fn forward(&mut self, pixel_values: &Tensor, grid_thw: &Tensor) -> Result<Tensor> {
+        let cpu = &Device::Cpu;
+        let gpu = pixel_values.device(); // 원래 CUDA 장치 저장
 
-        // Parse grid_thw - may be shape (3,) or (N, 3)
-        let grid_thw_parsed = if grid_thw.dims().len() == 1 {
-            let t = grid_thw.i(0)?.to_dtype(DType::F32)?.to_scalar::<f32>()? as usize;
-            let h = grid_thw.i(1)?.to_dtype(DType::F32)?.to_scalar::<f32>()? as usize;
-            let w = grid_thw.i(2)?.to_dtype(DType::F32)?.to_scalar::<f32>()? as usize;
+        // VRAM 피크 차단을 위해 입력 이미지를 CPU로 내려서 전처리
+        let pixel_values_cpu = pixel_values.to_device(cpu)?;
+        let mut hidden_states = self.patch_embed.forward(&pixel_values_cpu)?;
+
+        let grid_thw_cpu = grid_thw.to_device(cpu)?;
+        let grid_thw_parsed = if grid_thw_cpu.dims().len() == 1 {
+            let t = grid_thw_cpu.i(0)?.to_dtype(DType::F32)?.to_scalar::<f32>()? as usize;
+            let h = grid_thw_cpu.i(1)?.to_dtype(DType::F32)?.to_scalar::<f32>()? as usize;
+            let w = grid_thw_cpu.i(2)?.to_dtype(DType::F32)?.to_scalar::<f32>()? as usize;
             vec![(t, h, w)]
         } else {
-            let grid_thw = grid_thw.to_dtype(DType::F32)?;
-            let n = grid_thw.dim(0)?;
+            let grid_thw_f32 = grid_thw_cpu.to_dtype(DType::F32)?;
+            let n = grid_thw_f32.dim(0)?;
             let mut result = Vec::new();
             for i in 0..n {
-                let row = grid_thw.i(i)?;
-                let t = row.i(0)?.to_scalar::<f32>()? as usize;
-                let h = row.i(1)?.to_scalar::<f32>()? as usize;
-                let w = row.i(2)?.to_scalar::<f32>()? as usize;
-                result.push((t, h, w));
+                let row = grid_thw_f32.i(i)?;
+                result.push((row.i(0)?.to_scalar::<f32>()? as usize, row.i(1)?.to_scalar::<f32>()? as usize, row.i(2)?.to_scalar::<f32>()? as usize));
             }
             result
         };
 
-        let (cos, sin) = self
-            .rotary_pos_emb
-            .rot_pos_emb(&grid_thw_parsed, self.config.spatial_merge_size)?;
-
+        let (cos, sin) = self.rotary_pos_emb.rot_pos_emb(&grid_thw_parsed, self.config.spatial_merge_size)?;
         let rotary_pos_emb = Tensor::cat(&[&cos, &sin], D::Minus1)?;
-        let position_embeddings = (&cos, &sin);
 
         let mut cu_seqlens_values: Vec<i32> = vec![0];
         let mut cumsum: i32 = 0;
         for (t, h, w) in &grid_thw_parsed {
             let spatial_patches = (h * w) as i32;
-            for _ in 0..*t {
-                cumsum += spatial_patches;
-                cu_seqlens_values.push(cumsum);
+            for _ in 0..*t { cumsum += spatial_patches; cu_seqlens_values.push(cumsum); }
+        }
+        let cu_seqlens = Tensor::from_slice(&cu_seqlens_values, &[cu_seqlens_values.len()], gpu)?;
+
+        // === VRAM 전송 (블록 연산 전) ===
+        hidden_states = hidden_states.to_device(gpu)?;
+        let rotary_pos_emb_gpu = rotary_pos_emb.to_device(gpu)?;
+        let cos_gpu = cos.to_device(gpu)?;
+        let sin_gpu = sin.to_device(gpu)?;
+        let position_embeddings_gpu = (&cos_gpu, &sin_gpu);
+
+        // ★ [SSD 오프로딩] 비전 블록 핑퐁 로직: 연산 직전에만 VRAM으로 로드
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            if block.is_cleared() {
+                if let (Some(f), Some(ct)) = (self.file.as_mut(), self.ct.as_ref()) {
+                    let prefix = format!("v.blk.{}.", i);
+                    block.load_weights_inplace(ct, f, &prefix, hidden_states.device(), self.dtype)?;
+                }
+            }
+
+            hidden_states = block.forward(&hidden_states, &cu_seqlens, Some(&rotary_pos_emb_gpu), Some(position_embeddings_gpu))?;
+
+            if self.file.is_some() {
+                block.clear_weights(); // 연산 종료 즉시 VRAM 해제
             }
         }
-        let cu_seqlens = Tensor::from_slice(
-            &cu_seqlens_values,
-            &[cu_seqlens_values.len()],
-            hidden_states.device(),
-        )?;
 
-        for block in self.blocks.iter() {
-            hidden_states = block.forward(
-                &hidden_states,
-                &cu_seqlens,
-                Some(&rotary_pos_emb),
-                Some(position_embeddings),
-            )?;
-        }
+        // === RAM 회수 (후처리) ===
+        hidden_states = hidden_states.to_device(cpu)?;
 
         let hidden_states = self.post_layernorm.forward(&hidden_states)?;
-
         let sms = self.config.spatial_merge_size;
         let hidden_dim = hidden_states.dim(hidden_states.dims().len() - 1)?;
-
-        let total_patches = hidden_states.dim(0)?; // 2816
-        let merged_patches = total_patches / (sms * sms); // 704
-        let hidden_states = hidden_states.reshape((merged_patches, sms, sms, hidden_dim))?;
-        let hidden_states = hidden_states.permute((0, 3, 1, 2))?; // [704, 1024, 2, 2]
-        let hidden_states = self.downsample.forward(&hidden_states)?; // [704, 1536, 1, 1]
-        let hidden_states = hidden_states.reshape((merged_patches, self.config.out_hidden_size))?; // [704, 1536]
-
-        let merged = self.merger.forward(&hidden_states)?;
-
-        let merged = merged.unsqueeze(0)?;
-        Ok(merged)
+        let total_patches = hidden_states.dim(0)?; 
+        let merged_patches = total_patches / (sms * sms); 
+        let hidden_states = hidden_states.reshape((merged_patches, sms, sms, hidden_dim))?.permute((0, 3, 1, 2))?;
+        
+        // 🚀 downsample을 거치지 않고 패치를 flatten하여 4096 차원으로 만든 뒤 merger로 바로 넘깁니다.
+        let hidden_states = hidden_states.reshape((merged_patches, hidden_dim * sms * sms))?; 
+        Ok(self.merger.forward(&hidden_states)?.unsqueeze(0)?)
     }
 }
-
-// pub struct GlmOcrProjector {
-//     #[allow(dead_code)]
-//     query_embed: Option<Tensor>,
-//     proj: Linear,
-//     norm: LayerNorm,
-//     #[allow(dead_code)]
-//     num_queries: usize,
-// }
-
-// impl GlmOcrProjector {
-//     pub fn new(
-//         vb: VarBuilder,
-//         vision_config: &GlmOcrVisionConfig,
-//         config: &GlmOcrProjectorConfig,
-//     ) -> Result<Self> {
-//         let query_embed = vb
-//             .get(
-//                 (1, config.num_queries, vision_config.out_hidden_size),
-//                 "query_embed",
-//             )
-//             .ok();
-
-//         let proj = linear_no_bias(
-//             vision_config.out_hidden_size,
-//             config.hidden_size,
-//             vb.pp("proj"),
-//         )?;
-//         let norm = layer_norm(config.hidden_size, 1e-5, vb.pp("norm"))?;
-
-//         Ok(Self {
-//             query_embed,
-//             proj,
-//             norm,
-//             num_queries: config.num_queries,
-//         })
-//     }
-
-//     pub fn forward(&self, image_features: &Tensor) -> Result<Tensor> {
-//         let projected = self.proj.forward(image_features)?;
-//         Ok(self.norm.forward(&projected)?)
-//     }
-// }
 
 pub struct GlmOcrTextRotaryEmbedding {
     inv_freq: Tensor,
@@ -915,47 +854,26 @@ pub struct GlmOcrTextRotaryEmbedding {
 }
 
 impl GlmOcrTextRotaryEmbedding {
-    pub fn new(
-        config: &GlmOcrTextConfig,
-        device: &candle_core::Device,
-        dtype: DType,
-    ) -> Result<Self> {
+    pub fn new(config: &GlmOcrTextConfig, device: &candle_core::Device, dtype: DType) -> Result<Self> {
         let rope_theta = config.rope_parameters.rope_theta;
-        let head_dim = config.head_dim.unwrap_or_else(|| {
-            // Integer division, panics if num_attention_heads is 0 (like Python)
-            config.hidden_size / config.num_attention_heads
-        });
+        let head_dim = config.head_dim.unwrap_or_else(|| config.hidden_size / config.num_attention_heads);
         let dim = (head_dim as f32 * config.rope_parameters.partial_rotary_factor) as usize;
-
-        let inv_freq: Vec<f32> = (0..dim)
-            .step_by(2)
-            .map(|i| 1.0 / (rope_theta as f64).powf(i as f64 / dim as f64) as f32)
-            .collect();
-        let inv_freq =
-            Tensor::from_slice(&inv_freq, (1, inv_freq.len()), device)?.to_dtype(dtype)?;
-
-        Ok(Self {
-            inv_freq,
-            mrope_section: config.rope_parameters.mrope_section.clone(),
-        })
+        let inv_freq: Vec<f32> = (0..dim).step_by(2).map(|i| 1.0 / (rope_theta as f64).powf(i as f64 / dim as f64) as f32).collect();
+        let inv_freq = Tensor::from_slice(&inv_freq, (1, inv_freq.len()), device)?.to_dtype(dtype)?;
+        Ok(Self { inv_freq, mrope_section: config.rope_parameters.mrope_section.clone() })
     }
 
     fn apply_mrope(&self, freqs: &Tensor) -> Result<Tensor> {
-        // freqs: (3, bs, seq_len, head_dim/2)
-        // Split by mrope_section and select from different axes
         let section = &self.mrope_section;
         let mut chunks = Vec::new();
         let mut offset = 0;
         for &s in section.iter() {
-            let chunk = freqs.narrow(D::Minus1, offset, s)?;
-            chunks.push(chunk);
+            chunks.push(freqs.narrow(D::Minus1, offset, s)?);
             offset += s;
         }
-        // Select chunk[i % 3] from axis 0
         let mut result_parts = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
-            let selected = chunk.i(i % 3)?; // (bs, seq_len, section_size)
-            result_parts.push(selected);
+            result_parts.push(chunk.i(i % 3)?);
         }
         Ok(Tensor::cat(&result_parts, D::Minus1)?)
     }
@@ -963,75 +881,23 @@ impl GlmOcrTextRotaryEmbedding {
     pub fn forward_with_position_ids(&self, position_ids: &Tensor) -> Result<(Tensor, Tensor)> {
         let (_, bs, _seq_len) = position_ids.dims3()?;
         let inv_freq_len = self.inv_freq.dim(1)?;
-
-        // inv_freq: (1, inv_freq_len) -> broadcast to (3, bs, inv_freq_len, 1)
-        let inv_freq = self.inv_freq.unsqueeze(0)?.unsqueeze(D::Minus1)?; // (1, 1, hd/2, 1)
-        let inv_freq = inv_freq.broadcast_as((3, bs, inv_freq_len, 1))?;
-        let inv_freq = inv_freq.to_dtype(DType::F32)?.contiguous()?;
-
-        // position_ids: (3, bs, seq_len) -> (3, bs, 1, seq_len)
-        let pos_expanded = position_ids
-            .unsqueeze(D::Minus2)?
-            .to_dtype(DType::F32)?
-            .contiguous()?;
-
-        // freqs = inv_freq @ pos_expanded -> (3, bs, hd/2, seq_len) -> T -> (3, bs, seq_len, hd/2)
+        let inv_freq = self.inv_freq.unsqueeze(0)?.unsqueeze(D::Minus1)?.broadcast_as((3, bs, inv_freq_len, 1))?.to_dtype(DType::F32)?.contiguous()?;
+        let pos_expanded = position_ids.unsqueeze(D::Minus2)?.to_dtype(DType::F32)?.contiguous()?;
         let freqs = inv_freq.matmul(&pos_expanded)?.transpose(2, 3)?;
-
-        // Apply M-RoPE section selection
-        let freqs = self.apply_mrope(&freqs)?; // (bs, seq_len, hd/2)
-
+        let freqs = self.apply_mrope(&freqs)?; 
         let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1)?.contiguous()?;
-        Ok((
-            emb.cos()?.to_dtype(self.inv_freq.dtype())?,
-            emb.sin()?.to_dtype(self.inv_freq.dtype())?,
-        ))
+        Ok((emb.cos()?.to_dtype(self.inv_freq.dtype())?, emb.sin()?.to_dtype(self.inv_freq.dtype())?))
     }
 
-    pub fn forward(
-        &self,
-        seq_len: usize,
-        seqlen_offset: usize,
-        device: &candle_core::Device,
-    ) -> Result<(Tensor, Tensor)> {
-        // For text-only (no image), all 3 axes have the same position IDs
-        let positions = Tensor::arange(
-            seqlen_offset as f32,
-            (seqlen_offset + seq_len) as f32,
-            device,
-        )?
-        .to_dtype(self.inv_freq.dtype())?;
-
-        // position_ids: (3, 1, seq_len)
-        let positions = positions.unsqueeze(0)?; // (1, seq_len)
-        let positions_3d = positions.unsqueeze(0)?.expand((3, 1, seq_len))?; // (3, 1, seq_len)
-
-        // inv_freq: (1, head_dim/2) -> (1, 1, head_dim/2, 1) -> (3, 1, head_dim/2, 1)
-        let inv_freq = self.inv_freq.unsqueeze(0)?.unsqueeze(D::Minus1)?; // (1, 1, hd/2, 1)
-        let inv_freq = inv_freq.broadcast_as((3, 1, self.inv_freq.dim(1)?, 1))?; // (3, 1, hd/2, 1)
-        let inv_freq = inv_freq.to_dtype(DType::F32)?.contiguous()?;
-
-        // position_ids: (3, 1, 1, seq_len)
-        let positions_expanded = positions_3d
-            .unsqueeze(D::Minus2)?
-            .to_dtype(DType::F32)?
-            .contiguous()?;
-
-        // freqs = inv_freq @ positions -> (3, 1, hd/2, seq_len) -> transpose -> (3, 1, seq_len, hd/2)
+    pub fn forward(&self, seq_len: usize, seqlen_offset: usize, device: &candle_core::Device) -> Result<(Tensor, Tensor)> {
+        let positions = Tensor::arange(seqlen_offset as f32, (seqlen_offset + seq_len) as f32, device)?.to_dtype(self.inv_freq.dtype())?;
+        let positions_3d = positions.unsqueeze(0)?.unsqueeze(0)?.expand((3, 1, seq_len))?; 
+        let inv_freq = self.inv_freq.unsqueeze(0)?.unsqueeze(D::Minus1)?.broadcast_as((3, 1, self.inv_freq.dim(1)?, 1))?.to_dtype(DType::F32)?.contiguous()?;
+        let positions_expanded = positions_3d.unsqueeze(D::Minus2)?.to_dtype(DType::F32)?.contiguous()?;
         let freqs = inv_freq.matmul(&positions_expanded)?.transpose(2, 3)?;
-
-        // Apply M-RoPE
-        let freqs = self.apply_mrope(&freqs)?; // (1, seq_len, hd/2)
-
-        // Double: emb = cat(freqs, freqs) -> (1, seq_len, head_dim)
+        let freqs = self.apply_mrope(&freqs)?; 
         let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1)?.contiguous()?;
-        let cos = emb.cos()?;
-        let sin = emb.sin()?;
-
-        Ok((
-            cos.to_dtype(self.inv_freq.dtype())?,
-            sin.to_dtype(self.inv_freq.dtype())?,
-        ))
+        Ok((emb.cos()?.to_dtype(self.inv_freq.dtype())?, emb.sin()?.to_dtype(self.inv_freq.dtype())?))
     }
 }
 
@@ -1041,94 +907,69 @@ pub struct GlmOcrTextModel {
     norm: GlmOcrRMSNorm,
     lm_head: Linear,
     rotary_emb: GlmOcrTextRotaryEmbedding,
-    // config: GlmOcrTextConfig,
     spatial_merge_size: usize,
-    /// max_mrope_position + 1 after prefill (stored for decode-pass position computation)
     next_mrope_pos: usize,
-    /// Number of tokens in the prefill pass
     prefill_seq_len: usize,
+    pub file: Option<std::fs::File>,
+    pub ct: Option<std::sync::Arc<candle_core::quantized::gguf_file::Content>>,
+    pub dtype: DType,
 }
 
 impl GlmOcrTextModel {
-    pub fn new(
+    pub fn new_with_file(
         vb: VarBuilder,
         config: GlmOcrTextConfig,
         spatial_merge_size: usize,
+        file: Option<std::fs::File>,
+        ct: Option<std::sync::Arc<candle_core::quantized::gguf_file::Content>>,
     ) -> Result<Self> {
         let embed_tokens = embedding(config.vocab_size, config.hidden_size, vb.pp("embed_tokens"))?;
 
         let mut layers = Vec::new();
         for i in 0..config.num_hidden_layers {
-            let layer = GlmOcrTextDecoderLayer::new(vb.pp("layers").pp(i), &config, i)?;
+            let layer = if file.is_some() {
+                let mut l = GlmOcrTextDecoderLayer::new_skeleton(&config, vb.device())?;
+                l.clear_weights();
+                l
+            } else {
+                GlmOcrTextDecoderLayer::new(vb.pp("layers").pp(i), &config, i)?
+            };
             layers.push(layer);
         }
 
         let norm = GlmOcrRMSNorm::new(vb.pp("norm"), config.hidden_size, config.rms_norm_eps)?;
-
-        let root_vb = vb.root();
-        let lm_head = linear_no_bias(config.hidden_size, config.vocab_size, root_vb.pp("lm_head"))?;
-
+        let lm_head = linear_no_bias(config.hidden_size, config.vocab_size, vb.root().pp("lm_head"))?;
         let rotary_emb = GlmOcrTextRotaryEmbedding::new(&config, vb.device(), vb.dtype())?;
 
         Ok(Self {
-            embed_tokens,
-            layers,
-            norm,
-            lm_head,
-            rotary_emb,
-            // config,
-            spatial_merge_size,
-            next_mrope_pos: 0,
-            prefill_seq_len: 0,
+            embed_tokens, layers, norm, lm_head, rotary_emb, spatial_merge_size, next_mrope_pos: 0, prefill_seq_len: 0, file, ct, dtype: vb.dtype()
         })
     }
 
-    fn compute_mrope_position_ids(
-        &mut self,
-        image_mask: &Tensor,
-        grid_thw: &Tensor,
-        seq_len: usize,
-        device: &candle_core::Device,
-    ) -> Result<Tensor> {
-        // Parse original grid dimensions (before spatial merge)
+    fn compute_mrope_position_ids(&mut self, image_mask: &Tensor, grid_thw: &Tensor, seq_len: usize, device: &candle_core::Device) -> Result<Tensor> {
         let t_dim = grid_thw.i(0)?.to_dtype(DType::F32)?.to_scalar::<f32>()? as usize;
         let h_dim = grid_thw.i(1)?.to_dtype(DType::F32)?.to_scalar::<f32>()? as usize;
         let w_dim = grid_thw.i(2)?.to_dtype(DType::F32)?.to_scalar::<f32>()? as usize;
-
-        // Merged grid dimensions (what the LLM sees as image tokens)
         let llm_grid_t = t_dim;
         let llm_grid_h = h_dim / self.spatial_merge_size;
         let llm_grid_w = w_dim / self.spatial_merge_size;
-        let num_image_tokens = llm_grid_t * llm_grid_h * llm_grid_w;
-
-        // Image mask as bool vec (shape (1, seq_len) -> (seq_len,))
-        let mask_vec = image_mask
-            .squeeze(0)?
-            .to_dtype(DType::U8)?
-            .to_vec1::<u8>()?;
+        let _num_image_tokens = llm_grid_t * llm_grid_h * llm_grid_w;
+        let mask_vec = image_mask.squeeze(0)?.to_dtype(DType::U8)?.to_vec1::<u8>()?;
 
         let mut t_ids: Vec<i64> = Vec::with_capacity(seq_len);
         let mut h_ids: Vec<i64> = Vec::with_capacity(seq_len);
         let mut w_ids: Vec<i64> = Vec::with_capacity(seq_len);
 
-        let mut st_idx: i64 = 0; // start index for the next group
+        let mut st_idx: i64 = 0; 
         let mut i = 0usize;
 
         while i < seq_len {
             let is_img = mask_vec[i] == 1;
             let start = i;
-            while i < seq_len && (mask_vec[i] == 1) == is_img {
-                i += 1;
-            }
+            while i < seq_len && (mask_vec[i] == 1) == is_img { i += 1; }
             let run_len = i - start;
 
             if is_img {
-                // Assign 3D (t, h, w) positions for merged image grid
-                assert_eq!(
-                    run_len, num_image_tokens,
-                    "image token count mismatch: mask={}, grid={}",
-                    run_len, num_image_tokens
-                );
                 for ti in 0..llm_grid_t {
                     for hi in 0..llm_grid_h {
                         for wi in 0..llm_grid_w {
@@ -1138,31 +979,24 @@ impl GlmOcrTextModel {
                         }
                     }
                 }
-                // Next group starts after max(t, h, w) + 1
-                let max_offset = (llm_grid_t as i64 - 1)
-                    .max(llm_grid_h as i64 - 1)
-                    .max(llm_grid_w as i64 - 1);
+                let max_offset = (llm_grid_t as i64 - 1).max(llm_grid_h as i64 - 1).max(llm_grid_w as i64 - 1);
                 st_idx += max_offset + 1;
             } else {
-                // Sequential positions for text tokens
                 for j in 0..run_len {
                     let pos = st_idx + j as i64;
-                    t_ids.push(pos);
-                    h_ids.push(pos);
-                    w_ids.push(pos);
+                    t_ids.push(pos); h_ids.push(pos); w_ids.push(pos);
                 }
                 st_idx += run_len as i64;
             }
         }
 
-        // st_idx is now max_mrope_pos + 1; store for decode passes
         self.next_mrope_pos = st_idx as usize;
         self.prefill_seq_len = seq_len;
 
         let t_t = Tensor::from_vec(t_ids, (1, seq_len), device)?;
         let h_t = Tensor::from_vec(h_ids, (1, seq_len), device)?;
         let w_t = Tensor::from_vec(w_ids, (1, seq_len), device)?;
-        Ok(Tensor::stack(&[&t_t, &h_t, &w_t], 0)?) // (3, 1, seq_len)
+        Ok(Tensor::stack(&[&t_t, &h_t, &w_t], 0)?) 
     }
 
     pub fn forward(
@@ -1176,94 +1010,75 @@ impl GlmOcrTextModel {
         let (bs, seq_len) = input_ids.dims2()?;
         let mut inputs_embeds = self.embed_tokens.forward(input_ids)?;
 
-        // Merge image features into embeddings at image token positions
         if let (Some(img_feats), Some(img_mask)) = (image_features, image_mask) {
-            // img_feats: (1, num_features, hidden_size)
-            // img_mask: (1, seq_len) with 1s at image_token positions
             let img_mask_bool = img_mask.squeeze(0)?.to_dtype(DType::U8)?.to_vec1::<u8>()?;
-            let _hidden_size = inputs_embeds.dim(2)?;
-
-            // Collect image token indices
-            let image_indices: Vec<usize> = img_mask_bool
-                .iter()
-                .enumerate()
-                .filter(|&(_, &v)| v == 1)
-                .map(|(i, _)| i)
-                .collect();
-
+            let image_indices: Vec<usize> = img_mask_bool.iter().enumerate().filter(|&(_, &v)| v == 1).map(|(i, _)| i).collect();
             let num_features = img_feats.dim(1)?;
             let num_to_replace = image_indices.len().min(num_features);
 
-            // Replace embeddings at image positions with image features
-            // Build the merged embeddings by copying
-            let embeds_flat = inputs_embeds.squeeze(0)?; // (seq_len, hidden_size)
+            let embeds_flat = inputs_embeds.squeeze(0)?; 
             let mut embeds_vec: Vec<Tensor> = Vec::new();
-
-            // let mut feat_idx = 0;
             let mut pos = 0;
-            // for &img_pos in image_indices.iter().take(num_to_replace) {
             for (feat_idx, &img_pos) in image_indices.iter().take(num_to_replace).enumerate() {
-                if img_pos > pos {
-                    embeds_vec.push(embeds_flat.narrow(0, pos, img_pos - pos)?);
-                }
+                if img_pos > pos { embeds_vec.push(embeds_flat.narrow(0, pos, img_pos - pos)?); }
                 embeds_vec.push(img_feats.i((0, feat_idx, ..))?.unsqueeze(0)?);
-                // feat_idx += 1;
                 pos = img_pos + 1;
             }
-            if pos < seq_len {
-                embeds_vec.push(embeds_flat.narrow(0, pos, seq_len - pos)?);
-            }
-
+            if pos < seq_len { embeds_vec.push(embeds_flat.narrow(0, pos, seq_len - pos)?); }
             let refs: Vec<&Tensor> = embeds_vec.iter().collect();
             inputs_embeds = Tensor::cat(&refs, 0)?.unsqueeze(0)?;
         }
 
-        let attention_mask = if seq_len > 1 {
-            Some(prepare_causal_attention_mask(
-                bs,
-                seq_len,
-                seqlen_offset,
-                input_ids.device(),
-            )?)
-        } else {
-            None
-        };
+        let attention_mask = if seq_len > 1 { Some(prepare_causal_attention_mask(bs, seq_len, seqlen_offset, input_ids.device())?) } else { None };
 
         let (cos, sin) = if seqlen_offset == 0 {
             if let (Some(mask), Some(thw)) = (image_mask, image_grid_thw) {
-                // Prefill with image: compute 3D M-RoPE position IDs
-                let pos_ids =
-                    self.compute_mrope_position_ids(mask, thw, seq_len, input_ids.device())?;
+                let pos_ids = self.compute_mrope_position_ids(mask, thw, seq_len, input_ids.device())?;
                 self.prefill_seq_len = seq_len;
                 self.rotary_emb.forward_with_position_ids(&pos_ids)?
             } else {
-                // Pure text prefill: all three axes have sequential positions
                 self.next_mrope_pos = seq_len;
                 self.prefill_seq_len = seq_len;
                 self.rotary_emb.forward(seq_len, 0, input_ids.device())?
             }
         } else {
-            // Decode pass: single token, mrope position = next_mrope_pos + decode_step
             let decode_pos = self.next_mrope_pos + (seqlen_offset - self.prefill_seq_len);
             self.rotary_emb.forward(1, decode_pos, input_ids.device())?
         };
 
         let mut hidden_states = inputs_embeds;
-        for layer in self.layers.iter_mut() {
+        
+        // ★ [SSD 오프로딩] 텍스트 레이어 핑퐁 로직: 연산 직전에만 VRAM으로 로드
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            if layer.is_cleared() {
+                if let (Some(f), Some(ct)) = (self.file.as_mut(), self.ct.as_ref()) {
+                    let prefix = format!("blk.{}.", i);
+                    // hidden_states.device()를 통해 CUDA 장치로 가중치 주입
+                    layer.load_weights_inplace(ct, f, &prefix, hidden_states.device(), self.dtype)?;
+                }
+            }
+
             hidden_states = layer.forward(&hidden_states, (&cos, &sin), attention_mask.as_ref())?;
+
+            if self.file.is_some() {
+                layer.clear_weights(); // 연산 종료 즉시 VRAM 해제
+            }
         }
 
         hidden_states = self.norm.forward(&hidden_states)?;
         let last = hidden_states.narrow(1, seq_len - 1, 1)?;
-        let logits = self.lm_head.forward(&last)?;
-
-        Ok(logits)
+        
+        // 🚀 CPU BF16 matmul 에러 방지용 임시 F32 변환
+        let w_lm = self.lm_head.weight().to_dtype(DType::F32)?;
+        let b_lm = match self.lm_head.bias() { Some(b) => Some(b.to_dtype(DType::F32)?), None => None };
+        let lm_f32 = Linear::new(w_lm, b_lm);
+        let logits_cpu = lm_f32.forward(&last.to_dtype(DType::F32)?)?.to_dtype(self.dtype)?;
+        
+        Ok(logits_cpu.to_device(input_ids.device())?) // 최종 결과만 원본 입력 장치(GPU)로 반환
     }
 
     pub fn clear_kv_cache(&mut self) {
-        for layer in self.layers.iter_mut() {
-            layer.clear_kv_cache();
-        }
+        for layer in self.layers.iter_mut() { layer.clear_kv_cache(); }
     }
 }
 
@@ -1274,20 +1089,30 @@ pub struct GlmOcrModel {
 }
 
 impl GlmOcrModel {
-    pub fn new(vb: VarBuilder, config: GlmOcrConfig, eos_ids: Vec<u32>) -> Result<Self> {
-        let vision_encoder =
-            GlmOcrVisionModel::new(vb.pp("model").pp("visual"), &config.vision_config)?;
-        let language_model = GlmOcrTextModel::new(
+    pub fn new_with_file(
+        vb: VarBuilder, 
+        config: GlmOcrConfig, 
+        eos_ids: Vec<u32>,
+        file_text: Option<std::fs::File>,
+        ct_text: Option<std::sync::Arc<candle_core::quantized::gguf_file::Content>>,
+        file_vision: Option<std::fs::File>,
+        ct_vision: Option<std::sync::Arc<candle_core::quantized::gguf_file::Content>>,
+    ) -> Result<Self> {
+        let vision_encoder = GlmOcrVisionModel::new_with_file(
+            vb.pp("model").pp("visual"), 
+            &config.vision_config,
+            file_vision,
+            ct_vision
+        )?;
+        let language_model = GlmOcrTextModel::new_with_file(
             vb.pp("model").pp("language_model"),
             config.text_config,
             config.vision_config.spatial_merge_size,
+            file_text,
+            ct_text
         )?;
 
-        Ok(Self {
-            vision_encoder,
-            language_model,
-            stop_token_ids: eos_ids,
-        })
+        Ok(Self { vision_encoder, language_model, stop_token_ids: eos_ids })
     }
 
     pub fn forward(
@@ -1302,70 +1127,25 @@ impl GlmOcrModel {
             let grid_thw = if let Some(grid) = image_grid_thw {
                 grid.clone()
             } else {
-                Tensor::new(
-                    &[
-                        1u32,
-                        (pixels.dim(0)? / 44) as u32, // Approximate
-                        (pixels.dim(1)? / 44) as u32,
-                    ],
-                    input_ids.device(),
-                )?
+                Tensor::new(&[ 1u32, (pixels.dim(0)? / 44) as u32, (pixels.dim(1)? / 44) as u32 ], input_ids.device())?
             };
+            Some(self.vision_encoder.forward(pixels, &grid_thw)?)
+        } else { None };
 
-            let vision_output = self.vision_encoder.forward(pixels, &grid_thw)?;
-
-            Some(vision_output)
-        } else {
-            None
-        };
-
-        self.language_model.forward(
-            input_ids,
-            image_features.as_ref(),
-            image_mask,
-            image_grid_thw,
-            seqlen_offset,
-        )
+        self.language_model.forward(input_ids, image_features.as_ref(), image_mask, image_grid_thw, seqlen_offset)
     }
 
-    pub fn clear_kv_cache(&mut self) {
-        self.language_model.clear_kv_cache();
-    }
+    pub fn clear_kv_cache(&mut self) { self.language_model.clear_kv_cache(); }
 }
 
 impl InferenceModel for GlmOcrModel {
-    fn forward_initial(
-        &mut self,
-        input_ids: &Tensor,
-        seqlen_offset: usize,
-        data: crate::models::common::MultiModalData,
-    ) -> Result<Tensor> {
-        if data.data_vec.len() != 3 {
-            return Err(anyhow::anyhow!(
-                "GlmOcr process data error, must have pixel_values, image_grid_thw, image_mask"
-            ));
-        }
-        let pixel_values = &data.data_vec[0];
-        let image_grid_thw = &data.data_vec[1];
-        let image_mask = &data.data_vec[2];
-        self.forward(
-            input_ids,
-            Some(pixel_values), // forward_initial에서 이미 &Tensor이므로 Some()으로 감쌈
-            Some(image_grid_thw),
-            Some(image_mask),
-            seqlen_offset,
-        )
+    fn forward_initial(&mut self, input_ids: &Tensor, seqlen_offset: usize, data: crate::models::common::MultiModalData) -> Result<Tensor> {
+        if data.data_vec.len() != 3 { return Err(anyhow::anyhow!("GlmOcr process data error, must have pixel_values, image_grid_thw, image_mask")); }
+        self.forward(input_ids, Some(&data.data_vec[0]), Some(&data.data_vec[1]), Some(&data.data_vec[2]), seqlen_offset)
     }
-
     fn forward_step(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {
         self.forward(input_ids, None, None, None, seqlen_offset)
     }
-
-    fn clear_cache(&mut self) {
-        self.clear_kv_cache();
-    }
-
-    fn stop_token_ids(&self) -> Vec<u32> {
-        self.stop_token_ids.clone()
-    }
+    fn clear_cache(&mut self) { self.clear_kv_cache(); }
+    fn stop_token_ids(&self) -> Vec<u32> { self.stop_token_ids.clone() }
 }

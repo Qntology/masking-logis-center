@@ -13,7 +13,7 @@ lazy_static! {
 }
 
 // Simplified stub for chat completion
-async fn get_chat_completion(_messages: Vec<serde_json::Value>, _api_key: String, _model: String) -> Result<String, String> {
+async fn _get_chat_completion(_messages: Vec<serde_json::Value>, _api_key: String, _model: String) -> Result<String, String> {
     Ok("[System] Gemini 서비스가 비활성화되었습니다.".to_string())
 }
 
@@ -25,7 +25,7 @@ use futures::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
 
-fn mask_pii(text: &str, spans: &[PrivacySpan]) -> String {
+fn _mask_pii(text: &str, spans: &[PrivacySpan]) -> String {
     let mut masked_text = text.to_string();
     let mut sorted_spans = spans.to_vec();
     sorted_spans.sort_by(|a, b| b.start.cmp(&a.start));
@@ -241,39 +241,37 @@ const OVERLAY_SCRIPT: &str = r#"
         pushBtn.disabled = true; // 초기 상태 비활성화
 
         function updatePushBtnState() {
-            const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
+            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
             const checkedCount = checkedBoxes.length;
-            pushBtn.disabled = (checkedCount === 0);
             
-            if (checkedCount > 0) {
-                const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
-                const selectedItems = stagedItems.filter(i => selectedIds.includes(i.id));
-                
-                // 마스킹/벡터화가 완료된(Draft가 끝난) 항목인지 확인 (vector에 0이 아닌 값이 하나라도 있는지로 판별)
-                const isDraftFinished = selectedItems.every(i => i.vector && i.vector.some(v => v !== 0));
-                
-                if (isDraftFinished) {
-                    pushBtn.textContent = `Submit (${checkedCount})`;
-                } else {
-                    pushBtn.textContent = `Push (${checkedCount})`;
-                }
-            } else {
-                pushBtn.textContent = 'Push (0)';
-            }
+            // 상태별 개수 카운트
+            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
+            const draftCount = stagedItems.filter(i => selectedIds.includes(i.id) && i.status !== 'PUSHED').length;
+            
+            pushBtn.disabled = (draftCount === 0);
+            pushBtn.textContent = `Push (${draftCount})`; // 완료되지 않은 DRAFT 항목만 Push 카운트에 반영
             
             // 체크된 항목이 1개 이상일 경우 삭제 버튼을 노출합니다.
             deleteBtn.style.display = (checkedCount > 0) ? 'inline-block' : 'none';
             
             const totalCount = log.querySelectorAll('.item-checkbox').length;
             selectAllCheck.checked = (totalCount > 0 && checkedCount === totalCount);
+
+            // 체크박스 상태가 변경될 때 하단(Footer)의 Drag 버튼 상태도 즉시 갱신합니다.
+            if (typeof updateSubmitToDrag === 'function') {
+                updateSubmitToDrag();
+            }
         }
 
         let spinnerInterval = null;
 
         pushBtn.onclick = async () => {
-            const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
-            const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
-            if (selectedIds.length === 0) return;
+            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
+            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
+            // Push는 아직 처리되지 않은 항목만 추려서 백엔드로 전송
+            const draftIds = stagedItems.filter(i => selectedIds.includes(i.id) && i.status !== 'PUSHED').map(i => i.id);
+            
+            if (draftIds.length === 0) return;
             
             // 전송 중 중복 클릭 방지 및 스피너 시작
             pushBtn.disabled = true;
@@ -282,17 +280,15 @@ const OVERLAY_SCRIPT: &str = r#"
             
             let spinnerIdx = 0;
             const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            const isSubmit = pushBtn.textContent.startsWith('Submit');
             
             spinnerInterval = setInterval(() => {
-                pushBtn.textContent = `${spinnerFrames[spinnerIdx]} ${isSubmit ? 'Submitting...' : 'Pushing...'}`;
+                pushBtn.textContent = `${spinnerFrames[spinnerIdx]} Pushing...`; // 원래대로 복원
                 spinnerIdx = (spinnerIdx + 1) % spinnerFrames.length;
             }, 100);
             
             if (window.rpc) {
-                // 추후 Submit과 Push의 백엔드 로직이 분리된다면 여기서 isSubmit 분기를 태울 수 있습니다.
                 window.rpc("mask_and_push_batch:" + JSON.stringify({ 
-                    ids: selectedIds,
+                    ids: draftIds,
                     host: window.location.host 
                 }));
             }
@@ -398,9 +394,17 @@ const OVERLAY_SCRIPT: &str = r#"
         let processedFileContent = '';
         let fileSpinnerInterval = null;
 
-        // 프롬프트나 파일이 준비되면 Submit을 Drag 버튼으로 전환
+        // 프롬프트, 파일 또는 체크된 항목이 준비되면 Submit을 Drag 버튼으로 전환
         function updateSubmitToDrag() {
-            if (processedFileContent !== '' || textInput.value.trim() !== '') {
+            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
+            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
+            // 완료된(PUSHED) 항목만 Drag 카운트에 반영
+            const pushedCount = stagedItems.filter(i => selectedIds.includes(i.id) && i.status === 'PUSHED').length;
+            
+            if (pushedCount > 0) {
+                submitBtn.textContent = `Drag (${pushedCount})`; // 완료된 카운트 반영
+                submitBtn.draggable = true;
+            } else if (processedFileContent !== '' || textInput.value.trim() !== '') {
                 submitBtn.textContent = 'Drag';
                 submitBtn.draggable = true;
             } else {
@@ -434,15 +438,16 @@ const OVERLAY_SCRIPT: &str = r#"
             reader.readAsDataURL(file);
         };
 
-        // Drag 이벤트 발생 시 텍스트 파일로 바인딩하여 내보내기
+        // Drag 이벤트 발생 시 선택된 항목들과 텍스트를 파일로 바인딩하여 바탕화면으로 내보내기
         submitBtn.ondragstart = (e) => {
-            if (submitBtn.textContent !== 'Drag') {
+            if (!submitBtn.textContent.startsWith('Drag')) {
                 e.preventDefault();
                 return;
             }
-            const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
-            const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
-            const selectedItems = stagedItems.filter(i => selectedIds.includes(i.id));
+            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
+            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
+            // 드래그 시에는 완료된(PUSHED) 항목만 추출
+            const selectedItems = stagedItems.filter(i => selectedIds.includes(i.id) && i.status === 'PUSHED');
 
             let exportContent = `[Prompt]\n${textInput.value || 'N/A'}\n\n`;
             if (processedFileContent) {
@@ -454,7 +459,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 exportContent += `\n--- ID: ${item.id} ---\n[Domain]: ${item.domain}\n[Title]: ${item.title}\n[Content]:\n${item.masking || item.context}\n`;
             });
 
-            // Base64로 인코딩하여 바탕화면으로 떨어질 수 있도록 DownloadURL 포맷 세팅
+            // Base64로 인코딩하여 드래그 앤 드롭으로 바탕화면에 export.txt 파일이 떨어질 수 있도록 세팅
             const utf8Bytes = new TextEncoder().encode(exportContent);
             let binary = '';
             for (let i = 0; i < utf8Bytes.length; i++) {
@@ -747,7 +752,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let _ = page.evaluate(full_script).await;
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
-    let browser_clone = browser.clone();
+    let _browser_clone = browser.clone();
     
     tokio::task::spawn(async move {
         while let Some(event) = bindings.next().await {
@@ -764,8 +769,9 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         let mut model_guard = OCR_MODEL.lock().unwrap();
                                         if model_guard.is_none() {
                                             let model_path = "..\\models\\glm_ocr";
-                                            let device = Device::new_cuda(0).unwrap_or(Device::Cpu); // CUDA 장치 설정으로 변경
-                                            if let Ok(model) = GlmOcrGenerateModel::init(model_path, Some(&device), None) {
+                                            // 🚀 SSD 오프로딩이 적용되었으므로 당당하게 4GB CUDA VRAM을 100% 활용합니다.
+                                            let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu); 
+                                            if let Ok(model) = GlmOcrGenerateModel::init(model_path, Some(&ocr_device), None) {
                                                 *model_guard = Some(model);
                                             }
                                         }
@@ -830,8 +836,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     let mut model_guard = OCR_MODEL.lock().unwrap();
                                     if model_guard.is_none() {
                                         let model_path = "..\\models\\glm_ocr";
-                                        if let Ok(model) = GlmOcrGenerateModel::init(model_path, Some(&device), None) {
-                                            *model_guard = Some(model);
+                                        // 🚀 동일하게 외부에서 선언된 CUDA device를 활용하여 SSD 오프로딩으로 로드합니다.
+                                        match GlmOcrGenerateModel::init(model_path, Some(&device), None) {
+                                            Ok(model) => *model_guard = Some(model),
+                                            Err(e) => {
+                                                let err_msg = format!("OCR Init Error: {:?}", e);
+                                                println!("[Error] {}", err_msg);
+                                                has_error = Some(err_msg);
+                                            }
                                         }
                                     }
                                     for record in &mut target_records {
@@ -849,10 +861,16 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 };
                                                 match model.generate(params) {
                                                     Ok(res) => record.context = res.choices[0].message.content.clone(),
-                                                    Err(e) => has_error = Some(format!("OCR Error: {}", e)),
+                                                    Err(e) => {
+                                                        let err_msg = format!("OCR Error: {}", e);
+                                                        println!("[Error] 일괄 OCR 처리 중 예외 발생: {:?}", e); // 🌟 Rust 로그 추가
+                                                        has_error = Some(err_msg);
+                                                    }
                                                 }
                                             } else {
-                                                has_error = Some("OCR 모델 로드에 실패했습니다.".to_string());
+                                                let err_msg = "OCR 모델 로드에 실패했습니다.".to_string();
+                                                println!("[Error] {}", err_msg); // 🌟 Rust 로그 추가
+                                                has_error = Some(err_msg);
                                             }
                                         }
                                     }
@@ -941,9 +959,15 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         let mut model_guard = OCR_MODEL.lock().unwrap();
                         if model_guard.is_none() {
                             let model_path = "..\\models\\glm_ocr";
-                            let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-                            if let Ok(model) = GlmOcrGenerateModel::init(model_path, Some(&device), None) {
-                                *model_guard = Some(model);
+                            // 🚀 수동 파일 업로드 시에도 CUDA VRAM 기반 SSD 오프로딩을 적극 적용합니다.
+                            let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+                            match GlmOcrGenerateModel::init(model_path, Some(&ocr_device), None) {
+                                Ok(model) => *model_guard = Some(model),
+                                Err(e) => {
+                                    let err_msg = format!("OCR Init Error: {:?}", e);
+                                    println!("[Error] {}", err_msg);
+                                    has_error = Some(err_msg);
+                                }
                             }
                         }
                         if let Some(model) = model_guard.as_mut() {
@@ -959,10 +983,16 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             };
                             match model.generate(params) {
                                 Ok(res) => ocr_result = res.choices[0].message.content.clone(),
-                                Err(e) => has_error = Some(format!("OCR Error: {}", e)),
+                                Err(e) => {
+                                    let err_msg = format!("OCR Error: {}", e);
+                                    println!("[Error] 단일 파일 OCR 처리 중 예외 발생: {:?}", e); // 🌟 Rust 로그 추가
+                                    has_error = Some(err_msg);
+                                }
                             }
                         } else {
-                            has_error = Some("OCR 모델 로드에 실패했습니다.".to_string());
+                            let err_msg = "OCR 모델 로드에 실패했습니다.".to_string();
+                            println!("[Error] {}", err_msg); // 🌟 Rust 로그 추가
+                            has_error = Some(err_msg);
                         }
                         // ★ VRAM 해제
                         *model_guard = None;

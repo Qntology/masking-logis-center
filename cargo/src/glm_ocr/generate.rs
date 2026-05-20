@@ -68,19 +68,25 @@ impl GlmOcrGenerateModel {
 
         let model = if std::path::Path::new(&gguf_model_path).exists() && std::path::Path::new(&gguf_mmproj_path).exists() {
             println!("[GlmOcr] Loading from GGUF...");
-            crate::glm_ocr::gguf_loader::load_glm_ocr_gguf(
+            match crate::glm_ocr::gguf_loader::load_glm_ocr_gguf(
                 &gguf_model_path,
                 &gguf_mmproj_path,
                 &cfg,
                 &device,
-            )?
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    println!("[GlmOcr] GGUF 로드 중 치명적 에러 발생: {:?}", e);
+                    return Err(e);
+                }
+            }
         } else {
             let model_list = find_type_files(path, "safetensors")?;
             let vb = unsafe { VarBuilder::from_mmaped_safetensors(&model_list, dtype, &device)? };
             let generation_config_path = format!("{}/generation_config.json", path);
             let generation_config: crate::glm_ocr::config::GlmOcrGenerationConfig =
                 serde_json::from_slice(&std::fs::read(generation_config_path)?)?;
-            GlmOcrModel::new(vb, cfg.clone(), generation_config.eos_token_id.clone())?
+            GlmOcrModel::new_with_file(vb, cfg.clone(), generation_config.eos_token_id.clone(), None, None, None, None)?
         };
 
         let model_name = std::path::Path::new(path)

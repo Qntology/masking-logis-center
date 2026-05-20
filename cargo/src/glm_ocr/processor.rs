@@ -74,17 +74,21 @@ impl GlmOcrProcessor {
     /// For images: grid_t = 1, so [grid_h * grid_w, 3 * 2 * 14 * 14] = [num_patches, 1176]
     pub fn process_image(&self, image_path: &str) -> Result<ProcessedImage> {
         let img = get_image(image_path)?;
+        let orig_w = img.width();
+        let orig_h = img.height();
         // Use smart_resize to compute target dimensions
         let (target_h, target_w) = video_smart_resize(
             self.temporal_patch_size as u32,
-            img.height(),
-            img.width(),
+            orig_h,
+            orig_w,
             self.temporal_patch_size as u32,
             (self.patch_size * self.merge_size) as u32,
             self.shortest_edge as u32,
             self.longest_edge as u32,
             None,
         )?;
+
+        println!("[System] 이미지 처리: 원본 {}x{} -> 리사이즈 {}x{}", orig_w, orig_h, target_w, target_h);
 
         // Resize image
         let img = img.resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3);
@@ -183,6 +187,8 @@ impl GlmOcrProcessor {
         // Generation prompt: <|assistant|> \n
         input_ids_vec.push(59254); // <|assistant|>
         input_ids_vec.push(10); // newline
+
+        println!("[System] 최종 컨텍스트 사이즈 (총 토큰 수): {}", input_ids_vec.len());
 
         let input_ids = Tensor::from_vec(
             input_ids_vec.clone(),
