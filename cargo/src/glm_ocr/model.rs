@@ -8,10 +8,8 @@ use candle_nn::{
 };
 
 use crate::{
-    models::{
-        common::{InferenceModel, modules::GateUpDownMLP},
-        glm_ocr::config::{GlmOcrConfig, GlmOcrTextConfig, GlmOcrVisionConfig},
-    },
+    models::common::{InferenceModel, modules::GateUpDownMLP},
+    glm_ocr::config::{GlmOcrConfig, GlmOcrTextConfig, GlmOcrVisionConfig},
     position_embed::rope::{apply_rotary_pos_emb_vision, glm_ocr_apply_rotary_pos_emb},
     utils::tensor_utils::{prepare_causal_attention_mask, repeat_kv},
 };

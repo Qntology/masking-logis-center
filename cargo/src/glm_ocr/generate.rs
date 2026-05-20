@@ -9,17 +9,28 @@ use crate::{
 use anyhow::{Result, anyhow};
 use candle_core::{DType, Device};
 use candle_nn::VarBuilder;
-use rocket::futures::Stream;
+use futures::stream::Stream;
+
+pub trait GenerateModel {
+    fn generate(&mut self, mes: ChatCompletionParameters) -> Result<ChatCompletionResponse>;
+    fn generate_stream(
+        &mut self,
+        mes: ChatCompletionParameters,
+    ) -> Result<
+        Box<
+            dyn Stream<Item = Result<ChatCompletionChunkResponse, anyhow::Error>>
+                + Send
+                + Unpin
+                + '_,
+        >,
+    >;
+}
 
 use crate::{
-    // chat_template::ChatTemplate,
-    models::{
-        GenerateModel,
-        glm_ocr::{
-            config::{GlmOcrConfig, GlmOcrGenerationConfig},
-            model::GlmOcrModel,
-            processor::GlmOcrProcessor,
-        },
+    glm_ocr::{
+        config::{GlmOcrConfig, GlmOcrGenerationConfig},
+        model::GlmOcrModel,
+        processor::GlmOcrProcessor,
     },
     tokenizer::TokenizerModel,
     utils::{

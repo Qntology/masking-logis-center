@@ -1,7 +1,16 @@
-use gemini_gui_lib::{db, embedding, privacy_filter, gemini};
+use gemini_gui_lib::{db, embedding, privacy_filter, gemini, glm_ocr, params};
 use privacy_filter::{PrivacyFilterModel, viterbi::PrivacySpan};
 use candle_core::Device;
-// use tauri::command;
+use glm_ocr::generate::GlmOcrGenerateModel;
+use params::chat::{ChatCompletionParameters, Message, Part};
+use std::sync::Mutex;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref OCR_MODEL: Mutex<Option<GlmOcrGenerateModel>> = Mutex::new(None);
+}
+
+// ... rest of imports ...
 
 // #[command]
 async fn get_chat_completion(_messages: Vec<gemini::types::ChatMessage>, _api_key: String, model: String) -> Result<String, String> {
@@ -908,8 +917,67 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                 let response = if payload.starts_with("sync_data:") {
                     let data = &payload["sync_data:".len()..];
                     match serde_json::from_str::<db::CommerceRecord>(data) {
-                        Ok(record) => {
-                            // AI 분류(Categorizer) 및 OCR 로직 폐기, 전달받은 domain을 그대로 신뢰하여 저장
+                        Ok(mut record) => {
+                            // Image OCR Logic Integration
+                            if record.url.starts_with("file://") && record.context.contains("data:image/") {
+                                println!("[Rust] Image detected. Running GLM-OCR...");
+                                
+                                // Extract base64 image data
+                                if let Some(base64_part) = record.context.split("data:").nth(1) {
+                                    let full_data_url = format!("data:{}", base64_part.trim());
+                                    
+                                    let ocr_result = {
+                                        let mut model_guard = OCR_MODEL.lock().unwrap();
+                                        if model_guard.is_none() {
+                                            println!("[Rust] Loading GLM-OCR model...");
+                                            let model_path = "..\\models\\glm_ocr";
+                                            // Using CPU by default for stability
+                                            match GlmOcrGenerateModel::init(model_path, Some(&Device::Cpu), None) {
+                                                Ok(model) => *model_guard = Some(model),
+                                                Err(e) => eprintln!("[Rust] OCR Model Load Error: {}", e),
+                                            }
+                                        }
+                                        
+                                        if let Some(model) = model_guard.as_mut() {
+                                            let params = ChatCompletionParameters {
+                                                messages: vec![Message {
+                                                    role: "user".to_string(),
+                                                    parts: vec![Part {
+                                                        text: "Extract all text from this image.".to_string(),
+                                                        image_url: Some(full_data_url),
+                                                    }],
+                                                }],
+                                                model: "glm-ocr".to_string(),
+                                                max_tokens: Some(1024),
+                                                temperature: Some(0.0),
+                                                top_p: None,
+                                                top_k: None,
+                                                repeat_penalty: None,
+                                                repeat_last_n: None,
+                                                seed: None,
+                                            };
+                                            
+                                            match model.generate(params) {
+                                                Ok(res) => {
+                                                    if let Some(choice) = res.choices.first() {
+                                                        choice.message.content.clone()
+                                                    } else {
+                                                        "OCR: No text found".to_string()
+                                                    }
+                                                },
+                                                Err(e) => format!("OCR Error: {}", e),
+                                            }
+                                        } else {
+                                            "OCR: Model not loaded".to_string()
+                                        }
+                                    };
+                                    
+                                    println!("[Rust] OCR Result: {}", ocr_result);
+                                    // Append OCR result to context or replace it
+                                    record.context = format!("{}\n---\n[OCR_EXTRACTED_TEXT]\n{}", record.context, ocr_result);
+                                }
+                            }
+
                             let updated_record = record.clone();
                             match db::save_records(vec![record], None).await {
                                 Ok(_) => {

@@ -1,7 +1,11 @@
 use candle_nn::Activation;
 use serde::Deserialize;
 
-use crate::models::qwen3vl::config::Size;
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, Default)]
+pub struct Size {
+    pub shortest_edge: usize,
+    pub longest_edge: usize,
+}
 
 /// Vision encoder configuration for GLM-OCR.
 #[derive(Debug, Clone, PartialEq, Deserialize, Default)]
