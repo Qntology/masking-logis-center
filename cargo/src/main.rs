@@ -8,6 +8,8 @@ use lazy_static::lazy_static;
 
 lazy_static! {
     static ref OCR_MODEL: Mutex<Option<GlmOcrGenerateModel>> = Mutex::new(None);
+    static ref PRIVACY_MANAGER: Mutex<Option<gemini_gui_lib::privacy_filter::masking::PrivacyManager>> = Mutex::new(None);
+    static ref EMBEDDING_MODEL: Mutex<Option<gemini_gui_lib::embedding::EmbeddingModel>> = Mutex::new(None);
 }
 
 // Simplified stub for chat completion
@@ -16,7 +18,7 @@ async fn get_chat_completion(_messages: Vec<serde_json::Value>, _api_key: String
 }
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::cdp::browser_protocol::page::EnableParams; // AddScriptToEvaluateOnNewDocumentParams 제거
+use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams};
 use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
 use chromiumoxide::cdp::js_protocol::runtime::{AddBindingParams, EventBindingCalled};
 use futures::StreamExt;
@@ -468,10 +470,43 @@ const OVERLAY_SCRIPT: &str = r#"
                     deleteBtn.disabled = false;
                     draftBtn.disabled = false;
                     
-                    const pushedIds = data.payload || [];
-                    stagedItems = stagedItems.filter(i => !pushedIds.includes(i.id));
+                    const updatedItems = data.payload || [];
+                    const updatedIds = updatedItems.map(i => i.id);
+                    
+                    // 삭제하지 않고 최신(마스킹 및 벡터화 완료) 데이터로 교체하여 목록 유지
+                    stagedItems = stagedItems.filter(i => !updatedIds.includes(i.id));
+                    stagedItems.push(...updatedItems);
+                    
                     updateGnbUI();
                     renderStagedList();
+
+                    // 성공 시스템 로그
+                    const div = document.createElement('div');
+                    div.className = 'system';
+                    div.style.padding = '10px';
+                    div.style.background = '#e6fffa';
+                    div.style.borderRadius = '4px';
+                    div.textContent = `System: Successfully masked, vectorized, and pushed ${updatedItems.length} items.`;
+                    log.appendChild(div);
+                    div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                    return;
+                }
+                // 프로세스 중 에러가 발생한 경우
+                else if (data.type === 'error') {
+                    if (spinnerInterval) clearInterval(spinnerInterval);
+                    deleteBtn.disabled = false;
+                    draftBtn.disabled = false;
+                    updatePushBtnState(); // 버튼 텍스트와 상태를 원래대로 원복
+                    
+                    const div = document.createElement('div');
+                    div.className = 'system';
+                    div.style.padding = '10px';
+                    div.style.background = '#ffe6e6';
+                    div.style.color = '#d8000c';
+                    div.style.borderRadius = '4px';
+                    div.textContent = 'Error: ' + data.message;
+                    log.appendChild(div);
+                    div.scrollIntoView({ behavior: 'smooth', block: 'end' });
                     return;
                 }
             } catch (err) {
@@ -517,6 +552,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
         .replace("window.geminiSidebarLoaded", &format!("window.{}", sidebar_var_name));
 
     let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\n{}", is_authenticated, default_tab, overlay_script_replaced);
+    // 페이지가 새로고침되거나 다른 페이지로 이동하더라도 스크립트가 유지되도록 등록합니다.
+    let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(&full_script)).await;
     let _ = page.evaluate(full_script).await;
     let mut bindings = page.event_listener::<EventBindingCalled>().await?;
     let page_clone = page.clone();
@@ -579,28 +616,78 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     json!({"type":"delete_success"}).to_string()
                 } else if payload.starts_with("mask_and_push_batch:") {
                     let data = &payload["mask_and_push_batch:".len()..];
-                    let mut pushed_ids: Vec<String> = Vec::new();
-                    
-                    if let Ok(req) = serde_json::from_str::<serde_json::Value>(data) {
+                    let response_json = if let Ok(req) = serde_json::from_str::<serde_json::Value>(data) {
                         if let Some(ids) = req.get("ids").and_then(|i| i.as_array()) {
                             let id_strings: Vec<String> = ids.iter().filter_map(|i| i.as_str().map(String::from)).collect();
-                            pushed_ids = id_strings.clone();
                             
-                            // 🚀 마스킹 모델 추론 및 대기열 지연 시뮬레이션 (1.5초 대기)
-                            // 프론트엔드의 스피너가 돌아가는 것을 시각적으로 확인하기 위한 조치입니다.
-                            tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+                            let mut target_records = Vec::new();
+                            if let Ok(drafts) = db::fetch_drafts().await {
+                                target_records = drafts.into_iter().filter(|r| id_strings.contains(&r.id)).collect();
+                            }
                             
                             if let Ok(table) = db::get_or_create_table().await {
-                                for id in id_strings {
-                                    // 실제 큐나 마스킹 파이프라인 연동은 이곳에서 이루어집니다.
-                                    // 현재는 Push 처리된 대상을 임시 목록(DRAFT)에서 지워줍니다.
-                                    let expr = format!("id = '{}'", id);
+                                let mut has_error = None;
+                                for record in &mut target_records {
+                                    // 1. Privacy Filter 마스킹 처리
+                                    let masked_text = {
+                                        let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                        if pm_guard.is_none() {
+                                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new("..\\models\\privacy_filter").ok();
+                                        }
+                                        if let Some(pm) = pm_guard.as_ref() {
+                                            pm.mask_text(&record.context).unwrap_or_else(|e| {
+                                                has_error = Some(format!("Masking failed: {}", e));
+                                                record.context.clone()
+                                            })
+                                        } else {
+                                            has_error = Some("Privacy Filter 모델 로드에 실패했습니다.".to_string());
+                                            record.context.clone()
+                                        }
+                                    };
+                                    record.masking = masked_text;
+
+                                    // 2. Embedding 벡터화 처리
+                                    let vector = {
+                                        let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
+                                        if em_guard.is_none() {
+                                            *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new("..\\models\\embedding").ok();
+                                        }
+                                        if let Some(em) = em_guard.as_ref() {
+                                            em.embed(&record.masking).unwrap_or_else(|e| {
+                                                has_error = Some(format!("Embedding failed: {}", e));
+                                                vec![0.0; 768]
+                                            })
+                                        } else {
+                                            has_error = Some("Embedding 모델 로드에 실패했습니다.".to_string());
+                                            vec![0.0; 768]
+                                        }
+                                    };
+                                    record.vector = vector;
+                                    
+                                    // 업데이트를 위해 기존 레코드 선제 삭제
+                                    let expr = format!("id = '{}'", record.id);
                                     let _ = table.delete(&expr).await;
                                 }
+
+                                if let Some(err_msg) = has_error {
+                                    json!({"type": "error", "message": err_msg}).to_string()
+                                } else {
+                                    // 마스킹과 임베딩 적용된 레코드 LanceDB 저장
+                                    match db::save_records(target_records.clone(), None).await {
+                                        Ok(_) => json!({"type": "push_success", "payload": target_records}).to_string(),
+                                        Err(e) => json!({"type": "error", "message": format!("DB Save Error: {}", e)}).to_string(),
+                                    }
+                                }
+                            } else {
+                                json!({"type": "error", "message": "Failed to access database table."}).to_string()
                             }
+                        } else {
+                            json!({"type": "error", "message": "Invalid ids in request."}).to_string()
                         }
-                    }
-                    json!({"type":"push_success", "payload": pushed_ids}).to_string()
+                    } else {
+                        json!({"type": "error", "message": "Invalid request payload format."}).to_string()
+                    };
+                    response_json
                 } else if payload.starts_with("gemini_chat:") {
                     "[System] Gemini 서비스 비활성화됨".to_string()
                 } else { "Unknown command".to_string() };
