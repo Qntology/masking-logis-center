@@ -161,23 +161,93 @@ const OVERLAY_SCRIPT: &str = r#"
         const agentContainer = document.createElement('div');
         agentContainer.id = 'agent-container';
 
-        // 헤더 구성 (타이틀 + 상태 토글 + 닫기 버튼)
+        // 헤더 구성
         const header = document.createElement('header');
+        header.style.flexWrap = 'wrap';
         
-        const statusSelect = document.createElement('select');
-        statusSelect.id = 'status-select';
-        const tabs = ['DRAFT', 'COMMERCE', 'LOGISTICS', 'TRADE'];
-        const defaultTab = window.default_tab || 'DRAFT';
+        const tabsContainer = document.createElement('div');
+        tabsContainer.className = 'domain-filter';
+        tabsContainer.style.cssText = 'display: flex; gap: 5px; flex: 1; border: none; padding: 0; background: transparent; overflow-x: auto;';
+        
+        // DRAFT -> UPDATE로 명칭 변경 및 CONFIG 탭 추가
+        const tabs = ['UPDATE', 'COMMERCE', 'LOGISTICS', 'TRADE', 'CONFIG'];
+        const defaultTab = (window.default_tab === 'DRAFT' ? 'UPDATE' : window.default_tab) || 'UPDATE';
+        let currentTabFilter = defaultTab;
         
         tabs.forEach(t => {
-            const option = document.createElement('option');
-            option.value = t;
-            option.textContent = t;
-            if (t === defaultTab) option.selected = true;
-            statusSelect.appendChild(option);
+            const btn = document.createElement('button');
+            btn.textContent = t;
+            btn.dataset.tab = t;
+            btn.style.cssText = 'padding: 4px 10px; border-radius: 20px; border: 1px solid #ddd; background: #f9f9f9; font-size: 11px; white-space: nowrap; cursor: pointer;';
+            
+            // Drag and Drop: Drop Zone 이벤트 설정 (CONFIG 제외)
+            if (t !== 'CONFIG') {
+                btn.ondragover = (e) => {
+                    e.preventDefault(); // 드롭 허용
+                    btn.style.transform = 'scale(1.1)';
+                };
+                btn.ondragleave = () => {
+                    btn.style.transform = 'scale(1)';
+                };
+                btn.ondrop = (e) => {
+                    e.preventDefault();
+                    btn.style.transform = 'scale(1)';
+                    const itemId = e.dataTransfer.getData('text/plain');
+                    if (itemId) {
+                        const itemIndex = stagedItems.findIndex(i => i.id === itemId);
+                        if (itemIndex !== -1) {
+                            // 강제 도메인 업데이트 및 상태 갱신
+                            stagedItems[itemIndex].domain = t;
+                            stagedItems[itemIndex].status = (t === 'UPDATE') ? 'UPDATE' : 'MAIN';
+                            if (window.gemini_rpc) window.gemini_rpc("sync_data:" + JSON.stringify(stagedItems[itemIndex]));
+                            renderStagedList();
+                        }
+                    }
+                };
+            }
+
+            btn.onclick = () => {
+                currentTabFilter = t;
+                Array.from(tabsContainer.children).forEach(c => {
+                    c.style.background = '#f9f9f9';
+                    c.style.color = 'black';
+                    c.style.borderColor = '#ddd';
+                });
+                btn.style.background = '#333';
+                btn.style.color = 'white';
+                btn.style.borderColor = '#333';
+                
+                // UPDATE, CONFIG 일 때 채팅 기능 차단
+                if (currentTabFilter === 'UPDATE' || currentTabFilter === 'CONFIG') {
+                    cliInput.value = '';
+                    cliInput.disabled = true;
+                    cliInput.placeholder = currentTabFilter === 'UPDATE' ? 'UPDATE 상태에서는 질의 및 첨부가 불가능합니다.' : '설정 화면입니다.';
+                    sendBtn.disabled = true;
+                    attachBtn.disabled = true; 
+                } else {
+                    cliInput.disabled = false;
+                    cliInput.placeholder = '메시지 입력...';
+                    sendBtn.disabled = false;
+                    attachBtn.disabled = false;
+                }
+                renderStagedList();
+            };
+            tabsContainer.appendChild(btn);
         });
 
-        header.appendChild(statusSelect);
+        header.appendChild(tabsContainer);
+
+        // 보기 화면 UI 설정 (리스트 vs 채팅) 토글 버튼
+        const viewToggleBtn = document.createElement('button');
+        let isChatView = true; // 기본값
+        viewToggleBtn.textContent = '👁️ 리스트 보기';
+        viewToggleBtn.style.cssText = 'margin-left: 10px; padding: 4px 8px; border-radius: 4px; background: #eee; border: 1px solid #ccc; font-size: 11px; cursor: pointer; font-weight: bold;';
+        viewToggleBtn.onclick = () => {
+            isChatView = !isChatView;
+            viewToggleBtn.textContent = isChatView ? '👁️ 리스트 보기' : '💬 채팅 보기';
+            renderStagedList(); // 뷰 전환 적용
+        };
+        header.appendChild(viewToggleBtn);
 
         // 자동 추출 함수
         async function autoExtract() {
@@ -371,28 +441,79 @@ const OVERLAY_SCRIPT: &str = r#"
 
         // UI 리스트를 갱신하는 독립 렌더링 함수
         function renderStagedList() {
-            // 기존 아이템 및 로그인 폼 삭제 (로그 영역은 보존)
-            const items = stagedList.querySelectorAll('.staged-item, .login-container');
+            // 기존 아이템, 환경설정, 메시지 폼 일괄 삭제
+            const items = stagedList.querySelectorAll('.staged-item, .login-container, .config-container, .empty-msg');
             items.forEach(item => item.remove());
 
-            // 필터링 로직 수정: status(DRAFT/MAIN)에 상관없이 현재 선택된 도메인 탭에 해당하면 모두 표시하도록 변경
+            // 1. CONFIG 화면 렌더링 및 조기 종료
+            if (currentTabFilter === 'CONFIG') {
+                log.style.display = 'none'; // 채팅 숨김
+                
+                const configDiv = document.createElement('div');
+                configDiv.className = 'config-container';
+                configDiv.style.cssText = 'padding: 20px; display: flex; flex-direction: column; gap: 15px; text-align: center;';
+                
+                const title = document.createElement('h3');
+                title.textContent = '환경설정';
+                title.style.margin = '0';
+                
+                const clearBtn = document.createElement('button');
+                clearBtn.textContent = '🗑️ 모든 데이터 비우기';
+                clearBtn.style.cssText = 'padding: 10px; background: #dc3545; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; width: 100%;';
+                clearBtn.onclick = () => {
+                    if(confirm('정말 모든 데이터를 비우시겠습니까? 이 작업은 되돌릴 수 없습니다.')) {
+                        stagedItems = [];
+                        log.innerHTML = ''; // 화면 상 로그 초기화
+                        if (window.gemini_rpc) window.gemini_rpc("clear_all_data");
+                        alert('데이터가 초기화되었습니다.');
+                        renderStagedList();
+                    }
+                };
+                
+                configDiv.appendChild(title);
+                configDiv.appendChild(clearBtn);
+                stagedList.appendChild(configDiv);
+                
+                return;
+            }
+
+            // 2. 보기 모드 (리스트 vs 채팅) 토글 처리
+            if (isChatView) {
+                log.style.display = 'flex';
+            } else {
+                log.style.display = 'none'; // 리스트 모드일 경우 채팅 숨김
+            }
+
+            // 3. 필터링 로직 (UPDATE 명칭 일괄 처리)
             const filtered = stagedItems.filter(item => {
-                if (currentTabFilter === 'DRAFT') {
-                    // DRAFT 탭은 명시적으로 status가 DRAFT인 것들만 모아보기
-                    return item.status === 'DRAFT';
+                if (currentTabFilter === 'UPDATE') {
+                    return item.status === 'UPDATE' || item.status === 'DRAFT'; // DRAFT 하위호환
                 } else {
-                    // 도메인 탭(COMMERCE 등)은 해당 도메인으로 분류된 모든 항목(DRAFT 포함)을 표시
                     return item.domain === currentTabFilter;
                 }
             });
 
             filtered.forEach(item => {
                 const itemDiv = document.createElement('div');
-                // 클래스 부여 시 현재 아이템의 도메인을 명시적으로 포함하여 스타일 적용 보장
                 if (item.is_progressing) {
                     itemDiv.className = `staged-item user ${item.domain.toLowerCase()} progressing`;
                 } else {
                     itemDiv.className = `staged-item user ${item.domain.toLowerCase()} ${item.status.toLowerCase()}`;
+                }
+                
+                // 기획 적용: Drag and Drop 속성 활성화
+                itemDiv.draggable = true;
+                itemDiv.ondragstart = (e) => {
+                    e.dataTransfer.setData('text/plain', item.id);
+                    itemDiv.style.opacity = '0.5';
+                };
+                itemDiv.ondragend = () => {
+                    itemDiv.style.opacity = '1';
+                };
+                
+                // 뷰 모드에 따른 리스트 아이템 표시 여부 결정
+                if (isChatView) {
+                    itemDiv.style.display = 'none'; // 채팅 모드에서는 리스트 요소를 그리지 않음
                 }
                 
                 const checkbox = document.createElement('input');
@@ -400,11 +521,9 @@ const OVERLAY_SCRIPT: &str = r#"
                 checkbox.dataset.id = item.id;
                 itemDiv.appendChild(checkbox);
                 
-                // 리스트에서 식별이 쉽도록 도메인 정보를 텍스트에 포함
-                const infoText = ` [${item.domain}] ${item.id.substring(0,8)}... (v${item.version})`;
+                const infoText = ` [${item.domain}] ${item.title.substring(0,20)}... (v${item.version}) ${item.status}`;
                 itemDiv.appendChild(document.createTextNode(infoText));
                 
-                // 삭제 버튼 추가
                 const deleteBtn = document.createElement('button');
                 deleteBtn.textContent = '❌';
                 deleteBtn.style.cssText = 'margin-left: auto; background: transparent; border: none; font-size: 12px; cursor: pointer; padding: 0 5px; color: #999;';
@@ -418,18 +537,13 @@ const OVERLAY_SCRIPT: &str = r#"
                 stagedList.appendChild(itemDiv);
             });
 
-            // 필터가 없을 때 안내 메시지
-            if (filtered.length === 0) {
+            if (filtered.length === 0 && !isChatView) {
                 const empty = document.createElement('div');
-                empty.className = 'staged-item';
+                empty.className = 'empty-msg staged-item';
                 empty.style.color = '#999';
-                empty.textContent = 'No items found.';
+                empty.textContent = '데이터가 없습니다.';
                 stagedList.appendChild(empty);
             }
-
-            // (기존 로그인 폼 생성 로직이 이어서 위치함)
-
-            
         }
 
         // 초기 로드 시 백엔드에 기존 DRAFT 목록 요청
@@ -437,29 +551,10 @@ const OVERLAY_SCRIPT: &str = r#"
 
         
 
-        // 드롭다운 변경 이벤트 연결
-        statusSelect.onchange = () => {
-            currentTabFilter = statusSelect.value;
-            
-            // DRAFT 상태일 때 입력 차단 로직
-            if (currentTabFilter === 'DRAFT') {
-                cliInput.value = '';
-                cliInput.disabled = true;
-                cliInput.placeholder = 'DRAFT 상태에서는 질의 및 첨부가 불가능합니다.';
-                sendBtn.disabled = true;
-                attachBtn.disabled = true; 
-            } else {
-                cliInput.disabled = false;
-                cliInput.placeholder = '메시지 입력...';
-                sendBtn.disabled = false;
-                attachBtn.disabled = false;
-            }
-            
-            renderStagedList();
-        };
-
-        // 초기 상태 로드를 위한 강제 1회 실행
-        statusSelect.onchange();
+        // 초기 탭 활성화를 위한 강제 1회 클릭 호출
+        const initialBtn = Array.from(tabsContainer.children).find(b => b.dataset.tab === currentTabFilter) 
+                        || tabsContainer.children[0];
+        if(initialBtn) initialBtn.click();
 
         // Esc 키 입력 시 사이드바 패널 전체를 열고 닫습니다.
         window.addEventListener('keydown', (e) => {
@@ -813,27 +908,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                 let response = if payload.starts_with("sync_data:") {
                     let data = &payload["sync_data:".len()..];
                     match serde_json::from_str::<db::CommerceRecord>(data) {
-                        Ok(mut record) => {
-                            let categorizer = gemini_gui_lib::categorizer::Categorizer::new(gemini::client::GeminiClient::new("gemini-3.1-flash-lite-preview".to_string()));
-                            
-                            if record.host == "local_file" {
-                                let lines: Vec<&str> = record.context.lines().collect();
-                                let mime_type = lines.iter().find(|l| l.starts_with("type: ")).map(|l| l.replace("type: ", "")).unwrap_or_default();
-                                let base64_data = lines.iter().find(|l| l.starts_with("data: ")).map(|l| l.replace("data: ", "")).unwrap_or_default();
-                                
-                                if !mime_type.is_empty() && !base64_data.is_empty() {
-                                    if let Ok(json_res) = categorizer.preprocess_image(&mime_type, &base64_data).await {
-                                        record.domain = json_res.get("domain").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("DRAFT").to_uppercase();
-                                        let ocr_text = json_res.get("ocr_full_text").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("");
-                                        record.context = format!("File: {}\n\n[OCR Data]\n{}", record.title, ocr_text);
-                                    }
-                                }
-                            } else {
-                                if let Ok(json_res) = categorizer.preprocess_web(&record.context).await {
-                                    record.domain = json_res.get("domain").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("DRAFT").to_uppercase();
-                                }
-                            }
-
+                        Ok(record) => {
+                            // AI 분류(Categorizer) 및 OCR 로직 폐기, 전달받은 domain을 그대로 신뢰하여 저장
                             let updated_record = record.clone();
                             match db::save_records(vec![record], None).await {
                                 Ok(_) => {
@@ -846,6 +922,18 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             }
                         },
                         Err(e) => json!({"type": "error", "message": format!("JSON Error: {}", e)}).to_string(),
+                    }
+                } else if payload == "clear_all_data" {
+                    match db::get_or_create_table().await {
+                        Ok(table) => {
+                            // 테이블 내 모든 데이터 삭제
+                            let _ = table.delete("id IS NOT NULL").await;
+                            json!({
+                                "type": "system_msg",
+                                "message": "All data cleared from LanceDB"
+                            }).to_string()
+                        },
+                        Err(e) => json!({"type": "error", "message": format!("DB Error: {}", e)}).to_string(),
                     }
                 } else if payload.starts_with("delete_data:") {
                     let id_to_delete = &payload["delete_data:".len()..];
@@ -1007,15 +1095,32 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     });
                     "Streaming started".to_string()
                 } else if payload == "login" {
-                    println!("[Rust] Login command received via RPC. Spawning auth process...");
-                    // Windows 환경에서 새 cmd 창을 열어 구글 인증 프로세스를 실행합니다.
-                    // bb.rs의 가이드라인에 따라 npx 대신 로컬에 설치된 gemini CLI를 호출합니다.
-                    match std::process::Command::new("cmd")
-                        .args(&["/C", "start", "cmd", "/K", "echo 구글 로그인을 진행합니다. 브라우저가 열리면 인증을 완료해주세요. && gemini auth"])
-                        .spawn() 
-                    {
-                        Ok(_) => "Authentication terminal opened. Please complete the login in the browser, then restart or refresh.".to_string(),
-                        Err(e) => format!("Failed to open login terminal: {}", e),
+                    println!("[Rust] Login command received via RPC. Spawning auth process in background...");
+                    
+                    // Windows 전용 프로세스 확장 기능을 가져옵니다. (오타 수정됨)
+                    #[cfg(target_os = "windows")]
+                    use std::os::windows::process::CommandExt;
+                    
+                    // 터미널 창 생성 방지 플래그
+                    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+                    let mut command = std::process::Command::new("cmd");
+                    command.args(&["/C", "gemini auth"]);
+                    
+                    // Windows 환경일 때만 창 숨김 플래그를 주입합니다.
+                    #[cfg(target_os = "windows")]
+                    command.creation_flags(CREATE_NO_WINDOW);
+
+                    match command.spawn() {
+                        Ok(_) => {
+                            // 터미널 대신 사용자에게 브라우저를 확인하라는 메시지를 JSON으로 반환
+                            json!({
+                                "type": "sync_success", // 기존 핸들러 활용을 위해 타입 지정
+                                "domain": "SYSTEM",
+                                "payload": "인증 브라우저가 실행되었습니다. 로그인을 완료해주세요."
+                            }).to_string()
+                        },
+                        Err(e) => format!("Failed to run background auth: {}", e),
                     }
                 } else {
                     format!("Unknown RPC command: {}", payload)
@@ -1039,8 +1144,153 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     Ok(())
 }
 
+async fn run_mcp_server() -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    let mut reader = tokio::io::BufReader::new(stdin).lines();
+
+    while let Ok(Some(line)) = reader.next_line().await {
+        if let Ok(req) = serde_json::from_str::<serde_json::Value>(&line) {
+            let method = req["method"].as_str().unwrap_or("");
+            let id = req["id"].clone();
+
+            let response = match method {
+                "initialize" => {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {
+                                "tools": {}
+                            },
+                            "serverInfo": {
+                                "name": "terminal-logis-mcp",
+                                "version": "1.0.0"
+                            }
+                        }
+                    })
+                },
+                "tools/list" => {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "tools": [
+                                {
+                                    "name": "fetch_drafts",
+                                    "description": "로컬 데이터베이스에서 DRAFT 상태의 물류 및 상거래 데이터를 검색합니다.",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "properties": {}
+                                    }
+                                },
+                                {
+                                    "name": "ask_assistant",
+                                    "description": "LanceDB 컨텍스트를 기반으로 사용자 질문에 답변하고 PII를 자동으로 마스킹합니다.",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "query": { "type": "string", "description": "사용자의 질문 내용" }
+                                        },
+                                        "required": ["query"]
+                                    }
+                                }
+                            ]
+                        }
+                    })
+                },
+                "tools/call" => {
+                    let tool_name = req["params"]["name"].as_str().unwrap_or("");
+                    let args = &req["params"]["arguments"];
+
+                    if tool_name == "fetch_drafts" {
+                        match db::fetch_drafts().await {
+                            Ok(drafts) => {
+                                let text = serde_json::to_string_pretty(&drafts).unwrap_or_default();
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "content": [{ "type": "text", "text": text }]
+                                    }
+                                })
+                            },
+                            Err(e) => {
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": { "code": -32603, "message": e.to_string() }
+                                })
+                            }
+                        }
+                    } else if tool_name == "ask_assistant" {
+                        let query = args["query"].as_str().unwrap_or("");
+                        let client = gemini::client::GeminiClient::new("gemini-3.1-flash-lite-preview".to_string());
+                        
+                        match gemini_gui_lib::assistant::Assistant::new(client, "..\\models\\privacy-filter") {
+                            Ok(assistant) => {
+                                match assistant.answer_question(query).await {
+                                    Ok(ans) => {
+                                        json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "result": {
+                                                "content": [{ "type": "text", "text": ans }]
+                                            }
+                                        })
+                                    },
+                                    Err(e) => {
+                                        json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "error": { "code": -32603, "message": e.to_string() }
+                                        })
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": { "code": -32603, "message": e.to_string() }
+                                })
+                            }
+                        }
+                    } else {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32601, "message": "Method not found" }
+                        })
+                    }
+                },
+                _ => {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32601, "message": "Method not found" }
+                    })
+                }
+            };
+
+            let mut res_str = serde_json::to_string(&response).unwrap_or_default();
+            res_str.push('\n');
+            let _ = stdout.write_all(res_str.as_bytes()).await;
+            let _ = stdout.flush().await;
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--mcp") {
+        return run_mcp_server().await;
+    }
+
     // 인증 여부에 따른 초기 URL 설정 (URL을 먼저 계산합니다)
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
     let auth_path = std::path::PathBuf::from(home).join(".gemini/oauth_creds.json");

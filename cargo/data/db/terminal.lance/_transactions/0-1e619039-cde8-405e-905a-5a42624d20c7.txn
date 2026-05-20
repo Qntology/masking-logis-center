@@ -1,0 +1,6 @@
+$1e619039-cde8-405e-905a-5a42624d20c7²‰id ÿÿÿÿÿÿÿÿÿ*string8host ÿÿÿÿÿÿÿÿÿ*string8url ÿÿÿÿÿÿÿÿÿ*string8title ÿÿÿÿÿÿÿÿÿ*string8domain ÿÿÿÿÿÿÿÿÿ*string8 context ÿÿÿÿÿÿÿÿÿ*string8 masking ÿÿÿÿÿÿÿÿÿ*string8status ÿÿÿÿÿÿÿÿÿ*string8track ÿÿÿÿÿÿÿÿÿ*string8version	 ÿÿÿÿÿÿÿÿÿ*int328"
+created_at
+ ÿÿÿÿÿÿÿÿÿ*int648"
+updated_at ÿÿÿÿÿÿÿÿÿ*int6484vector ÿÿÿÿÿÿÿÿÿ*fixed_size_list:float:76808"'
+lance.auto_cleanup.older_than14days"!
+lance.auto_cleanup.interval20

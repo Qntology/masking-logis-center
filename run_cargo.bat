@@ -10,7 +10,7 @@ set "CANDLE_HIP=1"
 set "HIP_PATH=C:\Program Files\AMD\ROCm\7.1"
 set "PATH=%HIP_PATH%\bin;%PATH%"
 
-cd src-tauri
+cd cargo
 
 rem Add DirectStorage DLLs to PATH
 set "PATH=%PATH%;%CD%\microsoft.direct3d.directstorage.1.3.0\native\bin\x64"
