@@ -170,7 +170,7 @@ const OVERLAY_SCRIPT: &str = r#"
         };
 
         const titleSpan = document.createElement('span');
-        titleSpan.textContent = 'Terminal Agent';
+        titleSpan.textContent = 'COMMERCE'; // 초기화 (이후 updateGnbUI에서 갱신됨)
         
         headerLeft.appendChild(selectAllCheck);
         headerLeft.appendChild(titleSpan);
@@ -179,8 +179,14 @@ const OVERLAY_SCRIPT: &str = r#"
         const actionContainer = document.createElement('div');
         actionContainer.className = 'header-actions';
 
+        function getPageMeta() {
+            const ogTitle = document.querySelector('meta[property="og:title"]')?.content || document.title;
+            const ogDesc = document.querySelector('meta[property="og:description"]')?.content || '';
+            return ogDesc ? `${ogTitle}\n${ogDesc}` : ogTitle;
+        }
+
         const draftBtn = document.createElement('button');
-        draftBtn.textContent = 'Draft';
+        draftBtn.textContent = 'Draft (0)';
         draftBtn.onclick = async () => {
             const pageId = await generatePageId(window.location.href);
             const yaml = cleanAndConvertToYaml(document.body);
@@ -188,8 +194,8 @@ const OVERLAY_SCRIPT: &str = r#"
                 id: pageId, 
                 host: window.location.host,
                 url: window.location.href,
-                title: document.title, 
-                domain: currentTabFilter === 'UPDATE' ? 'COMMERCE' : currentTabFilter, 
+                title: getPageMeta(), 
+                domain: currentTabFilter, // 현재 GNB 탭의 도메인으로 매핑
                 context: yaml, 
                 status: 'DRAFT',
                 track: '',
@@ -199,19 +205,20 @@ const OVERLAY_SCRIPT: &str = r#"
             };
             if (window.rpc) {
                 window.rpc("sync_data:" + JSON.stringify(item));
-                alert("Draft saved (HTML to YAML converted)");
+                alert("Draft saved for " + currentTabFilter);
             }
         };
 
         // Push 버튼: Privacy Filter 마스킹 후 저장 로직 실행
         const pushBtn = document.createElement('button');
         pushBtn.className = 'btn-push';
-        pushBtn.textContent = 'Push';
+        pushBtn.textContent = 'Push (0)';
         pushBtn.disabled = true; // 초기 상태 비활성화
 
         function updatePushBtnState() {
             const checkedCount = log.querySelectorAll('.item-checkbox:checked').length;
             pushBtn.disabled = (checkedCount === 0);
+            pushBtn.textContent = `Push (${checkedCount})`; // 선택된 카운트 반영
             
             const totalCount = log.querySelectorAll('.item-checkbox').length;
             selectAllCheck.checked = (totalCount > 0 && checkedCount === totalCount);
@@ -243,16 +250,27 @@ const OVERLAY_SCRIPT: &str = r#"
         const gnbMenu = document.createElement('div');
         gnbMenu.className = 'gnb-menu';
 
-        const tabs = ['UPDATE', 'COMMERCE', 'LOGISTICS', 'TRADE', 'CONFIG'];
-        const defaultTab = (window.default_tab === 'DRAFT' ? 'UPDATE' : window.default_tab) || 'UPDATE';
+        const tabs = ['COMMERCE', 'LOGISTICS', 'TRADE', 'CONFIG'];
+        const defaultTab = (window.default_tab === 'DRAFT' ? 'COMMERCE' : window.default_tab) || 'COMMERCE';
         let currentTabFilter = defaultTab;
+        
+        let stagedItems = []; // GNB 카운트 계산을 위해 상단으로 이동
 
         function updateGnbUI() {
             gnbMenu.replaceChildren();
+            titleSpan.textContent = currentTabFilter; // 헤더 타이틀을 현재 활성화된 메뉴로 변경
+
             tabs.forEach(t => {
+                const domainCount = stagedItems.filter(i => i.domain === t).length;
                 const item = document.createElement('div');
                 item.className = 'gnb-item' + (t === currentTabFilter ? ' active' : '');
-                item.textContent = t;
+                
+                if (t === 'CONFIG') {
+                    item.textContent = t;
+                } else {
+                    item.textContent = `${t} (${domainCount})`;
+                }
+                
                 item.onclick = () => {
                     currentTabFilter = t;
                     updateGnbUI();
@@ -279,10 +297,11 @@ const OVERLAY_SCRIPT: &str = r#"
         shadow.appendChild(style);
         shadow.appendChild(agentContainer);
 
-        let stagedItems = [];
         function renderStagedList() {
             log.replaceChildren(); 
-            const filtered = stagedItems.filter(i => i.domain === currentTabFilter || currentTabFilter === 'UPDATE');
+            // 현재 선택된 도메인에 해당하는 항목만 엄격하게 필터링
+            const filtered = stagedItems.filter(i => i.domain === currentTabFilter);
+            draftBtn.textContent = `Draft (${filtered.length})`; // Draft 전체 카운트 갱신
             
             if (filtered.length === 0) {
                 const empty = document.createElement('div');
@@ -304,12 +323,38 @@ const OVERLAY_SCRIPT: &str = r#"
                     cb.dataset.id = item.id;
                     cb.onclick = () => updatePushBtnState();
 
-                    const text = document.createElement('span');
-                    text.textContent = `[${item.domain}] ${item.title}`;
-                    text.style.fontSize = '13px';
+                    const textContainer = document.createElement('div');
+                    textContainer.style.display = 'flex';
+                    textContainer.style.flexDirection = 'column';
+                    textContainer.style.flex = '1';
+                    textContainer.style.overflow = 'hidden';
+
+                    const parts = item.title.split('\n');
+                    const mainTitle = parts[0] || '';
+                    const descText = parts.slice(1).join('\n') || '';
+
+                    const titleSpan = document.createElement('span');
+                    titleSpan.textContent = `[${item.domain}] ${mainTitle}`;
+                    titleSpan.style.fontSize = '13px';
+                    titleSpan.style.fontWeight = 'bold';
+                    titleSpan.style.whiteSpace = 'nowrap';
+                    titleSpan.style.overflow = 'hidden';
+                    titleSpan.style.textOverflow = 'ellipsis';
+                    textContainer.appendChild(titleSpan);
+
+                    if (descText) {
+                        const descSpan = document.createElement('span');
+                        descSpan.textContent = descText;
+                        descSpan.style.fontSize = '11px';
+                        descSpan.style.color = '#666';
+                        descSpan.style.whiteSpace = 'nowrap';
+                        descSpan.style.overflow = 'hidden';
+                        descSpan.style.textOverflow = 'ellipsis';
+                        textContainer.appendChild(descSpan);
+                    }
 
                     row.appendChild(cb);
-                    row.appendChild(text);
+                    row.appendChild(textContainer);
                     log.appendChild(row);
                 });
                 updatePushBtnState();
@@ -323,7 +368,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 id: pageId, 
                 host: window.location.host,
                 url: window.location.href,
-                title: document.title, 
+                title: getPageMeta(), 
                 domain: 'COMMERCE', 
                 context: yaml, 
                 status: 'DRAFT',
@@ -340,6 +385,31 @@ const OVERLAY_SCRIPT: &str = r#"
         });
 
         window.addEventListener('rpc_response', (e) => {
+            try {
+                // 백엔드에서 넘겨준 문자열 JSON을 파싱
+                const data = typeof e.detail === 'string' ? JSON.parse(e.detail) : e.detail;
+                
+                // 데이터 불러오기 응답인 경우
+                if (data.type === 'drafts_loaded') {
+                    stagedItems = data.payload;
+                    updateGnbUI(); // 데이터가 로드된 후 GNB 메뉴의 카운트 갱신
+                    renderStagedList();
+                    return;
+                } 
+                // Draft 저장(sync) 성공 응답인 경우
+                else if (data.type === 'sync_success') {
+                    // 동일한 ID가 있으면 제거 후 최신 데이터 추가
+                    stagedItems = stagedItems.filter(i => i.id !== data.payload.id);
+                    stagedItems.push(data.payload);
+                    updateGnbUI(); // 데이터 동기화 후 GNB 메뉴의 카운트 갱신
+                    renderStagedList();
+                    return;
+                }
+            } catch (err) {
+                // JSON 파싱 실패시 일반 시스템 로그로 처리
+            }
+            
+            // 기타 오류 및 시스템 메시지 출력용
             const div = document.createElement('div');
             div.className = 'system';
             div.style.padding = '10px';
