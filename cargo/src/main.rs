@@ -241,9 +241,25 @@ const OVERLAY_SCRIPT: &str = r#"
         pushBtn.disabled = true; // 초기 상태 비활성화
 
         function updatePushBtnState() {
-            const checkedCount = log.querySelectorAll('.item-checkbox:checked').length;
+            const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
+            const checkedCount = checkedBoxes.length;
             pushBtn.disabled = (checkedCount === 0);
-            pushBtn.textContent = `Push (${checkedCount})`; // 선택된 카운트 반영
+            
+            if (checkedCount > 0) {
+                const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
+                const selectedItems = stagedItems.filter(i => selectedIds.includes(i.id));
+                
+                // 마스킹/벡터화가 완료된(Draft가 끝난) 항목인지 확인 (vector에 0이 아닌 값이 하나라도 있는지로 판별)
+                const isDraftFinished = selectedItems.every(i => i.vector && i.vector.some(v => v !== 0));
+                
+                if (isDraftFinished) {
+                    pushBtn.textContent = `Submit (${checkedCount})`;
+                } else {
+                    pushBtn.textContent = `Push (${checkedCount})`;
+                }
+            } else {
+                pushBtn.textContent = 'Push (0)';
+            }
             
             // 체크된 항목이 1개 이상일 경우 삭제 버튼을 노출합니다.
             deleteBtn.style.display = (checkedCount > 0) ? 'inline-block' : 'none';
@@ -266,13 +282,15 @@ const OVERLAY_SCRIPT: &str = r#"
             
             let spinnerIdx = 0;
             const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            const isSubmit = pushBtn.textContent.startsWith('Submit');
             
             spinnerInterval = setInterval(() => {
-                pushBtn.textContent = `${spinnerFrames[spinnerIdx]} Pushing...`;
+                pushBtn.textContent = `${spinnerFrames[spinnerIdx]} ${isSubmit ? 'Submitting...' : 'Pushing...'}`;
                 spinnerIdx = (spinnerIdx + 1) % spinnerFrames.length;
             }, 100);
             
             if (window.rpc) {
+                // 추후 Submit과 Push의 백엔드 로직이 분리된다면 여기서 isSubmit 분기를 태울 수 있습니다.
                 window.rpc("mask_and_push_batch:" + JSON.stringify({ 
                     ids: selectedIds,
                     host: window.location.host 
@@ -333,11 +351,41 @@ const OVERLAY_SCRIPT: &str = r#"
         mainLayout.appendChild(aside);
         mainLayout.appendChild(stagedList);
 
-        // Footer UI 생성 (이미지, 텍스트 입력 폼)
+        // Footer UI 생성 (이미지, 텍스트 입력 폼 및 Drag & Drop Export)
         const footer = document.createElement('footer');
+        
+        const fileInputWrapper = document.createElement('div');
+        fileInputWrapper.style.position = 'relative';
+        fileInputWrapper.style.width = '140px';
+        fileInputWrapper.style.height = '30px';
+        fileInputWrapper.style.display = 'none'; // 파일 인풋 숨김 처리
+        fileInputWrapper.style.alignItems = 'center';
+        fileInputWrapper.style.overflow = 'hidden';
+
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
-        fileInput.accept = 'image/*';
+        fileInput.accept = 'image/*, application/pdf';
+        fileInput.style.width = '100%';
+        fileInput.style.fontSize = '12px';
+        fileInput.style.cursor = 'pointer';
+
+        // 파일 처리 중 보여줄 스피너 영역
+        const fileSpinner = document.createElement('div');
+        fileSpinner.style.display = 'none';
+        fileSpinner.style.position = 'absolute';
+        fileSpinner.style.top = '0';
+        fileSpinner.style.left = '0';
+        fileSpinner.style.width = '100%';
+        fileSpinner.style.height = '100%';
+        fileSpinner.style.background = '#f8f9fa';
+        fileSpinner.style.alignItems = 'center';
+        fileSpinner.style.justifyContent = 'center';
+        fileSpinner.style.fontSize = '12px';
+        fileSpinner.style.color = '#333';
+        fileSpinner.style.fontWeight = 'bold';
+
+        fileInputWrapper.appendChild(fileInput);
+        fileInputWrapper.appendChild(fileSpinner);
         
         const textInput = document.createElement('input');
         textInput.type = 'text';
@@ -346,7 +394,79 @@ const OVERLAY_SCRIPT: &str = r#"
         const submitBtn = document.createElement('button');
         submitBtn.textContent = 'Submit';
         
-        footer.appendChild(fileInput);
+        // 상태 저장용 변수들
+        let processedFileContent = '';
+        let fileSpinnerInterval = null;
+
+        // 프롬프트나 파일이 준비되면 Submit을 Drag 버튼으로 전환
+        function updateSubmitToDrag() {
+            if (processedFileContent !== '' || textInput.value.trim() !== '') {
+                submitBtn.textContent = 'Drag';
+                submitBtn.draggable = true;
+            } else {
+                submitBtn.textContent = 'Submit';
+                submitBtn.draggable = false;
+            }
+        }
+
+        textInput.oninput = updateSubmitToDrag;
+
+        // 파일 선택 시 스피너 동작 및 백엔드로 처리 요청 (기존 로직 유지하되 UI 숨김상태)
+        fileInput.onchange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            fileSpinner.style.display = 'flex';
+            fileInput.style.display = 'none';
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let idx = 0;
+            fileSpinnerInterval = setInterval(() => {
+                fileSpinner.textContent = `${frames[idx]} Processing...`;
+                idx = (idx + 1) % frames.length;
+            }, 100);
+
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                if (window.rpc) {
+                    window.rpc("process_file:" + ev.target.result);
+                }
+            };
+            reader.readAsDataURL(file);
+        };
+
+        // Drag 이벤트 발생 시 텍스트 파일로 바인딩하여 내보내기
+        submitBtn.ondragstart = (e) => {
+            if (submitBtn.textContent !== 'Drag') {
+                e.preventDefault();
+                return;
+            }
+            const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
+            const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
+            const selectedItems = stagedItems.filter(i => selectedIds.includes(i.id));
+
+            let exportContent = `[Prompt]\n${textInput.value || 'N/A'}\n\n`;
+            if (processedFileContent) {
+                exportContent += `[File Masked Text]\n${processedFileContent}\n\n`;
+            }
+            exportContent += `[Selected Items (${selectedItems.length})]\n`;
+            
+            selectedItems.forEach(item => {
+                exportContent += `\n--- ID: ${item.id} ---\n[Domain]: ${item.domain}\n[Title]: ${item.title}\n[Content]:\n${item.masking || item.context}\n`;
+            });
+
+            // Base64로 인코딩하여 바탕화면으로 떨어질 수 있도록 DownloadURL 포맷 세팅
+            const utf8Bytes = new TextEncoder().encode(exportContent);
+            let binary = '';
+            for (let i = 0; i < utf8Bytes.length; i++) {
+                binary += String.fromCharCode(utf8Bytes[i]);
+            }
+            const base64Str = btoa(binary);
+
+            e.dataTransfer.setData('DownloadURL', `text/plain:export.txt:data:text/plain;base64,${base64Str}`);
+            e.dataTransfer.setData('text/plain', exportContent);
+        };
+
+        footer.appendChild(fileInputWrapper);
         footer.appendChild(textInput);
         footer.appendChild(submitBtn);
 
@@ -355,6 +475,46 @@ const OVERLAY_SCRIPT: &str = r#"
         agentContainer.appendChild(footer); // 생성한 footer 영역 마운트
         shadow.appendChild(style);
         shadow.appendChild(agentContainer);
+
+        // agentContainer 영역에 Drag & Drop 시 Draft Item 추가 로직
+        agentContainer.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            agentContainer.style.border = '2px dashed #007bff';
+        });
+        agentContainer.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            agentContainer.style.border = 'none';
+        });
+        agentContainer.addEventListener('drop', (e) => {
+            e.preventDefault();
+            agentContainer.style.border = 'none';
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                const file = files[0];
+                const reader = new FileReader();
+                reader.onload = async (ev) => {
+                    const dataUrl = ev.target.result;
+                    const pageId = await generatePageId(dataUrl + Date.now());
+                    const item = { 
+                        id: pageId, 
+                        host: window.location.host,
+                        url: file.name,
+                        title: `[File] ${file.name}`, 
+                        domain: currentTabFilter, // 현재 활성화된 도메인으로 등록
+                        context: dataUrl, 
+                        status: 'DRAFT',
+                        track: '',
+                        version: 1,
+                        created_at: Date.now(),
+                        updated_at: Date.now()
+                    };
+                    if (window.rpc) {
+                        window.rpc("sync_data:" + JSON.stringify(item));
+                    }
+                };
+                reader.readAsDataURL(file);
+            }
+        });
 
         function renderStagedList() {
             log.replaceChildren(); 
@@ -491,9 +651,36 @@ const OVERLAY_SCRIPT: &str = r#"
                     div.scrollIntoView({ behavior: 'smooth', block: 'end' });
                     return;
                 }
+                // 파일 처리 (OCR + Masking) 완료 응답인 경우
+                else if (data.type === 'file_processed') {
+                    if (fileSpinnerInterval) clearInterval(fileSpinnerInterval);
+                    fileSpinner.textContent = 'Done!';
+                    setTimeout(() => {
+                        fileSpinner.style.display = 'none';
+                        fileInput.style.display = 'block';
+                    }, 2000);
+                    
+                    processedFileContent = data.payload.masked;
+                    updateSubmitToDrag();
+                    
+                    const div = document.createElement('div');
+                    div.className = 'system';
+                    div.style.padding = '10px';
+                    div.style.background = '#e6fffa';
+                    div.style.borderRadius = '4px';
+                    div.textContent = `System: File OCR & Masking completed. Ready to export.`;
+                    log.appendChild(div);
+                    div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                    return;
+                }
                 // 프로세스 중 에러가 발생한 경우
                 else if (data.type === 'error') {
                     if (spinnerInterval) clearInterval(spinnerInterval);
+                    if (fileSpinnerInterval) {
+                        clearInterval(fileSpinnerInterval);
+                        fileSpinner.style.display = 'none';
+                        fileInput.style.display = 'block';
+                    }
                     deleteBtn.disabled = false;
                     draftBtn.disabled = false;
                     updatePushBtnState(); // 버튼 텍스트와 상태를 원래대로 원복
@@ -627,30 +814,65 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             
                             if let Ok(table) = db::get_or_create_table().await {
                                 let mut has_error = None;
+                                // 현재 가용한 최적의 장치(CUDA 0번 우선)를 할당합니다.
+                                let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+
                                 for record in &mut target_records {
-                                    // 1. Privacy Filter 마스킹 처리
+                                    // 0. OCR Extract (데이터가 이미지나 pdf 포맷 데이터인 경우)
+                                    let mut text_to_process = record.context.clone();
+                                    if text_to_process.starts_with("data:image/") || text_to_process.starts_with("data:application/pdf") {
+                                        let mut model_guard = OCR_MODEL.lock().unwrap();
+                                        if model_guard.is_none() {
+                                            let model_path = "..\\models\\glm_ocr";
+                                            if let Ok(model) = GlmOcrGenerateModel::init(model_path, Some(&device), None) {
+                                                *model_guard = Some(model);
+                                            }
+                                        }
+                                        if let Some(model) = model_guard.as_mut() {
+                                            let params = ChatCompletionParameters {
+                                                messages: vec![Message {
+                                                    role: "user".to_string(),
+                                                    parts: vec![Part { text: "Extract text".to_string(), image_url: Some(text_to_process.clone()) }],
+                                                }],
+                                                model: "glm-ocr".to_string(),
+                                                max_tokens: Some(1024),
+                                                temperature: Some(0.0),
+                                                top_p: None, top_k: None, repeat_penalty: None, repeat_last_n: None, seed: None,
+                                            };
+                                            match model.generate(params) {
+                                                Ok(res) => text_to_process = res.choices[0].message.content.clone(),
+                                                Err(e) => has_error = Some(format!("OCR Error: {}", e)),
+                                            }
+                                        } else {
+                                            has_error = Some("OCR 모델 로드에 실패했습니다.".to_string());
+                                        }
+                                    }
+
+                                    // 1. Privacy Filter 마스킹 처리 (OCR 추출 결과 또는 원본 텍스트 기준)
                                     let masked_text = {
                                         let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
                                         if pm_guard.is_none() {
-                                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new("..\\models\\privacy_filter").ok();
+                                            // 생성자에 확보한 device를 전달하여 GPU 로드를 유도합니다.
+                                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new("..\\models\\privacy-filter", &device).ok();
                                         }
                                         if let Some(pm) = pm_guard.as_ref() {
-                                            pm.mask_text(&record.context).unwrap_or_else(|e| {
+                                            pm.mask_text(&text_to_process).unwrap_or_else(|e| {
                                                 has_error = Some(format!("Masking failed: {}", e));
-                                                record.context.clone()
+                                                text_to_process.clone()
                                             })
                                         } else {
                                             has_error = Some("Privacy Filter 모델 로드에 실패했습니다.".to_string());
-                                            record.context.clone()
+                                            text_to_process.clone()
                                         }
                                     };
                                     record.masking = masked_text;
 
-                                    // 2. Embedding 벡터화 처리
+                                    // 2. Embedding 벡터화 처리 (마스킹 처리 이후 실행 및 로드됨)
                                     let vector = {
                                         let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
                                         if em_guard.is_none() {
-                                            *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new("..\\models\\embedding").ok();
+                                            // 명시적으로 장치를 지정하여 임베딩 모델을 GPU에 올립니다.
+                                            *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device("..\\models\\embeddings", &device).ok();
                                         }
                                         if let Some(em) = em_guard.as_ref() {
                                             em.embed(&record.masking).unwrap_or_else(|e| {
@@ -688,6 +910,65 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         json!({"type": "error", "message": "Invalid request payload format."}).to_string()
                     };
                     response_json
+                } else if payload.starts_with("process_file:") {
+                    let full_data_url = &payload["process_file:".len()..];
+                    let mut ocr_result = String::new();
+                    let mut masked_result = String::new();
+                    let mut has_error = None;
+
+                    // 1. OCR Extract
+                    {
+                        let mut model_guard = OCR_MODEL.lock().unwrap();
+                        if model_guard.is_none() {
+                            let model_path = "..\\models\\glm_ocr";
+                            let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+                            if let Ok(model) = GlmOcrGenerateModel::init(model_path, Some(&device), None) {
+                                *model_guard = Some(model);
+                            }
+                        }
+                        if let Some(model) = model_guard.as_mut() {
+                            let params = ChatCompletionParameters {
+                                messages: vec![Message {
+                                    role: "user".to_string(),
+                                    parts: vec![Part { text: "Extract text".to_string(), image_url: Some(full_data_url.to_string()) }],
+                                }],
+                                model: "glm-ocr".to_string(),
+                                max_tokens: Some(1024),
+                                temperature: Some(0.0),
+                                top_p: None, top_k: None, repeat_penalty: None, repeat_last_n: None, seed: None,
+                            };
+                            match model.generate(params) {
+                                Ok(res) => ocr_result = res.choices[0].message.content.clone(),
+                                Err(e) => has_error = Some(format!("OCR Error: {}", e)),
+                            }
+                        } else {
+                            has_error = Some("OCR 모델 로드에 실패했습니다.".to_string());
+                        }
+                    }
+
+                    // 2. Privacy Filter
+                    if has_error.is_none() && !ocr_result.is_empty() {
+                        let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                        let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+                        if pm_guard.is_none() {
+                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new("..\\models\\privacy-filter", &device).ok();
+                        }
+                        if let Some(pm) = pm_guard.as_ref() {
+                            masked_result = pm.mask_text(&ocr_result).unwrap_or_else(|e| {
+                                has_error = Some(format!("Masking failed: {}", e));
+                                ocr_result.clone()
+                            });
+                        } else {
+                            has_error = Some("Privacy Filter 모델 로드에 실패했습니다.".to_string());
+                            masked_result = ocr_result.clone();
+                        }
+                    }
+
+                    if let Some(err_msg) = has_error {
+                        json!({"type": "error", "message": err_msg}).to_string()
+                    } else {
+                        json!({"type": "file_processed", "payload": {"ocr": ocr_result, "masked": masked_result}}).to_string()
+                    }
                 } else if payload.starts_with("gemini_chat:") {
                     "[System] Gemini 서비스 비활성화됨".to_string()
                 } else { "Unknown command".to_string() };

@@ -424,8 +424,9 @@ pub struct EmbeddingModel {
 
 impl EmbeddingModel {
     pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self> {
-        // Default to CPU for safety on 4GB cards
-        Self::new_with_device(model_path, &Device::Cpu)
+        // CUDA 장치 생성을 시도하고 실패 시 CPU를 사용합니다.
+        let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+        Self::new_with_device(model_path, &device)
     }
 
     pub fn new_with_device<P: AsRef<Path>>(model_path: P, device: &Device) -> Result<Self> {

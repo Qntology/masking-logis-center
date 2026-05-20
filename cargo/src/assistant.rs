@@ -1,6 +1,7 @@
 use crate::db::{search_context};
 use crate::privacy_filter::masking::{PrivacyManager, PrivacySession};
 use anyhow::Result;
+use candle_core::Device;
 
 pub struct Assistant {
     privacy_manager: PrivacyManager,
@@ -8,7 +9,8 @@ pub struct Assistant {
 
 impl Assistant {
     pub fn new(_client: (), privacy_model_dir: &str) -> Result<Self> {
-        let privacy_manager = PrivacyManager::new(privacy_model_dir)?;
+        let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+        let privacy_manager = PrivacyManager::new(privacy_model_dir, &device)?;
         Ok(Self {
             privacy_manager,
         })

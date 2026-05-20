@@ -56,9 +56,8 @@ impl PrivacySession {
 }
 
 impl PrivacyManager {
-    pub fn new(model_dir: &str) -> Result<Self> {
-        let device = candle_core::Device::Cpu;
-        let model = PrivacyFilterModel::load(Path::new(model_dir), &device)?;
+    pub fn new(model_dir: &str, device: &candle_core::Device) -> Result<Self> {
+        let model = PrivacyFilterModel::load(Path::new(model_dir), device)?;
         Ok(Self { model })
     }
 
