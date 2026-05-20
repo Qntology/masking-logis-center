@@ -926,19 +926,31 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 if let Some(base64_part) = record.context.split("data:").nth(1) {
                                     let full_data_url = format!("data:{}", base64_part.trim());
                                     
-                                    let ocr_result = {
-                                        let mut model_guard = OCR_MODEL.lock().unwrap();
-                                        if model_guard.is_none() {
-                                            println!("[Rust] Loading GLM-OCR model...");
-                                            let model_path = "..\\models\\glm_ocr";
-                                            // Using CPU by default for stability
-                                            match GlmOcrGenerateModel::init(model_path, Some(&Device::Cpu), None) {
-                                                Ok(model) => *model_guard = Some(model),
-                                                Err(e) => eprintln!("[Rust] OCR Model Load Error: {}", e),
+                                        let ocr_result = {
+                                            let mut model_guard = OCR_MODEL.lock().unwrap();
+                                            if model_guard.is_none() {
+                                                println!("[Rust] Loading GLM-OCR model...");
+                                                let model_path = "..\\models\\glm_ocr";
+                                                
+                                                // 0. Device selection logic
+                                                #[cfg(any(feature = "cuda", feature = "metal"))]
+                                                let device = if cfg!(feature = "cuda") {
+                                                    Device::new_cuda(0).unwrap_or(Device::Cpu)
+                                                } else if cfg!(feature = "metal") {
+                                                    Device::new_metal(0).unwrap_or(Device::Cpu)
+                                                } else {
+                                                    Device::Cpu
+                                                };
+                                                #[cfg(not(any(feature = "cuda", feature = "metal")))]
+                                                let device = Device::Cpu;
+
+                                                match GlmOcrGenerateModel::init(model_path, Some(&device), None) {
+                                                    Ok(model) => *model_guard = Some(model),
+                                                    Err(e) => eprintln!("[Rust] OCR Model Load Error: {}", e),
+                                                }
                                             }
-                                        }
-                                        
-                                        if let Some(model) = model_guard.as_mut() {
+                                            
+                                            if let Some(model) = model_guard.as_mut() {
                                             let params = ChatCompletionParameters {
                                                 messages: vec![Message {
                                                     role: "user".to_string(),
