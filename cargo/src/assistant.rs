@@ -1,19 +1,16 @@
 use crate::db::{search_context};
 use crate::privacy_filter::masking::{PrivacyManager, PrivacySession};
-use crate::gemini::client::GeminiClient;
 use anyhow::Result;
 
 pub struct Assistant {
     privacy_manager: PrivacyManager,
-    gemini_client: GeminiClient,
 }
 
 impl Assistant {
-    pub fn new(gemini_client: GeminiClient, privacy_model_dir: &str) -> Result<Self> {
+    pub fn new(_client: (), privacy_model_dir: &str) -> Result<Self> {
         let privacy_manager = PrivacyManager::new(privacy_model_dir)?;
         Ok(Self {
             privacy_manager,
-            gemini_client,
         })
     }
 
@@ -60,19 +57,14 @@ impl Assistant {
             masked_records.push(masked_text);
         }
 
-        // 4. LLM 컨텍스트 구성 및 질의 (Context Engineering 적용)
-        let context_str = masked_records.join("\n---\n");
-        let system_instruction = format!(
+        // 4. LLM 컨텍스트 구성 및 질의 (Gemini 제거로 인한 스텁 답변)
+        let _context_str = masked_records.join("\n---\n");
+        let _system_instruction = format!(
             "너는 데이터베이스 전문가 에이전트야. 다음 제공된 [{}] 도메인 데이터를 절대적인 사실로 삼아 사용자의 질문에 답변해.\n\n[도메인 데이터 시작]\n{}\n[도메인 데이터 끝]\n\n답변 시 마스킹된 ID(예: [RECORD_0][NAME_1])를 원본 그대로 사용해.",
-            domain_str, context_str
+            domain_str, _context_str
         );
 
-        // System 프롬프트(지식)와 User 쿼리(명령)를 명확하게 분리하여 전달
-        let masked_answer = self.gemini_client.generate_content(query, Some(&system_instruction)).await?;
-
-        // 5. 마스킹 복구 (Unmasking)
-        let final_answer = privacy_session.unmask_text(&masked_answer);
-
-        Ok(final_answer)
+        // Gemini 모듈 삭제로 인한 임시 반환
+        Ok("[System] Gemini 서비스가 비활성화되었습니다. 로컬 모델로의 전환이 필요합니다.".to_string())
     }
 }

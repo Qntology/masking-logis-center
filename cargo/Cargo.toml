@@ -8,7 +8,6 @@ name = "gemini_gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-# chromiumoxide = { version = "0.8.0", features = ["tokio-runtime"] }
 chromiumoxide = { version = "0.8.0", features = ["default"] }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -17,26 +16,14 @@ serde_json = "1"
 serde_yaml = "0.9"
 lancedb = "0.29.0"
 scraper = "0.20.0"
-json-patch = "3.0.1"
-similar = "3.1.0"
-uuid = { version = "1.23.1", features = ["v4"] }
 sha2 = "0.11.0"
-async-trait = "0.1"
-include_dir = "0.7"
-tantivy = "0.22"
 arrow = "58.3.0"
-arrow-array = "58.3.0"
 lance-tokenizer = "6.0.0"
-chrono = "0.4.44"
 candle-core = "0.9.2"
 candle-nn = "0.9.2"
 candle-transformers = "0.9.2"
 tokenizers = "0.21.0"
-safetensors = "0.7"
-half = { version = "2", features = ["bytemuck"] }
 anyhow = "1.0.95"
-rayon = "1.10.0"
-regex = "1"
 reqwest = { version = "0.13.3", features = ["json", "stream"] }
 bytes = "1.11.1"
 base64 = "0.22.1"
@@ -48,4 +35,3 @@ default = ["cpu"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 cpu = []
-
