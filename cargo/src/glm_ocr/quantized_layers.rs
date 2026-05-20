@@ -2,7 +2,6 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_core::quantized::{gguf_file, QMatMul};
 use candle_nn::{Embedding, Module};
-use std::sync::Arc;
 
 pub struct QLinear {
     inner: QMatMul,
@@ -77,7 +76,7 @@ impl QEmbedding {
         device: &Device,
     ) -> Result<Self> {
         let tensor = ct.tensor(reader, name, device)?.dequantize(device)?;
-        let vocab_size = tensor.dim(0)?;
+        let _vocab_size = tensor.dim(0)?;
         let hidden_size = tensor.dim(1)?;
         Ok(Self {
             inner: Embedding::new(tensor, hidden_size),

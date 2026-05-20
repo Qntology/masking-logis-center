@@ -2,7 +2,8 @@ use anyhow::Result;
 use candle_core::{Device, Tensor};
 use crate::models::common::{InferenceModel, MultiModalData};
 use crate::tokenizer::TokenizerModel;
-use crate::params::chat::{ChatCompletionResponse, ChatCompletionChunkResponse, Choice, Message, ChatMessage};
+use crate::params::chat::{ChatCompletionResponse, ChatCompletionChunkResponse, Choice, ChatMessage}; // Message 제거
+use candle_core::IndexOp; // IndexOp 추가
 use futures::stream::Stream;
 use std::pin::Pin;
 

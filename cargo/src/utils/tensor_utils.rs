@@ -1,4 +1,4 @@
-use candle_core::{Device, Result, Tensor, DType};
+use candle_core::{Device, Result, Tensor}; // DType 제거
 
 pub fn repeat_kv(x: Tensor, num_repeats: usize) -> Result<Tensor> {
     if num_repeats == 1 {

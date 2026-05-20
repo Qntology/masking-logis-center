@@ -1,7 +1,7 @@
-use gemini_gui_lib::{db, embedding, privacy_filter, glm_ocr, params};
-use privacy_filter::{PrivacyFilterModel, viterbi::PrivacySpan};
+use gemini_gui_lib::{db, privacy_filter, glm_ocr, params}; // embedding 제거
+use privacy_filter::viterbi::PrivacySpan; // PrivacyFilterModel 제거
 use candle_core::Device;
-use glm_ocr::generate::GlmOcrGenerateModel;
+use glm_ocr::generate::{GlmOcrGenerateModel, GenerateModel};
 use params::chat::{ChatCompletionParameters, Message, Part};
 use std::sync::Mutex;
 use lazy_static::lazy_static;
@@ -16,8 +16,8 @@ async fn get_chat_completion(_messages: Vec<serde_json::Value>, _api_key: String
 }
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams};
-use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, SetDiscoverTargetsParams};
+use chromiumoxide::cdp::browser_protocol::page::EnableParams; // AddScriptToEvaluateOnNewDocumentParams 제거
+use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
 use chromiumoxide::cdp::js_protocol::runtime::{AddBindingParams, EventBindingCalled};
 use futures::StreamExt;
 use serde_json::json;
@@ -113,52 +113,156 @@ const OVERLAY_SCRIPT: &str = r#"
             :host { all: initial; }
             * { box-sizing: border-box !important; }
             #agent-container { 
-                position: fixed; top: 50px; left: 50px; right: 50px; bottom: 50px; 
-                margin: auto; border-radius: 10px; overflow: hidden;
-                min-width: 300px; max-width: 760px; width:100%; z-index: 2147483648;
-                background: white !important; border-left: 1px solid #ccc;
+                position: fixed; top: 0; left: 0; bottom: 0; 
+                margin: auto; overflow: hidden;
+                min-width: 360px; max-width: 560px; width:100%; z-index: 2147483648;
+                background: white !important;
                 display: flex !important; flex-direction: column;
-                transition: opacity 0.3s ease-in-out; 
-                box-shadow: -5px 0 15px rgba(0,0,0,0.2);
+                transition: opacity 0.2s ease-in-out; 
+                box-shadow: 0 10px 25px rgba(0,0,0,0.2);
                 pointer-events: none;
-                opacity:0;
+                opacity: 0;
             }
-            #agent-container.open { opacity: 1; pointer-events: auto; }
-            header { padding: 12px; background: #f0f0f0 !important; font-weight: bold !important; color: #000 !important; display: flex !important; justify-content: space-between; align-items: center; flex-shrink: 0; gap: 10px; }
-            .domain-filter { display: flex; gap: 5px; padding: 10px 15px; background: #fff; border-bottom: 1px solid #eee; flex-shrink: 0; overflow-x: auto; }
-            .domain-filter button { padding: 4px 10px; border-radius: 20px; border: 1px solid #ddd; background: #f9f9f9; font-size: 11px; white-space: nowrap; }
-            .domain-filter button.active { background: #333; color: white; border-color: #333; }
+            #agent-container.open {
+                opacity: 1 !important;
+                pointer-events: auto !important;
+            }
+            header { padding: 15px; background: #f8f9fa !important; font-weight: bold !important; color: #000 !important; border-bottom: 1px solid #eee; flex-shrink: 0; display: flex !important; justify-content: space-between; align-items: center; }
+            .header-left { display: flex; align-items: center; gap: 10px; }
+            .header-actions { display: flex; gap: 8px; }
+            .header-actions button { padding: 6px 12px; border-radius: 4px; border: 1px solid #ddd; background: #fff; cursor: pointer; font-size: 12px; font-weight: normal; transition: all 0.2s; }
+            .header-actions button:hover { background: #f0f0f0; border-color: #ccc; }
+            .header-actions button:disabled { background: #e9ecef !important; color: #6c757d !important; border-color: #dee2e6 !important; cursor: not-allowed; opacity: 0.6; }
+            .btn-push { background: #007bff !important; color: white !important; border-color: #0069d9 !important; }
+            .btn-push:not(:disabled):hover { background: #0069d9 !important; }
+            .item-row { display: flex; align-items: center; gap: 10px; padding: 8px; border-bottom: 1px solid #f0f0f0; }
+            .item-row input[type="checkbox"] { cursor: pointer; }
+            #main-layout { display: flex !important; flex: 1; overflow: hidden; }
+            aside { width: 180px; background: #f0f0f0; border-right: 1px solid #ddd; display: flex; flex-direction: column; padding: 10px 0; flex-shrink: 0; }
+            .gnb-menu { display: flex; flex-direction: column; gap: 2px; }
+            .gnb-item { padding: 10px 20px; cursor: pointer; font-size: 13px; color: #333; transition: background 0.2s; }
+            .gnb-item:hover { background: #e0e0e0; }
+            .gnb-item.active { background: #333; color: #fff; font-weight: bold; }
+            .content { flex: 1; padding: 15px; overflow-y: auto; background: #fff; }
             .content { flex: 1; padding: 15px; overflow: hidden; overflow-y: scroll; background: #ffffff !important; color: #000000 !important; min-height: 0 !important; }
             #log { display: flex !important; flex-direction: column !important; gap: 10px; width: 100%; }
             #log .system { align-self: flex-start !important; text-align: left !important; color: blue !important; max-width: 85%; white-space: pre-wrap; }
             #log .user { align-self: flex-end !important; text-align: right !important; color: green !important; max-width: 85%; white-space: pre-wrap; }
-            .footer { padding: 15px; flex-shrink: 0; }
-            input { width: 100%; padding: 10px; border: 1px solid #ddd !important; border-radius: 4px; background: white !important; color: black !important; }
+            /* footer 및 input 스타일 제거 */
             button { cursor: pointer; padding: 5px 10px; border:0; }
         `;
 
         const agentContainer = document.createElement('div');
         agentContainer.id = 'agent-container';
+        
         const header = document.createElement('header');
-        header.style.flexWrap = 'wrap';
-        const tabsContainer = document.createElement('div');
-        tabsContainer.className = 'domain-filter';
+        const headerLeft = document.createElement('div');
+        headerLeft.className = 'header-left';
+
+        // 전체 선택 체크박스
+        const selectAllCheck = document.createElement('input');
+        selectAllCheck.type = 'checkbox';
+        selectAllCheck.title = 'Select All';
+        selectAllCheck.onclick = (e) => {
+            const checkboxes = log.querySelectorAll('.item-checkbox');
+            checkboxes.forEach(cb => cb.checked = e.target.checked);
+            updatePushBtnState();
+        };
+
+        const titleSpan = document.createElement('span');
+        titleSpan.textContent = 'Terminal Agent';
+        
+        headerLeft.appendChild(selectAllCheck);
+        headerLeft.appendChild(titleSpan);
+        header.appendChild(headerLeft);
+
+        const actionContainer = document.createElement('div');
+        actionContainer.className = 'header-actions';
+
+        const draftBtn = document.createElement('button');
+        draftBtn.textContent = 'Draft';
+        draftBtn.onclick = async () => {
+            const pageId = await generatePageId(window.location.href);
+            const yaml = cleanAndConvertToYaml(document.body);
+            const item = { 
+                id: pageId, 
+                host: window.location.host,
+                url: window.location.href,
+                title: document.title, 
+                domain: currentTabFilter === 'UPDATE' ? 'COMMERCE' : currentTabFilter, 
+                context: yaml, 
+                status: 'DRAFT',
+                track: '',
+                version: 1,
+                created_at: Date.now(),
+                updated_at: Date.now()
+            };
+            if (window.rpc) {
+                window.rpc("sync_data:" + JSON.stringify(item));
+                alert("Draft saved (HTML to YAML converted)");
+            }
+        };
+
+        // Push 버튼: Privacy Filter 마스킹 후 저장 로직 실행
+        const pushBtn = document.createElement('button');
+        pushBtn.className = 'btn-push';
+        pushBtn.textContent = 'Push';
+        pushBtn.disabled = true; // 초기 상태 비활성화
+
+        function updatePushBtnState() {
+            const checkedCount = log.querySelectorAll('.item-checkbox:checked').length;
+            pushBtn.disabled = (checkedCount === 0);
+            
+            const totalCount = log.querySelectorAll('.item-checkbox').length;
+            selectAllCheck.checked = (totalCount > 0 && checkedCount === totalCount);
+        }
+
+        pushBtn.onclick = async () => {
+            const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
+            // 만약 개별 아이템의 전체 데이터를 다시 보내야 하는 구조라면 아래와 같이 구성합니다.
+            const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
+            
+            if (window.rpc) {
+                // 배치 처리 시에도 host 정보가 필요한 경우를 대비해 전송 객체 구조를 확인하십시오.
+                window.rpc("mask_and_push_batch:" + JSON.stringify({ 
+                    ids: selectedIds,
+                    host: window.location.host // 필요한 경우 추가
+                }));
+                alert(`${selectedIds.length} items Pushed with masking`);
+            }
+        };
+
+        actionContainer.appendChild(draftBtn);
+        actionContainer.appendChild(pushBtn);
+        header.appendChild(actionContainer);
+
+        const mainLayout = document.createElement('div');
+        mainLayout.id = 'main-layout';
+
+        const aside = document.createElement('aside');
+        const gnbMenu = document.createElement('div');
+        gnbMenu.className = 'gnb-menu';
+
         const tabs = ['UPDATE', 'COMMERCE', 'LOGISTICS', 'TRADE', 'CONFIG'];
         const defaultTab = (window.default_tab === 'DRAFT' ? 'UPDATE' : window.default_tab) || 'UPDATE';
         let currentTabFilter = defaultTab;
 
-        tabs.forEach(t => {
-            const btn = document.createElement('button');
-            btn.textContent = t;
-            btn.onclick = () => {
-                currentTabFilter = t;
-                Array.from(tabsContainer.children).forEach(c => { c.style.background = '#f9f9f9'; c.style.color = 'black'; });
-                btn.style.background = '#333'; btn.style.color = 'white';
-                renderStagedList();
-            };
-            tabsContainer.appendChild(btn);
-        });
-        header.appendChild(tabsContainer);
+        function updateGnbUI() {
+            gnbMenu.replaceChildren();
+            tabs.forEach(t => {
+                const item = document.createElement('div');
+                item.className = 'gnb-item' + (t === currentTabFilter ? ' active' : '');
+                item.textContent = t;
+                item.onclick = () => {
+                    currentTabFilter = t;
+                    updateGnbUI();
+                    renderStagedList();
+                };
+                gnbMenu.appendChild(item);
+            });
+        }
+        updateGnbUI();
+        aside.appendChild(gnbMenu);
 
         const stagedList = document.createElement('div');
         stagedList.className = 'content';
@@ -166,44 +270,84 @@ const OVERLAY_SCRIPT: &str = r#"
         log.id = 'log';
         stagedList.appendChild(log);
 
-        const footer = document.createElement('div');
-        footer.className = 'footer';
-        const cliInput = document.createElement('input');
-        cliInput.placeholder = '메시지 입력...';
-        footer.appendChild(cliInput);
+        mainLayout.appendChild(aside);
+        mainLayout.appendChild(stagedList);
 
         agentContainer.appendChild(header);
-        agentContainer.appendChild(stagedList);
-        agentContainer.appendChild(footer);
+        agentContainer.appendChild(mainLayout);
+        // agentContainer.appendChild(footer); // footer 추가 코드 제거
         shadow.appendChild(style);
         shadow.appendChild(agentContainer);
 
         let stagedItems = [];
         function renderStagedList() {
-            log.innerHTML = '';
-            stagedItems.filter(i => i.domain === currentTabFilter || currentTabFilter === 'UPDATE').forEach(item => {
-                const div = document.createElement('div');
-                div.textContent = `[${item.domain}] ${item.title}`;
-                log.appendChild(div);
-            });
+            log.replaceChildren(); 
+            const filtered = stagedItems.filter(i => i.domain === currentTabFilter || currentTabFilter === 'UPDATE');
+            
+            if (filtered.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.color = '#999';
+                empty.style.fontSize = '12px';
+                empty.style.padding = '20px';
+                empty.textContent = 'No records found for ' + currentTabFilter;
+                log.appendChild(empty);
+                selectAllCheck.checked = false;
+                updatePushBtnState();
+            } else {
+                filtered.forEach(item => {
+                    const row = document.createElement('div');
+                    row.className = 'item-row';
+
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.className = 'item-checkbox';
+                    cb.dataset.id = item.id;
+                    cb.onclick = () => updatePushBtnState();
+
+                    const text = document.createElement('span');
+                    text.textContent = `[${item.domain}] ${item.title}`;
+                    text.style.fontSize = '13px';
+
+                    row.appendChild(cb);
+                    row.appendChild(text);
+                    log.appendChild(row);
+                });
+                updatePushBtnState();
+            }
         }
 
         async function autoExtract() {
             const pageId = await generatePageId(window.location.href);
             const yaml = cleanAndConvertToYaml(document.body);
-            const item = { id: pageId, title: document.title, domain: 'COMMERCE', context: yaml, status: 'DRAFT' };
-            if (window.gemini_rpc) window.gemini_rpc("sync_data:" + JSON.stringify(item));
+            const item = { 
+                id: pageId, 
+                host: window.location.host,
+                url: window.location.href,
+                title: document.title, 
+                domain: 'COMMERCE', 
+                context: yaml, 
+                status: 'DRAFT',
+                track: '',
+                version: 1,
+                created_at: Date.now(),
+                updated_at: Date.now()
+            };
+            if (window.rpc) window.rpc("sync_data:" + JSON.stringify(item));
         }
 
         window.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') agentContainer.classList.toggle('open');
         });
 
-        window.addEventListener('gemini_rpc_response', (e) => {
+        window.addEventListener('rpc_response', (e) => {
             const div = document.createElement('div');
             div.className = 'system';
-            div.textContent = 'System: ' + JSON.stringify(e.detail);
+            div.style.padding = '10px';
+            div.style.background = '#f0f4ff';
+            div.style.borderRadius = '4px';
+            div.textContent = 'System: ' + (typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail));
             log.appendChild(div);
+            div.scrollIntoView({ behavior: 'smooth', block: 'end' });
         });
 
         autoExtract();
@@ -213,7 +357,7 @@ const OVERLAY_SCRIPT: &str = r#"
 "#;
 
 async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authenticated: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = page.execute(AddBindingParams::new("gemini_rpc")).await;
+    let _ = page.execute(AddBindingParams::new("rpc")).await; // 바인딩명 변경
     let default_tab = load_default_tab();
     let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\n{}", is_authenticated, default_tab, OVERLAY_SCRIPT);
     let _ = page.evaluate(full_script).await;
@@ -223,7 +367,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     
     tokio::task::spawn(async move {
         while let Some(event) = bindings.next().await {
-            if event.name == "gemini_rpc" {
+            if event.name == "rpc" { // 이벤트 수신명 변경
                 let payload = event.payload.trim_matches('"').to_string();
                 let response = if payload.starts_with("sync_data:") {
                     let data = &payload["sync_data:".len()..];
@@ -236,7 +380,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         let mut model_guard = OCR_MODEL.lock().unwrap();
                                         if model_guard.is_none() {
                                             let model_path = "..\\models\\glm_ocr";
-                                            let device = Device::Cpu;
+                                            let device = Device::new_cuda(0).unwrap_or(Device::Cpu); // CUDA 장치 설정으로 변경
                                             if let Ok(model) = GlmOcrGenerateModel::init(model_path, Some(&device), None) {
                                                 *model_guard = Some(model);
                                             }
@@ -269,7 +413,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     "[System] Gemini 서비스 비활성화됨".to_string()
                 } else { "Unknown command".to_string() };
 
-                let script = format!("window.dispatchEvent(new CustomEvent('gemini_rpc_response', {{ detail: {} }}));", json!(response));
+                let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(response));
                 let _ = page_clone.evaluate(script).await;
             }
         }
@@ -298,11 +442,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--mcp") { return run_mcp_server().await; }
 
-    let is_authenticated = true;
+    let _is_authenticated = true; // 언더바 추가하여 미사용 경고 해결
     let start_url = "about:blank";
-    let browser_args = vec!["--window-size=640,480", "--force-dark-mode", start_url];
 
-    let config = BrowserConfig::builder().with_head().no_sandbox().args(browser_args).build().map_err(|e| e.to_string())?;
+    let browser_args = vec![
+        "--window-size=640,480", // 창 크기 강제 지정
+        "--window-position=0,0",
+        "--start-maximized", 
+        "--no-first-run",
+        "--disable-notifications",
+        "--disable-extensions",
+        "--disable-popup-blocking",
+        "--disable-blink-features=AutomationControlled",
+        "--password-store=basic",
+        "--no-default-browser-check",
+        "--force-dark-mode",
+        "--enable-features=WebUIDarkMode",
+        "--remote-allow-origins=*",
+        "--disable-dev-shm-usage",
+        start_url, // 브라우저 실행 인자에 URL을 직접 포함하여 단 1개의 정상 탭만 생성되도록 유도
+    ];
+
+    let config = BrowserConfig::builder().with_head().no_sandbox().viewport(None).args(browser_args).build().map_err(|e| e.to_string())?;
     let (browser, mut handler) = Browser::launch(config).await?;
     let browser = Arc::new(browser);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
@@ -319,7 +480,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let tid = event.target_info.target_id.clone();
                 let b_inner = b_target.clone();
                 tokio::task::spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     if let Ok(page) = b_inner.get_page(tid).await {
                         let _ = page.execute(EnableParams::default()).await;
                         let _ = setup_page(b_inner.clone(), page, true).await;

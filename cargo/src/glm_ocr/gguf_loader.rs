@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result; // 미사용 anyhow 제거
 use candle_core::{DType, Device, Tensor};
 use candle_core::quantized::gguf_file;
 use std::path::Path;
@@ -22,18 +22,18 @@ pub fn load_glm_ocr_gguf<P: AsRef<Path>>(
     let mut tensors = std::collections::HashMap::new();
 
     // 1. Extract and map Vision Tensors
-    for name in vision_content.tensor_names() {
-        let t = vision_content.tensor(&mut vision_file, &name, device)?.dequantize(device)?;
-        let mapped_name = map_vision_name(&name);
+    for name in vision_content.tensor_infos.keys() {
+        let t = vision_content.tensor(&mut vision_file, name, device)?.dequantize(device)?;
+        let mapped_name = map_vision_name(name);
         tensors.insert(mapped_name, t);
     }
 
     // 2. Extract and map Text Tensors
     // Collect all text tensors first to handle combined layers
     let mut raw_text_tensors = std::collections::HashMap::new();
-    for name in text_content.tensor_names() {
-        let t = text_content.tensor(&mut text_file, &name, device)?.dequantize(device)?;
-        raw_text_tensors.insert(name, t);
+    for name in text_content.tensor_infos.keys() {
+        let t = text_content.tensor(&mut text_file, name, device)?.dequantize(device)?;
+        raw_text_tensors.insert(name.to_string(), t); // to_string()으로 String 키 생성
     }
 
     // Map and combine text tensors

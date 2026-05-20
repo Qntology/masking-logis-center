@@ -28,7 +28,7 @@ pub trait GenerateModel {
 
 use crate::{
     glm_ocr::{
-        config::{GlmOcrConfig, GlmOcrGenerationConfig},
+        config::GlmOcrConfig, // GlmOcrGenerationConfig 제거
         model::GlmOcrModel,
         processor::GlmOcrProcessor,
     },

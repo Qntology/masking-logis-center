@@ -1350,9 +1350,9 @@ impl InferenceModel for GlmOcrModel {
         let image_mask = &data.data_vec[2];
         self.forward(
             input_ids,
-            pixel_values.as_ref(),
-            image_grid_thw.as_ref(),
-            image_mask.as_ref(),
+            Some(pixel_values), // forward_initial에서 이미 &Tensor이므로 Some()으로 감쌈
+            Some(image_grid_thw),
+            Some(image_mask),
             seqlen_offset,
         )
     }

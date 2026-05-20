@@ -31,7 +31,8 @@ image = "0.25.5"
 lazy_static = "1.5.0"
 
 [features]
-default = ["cpu"]
+default = ["cuda"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 cpu = []
+flash-attn = []
