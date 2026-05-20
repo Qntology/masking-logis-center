@@ -111,7 +111,7 @@ impl RotaryEmbedding {
         let r1 = (x1.broadcast_mul(&cos)? + x0.broadcast_mul(&sin)?)?;
 
         let interleaved = Tensor::cat(&[r0.unsqueeze(candle_core::D::Minus1)?, r1.unsqueeze(candle_core::D::Minus1)?], candle_core::D::Minus1)?;
-        interleaved.reshape((b, h, s, d))
+        interleaved.contiguous()?.reshape((b, h, s, d))
     }
 }
 
@@ -129,7 +129,7 @@ struct SparseMoE {
 
 impl SparseMoE {
     fn new(cfg: &ModelConfig, vb: VarBuilder) -> Result<Self> {
-        let router_weight = vb.get((cfg.num_local_experts, cfg.hidden_size), "router.weight")?.transpose(0, 1)?;
+        let router_weight = vb.get((cfg.num_local_experts, cfg.hidden_size), "router.weight")?.transpose(0, 1)?.contiguous()?;
         let router_bias = vb.get(cfg.num_local_experts, "router.bias")?;
         let gate_up_proj = vb.get((cfg.num_local_experts, cfg.hidden_size, 2 * cfg.intermediate_size), "experts.gate_up_proj")?;
         let gate_up_proj_bias = vb.get((cfg.num_local_experts, 2 * cfg.intermediate_size), "experts.gate_up_proj_bias")?;
@@ -146,7 +146,7 @@ impl SparseMoE {
 
     fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         let (b, s, h) = x.dims3()?;
-        let x_flat = x.reshape((b * s, h))?;
+        let x_flat = x.contiguous()?.reshape((b * s, h))?;
         let router_logits = (x_flat.matmul(&self.router_weight)?.broadcast_add(&self.router_bias))?;
         
         let top_k = router_logits.topk(self.num_experts_per_tok)?;
@@ -171,18 +171,18 @@ impl SparseMoE {
             let expert_input = x_flat.index_select(&token_indices, 0)?;
             let expert_weights = weights_flat.index_select(&pos_indices_tensor, 0)?.to_dtype(x.dtype())?.unsqueeze(1)?;
 
-            let gu_w = self.gate_up_proj.get(eidx)?;
+            let gu_w = self.gate_up_proj.get(eidx)?.contiguous()?;
             let gu_b = self.gate_up_proj_bias.get(eidx)?;
-            let gate_up = (expert_input.matmul(&gu_w)?.broadcast_add(&gu_b))?;
+            let gate_up = (expert_input.contiguous()?.matmul(&gu_w)?.broadcast_add(&gu_b))?;
             
             let gate = gate_up.narrow(candle_core::D::Minus1, 0, self.intermediate_size)?.minimum(LIMIT as f64)?;
             let up = gate_up.narrow(candle_core::D::Minus1, self.intermediate_size, self.intermediate_size)?.clamp(-(LIMIT as f64), LIMIT as f64)?;
             let glu = (gate.clone() * candle_nn::ops::sigmoid(&(gate * ALPHA as f64)?)?)?;
             let expert_out_mid = (up.affine(1.0, 1.0)?.mul(&glu))?;
             
-            let dp_w = self.down_proj.get(eidx)?;
+            let dp_w = self.down_proj.get(eidx)?.contiguous()?;
             let dp_b = self.down_proj_bias.get(eidx)?;
-            let expert_output = (expert_out_mid.matmul(&dp_w)?.broadcast_add(&dp_b))?;
+            let expert_output = (expert_out_mid.contiguous()?.matmul(&dp_w)?.broadcast_add(&dp_b))?;
 
             let weighted_output = expert_output.broadcast_mul(&expert_weights)?;
             final_out = final_out.index_add(&token_indices, &weighted_output, 0)?;
@@ -243,7 +243,7 @@ impl TransformerLayer {
         let k = if n_rep > 1 { repeat_kv(&k, n_rep)? } else { k };
         let v = if n_rep > 1 { repeat_kv(&v, n_rep)? } else { v };
 
-        let attn_weights = (q.matmul(&k.transpose(2, 3)?)?.broadcast_add(mask))?;
+        let attn_weights = (q.contiguous()?.matmul(&k.transpose(2, 3)?.contiguous()?)?.broadcast_add(mask))?;
         let sinks = self.sinks.reshape((1, self.num_heads, 1, 1))?.expand((b, self.num_heads, s, 1))?;
         let combined = Tensor::cat(&[attn_weights, sinks], 3)?;
         
@@ -253,7 +253,7 @@ impl TransformerLayer {
         let probs = candle_nn::ops::softmax(&combined, 3)?;
         let scores = probs.narrow(3, 0, s)?.contiguous()?;
         
-        let attn_out = scores.matmul(&v.contiguous()?)?.transpose(1, 2)?.reshape((b, s, ()))?;
+        let attn_out = scores.matmul(&v.contiguous()?)?.transpose(1, 2)?.contiguous()?.reshape((b, s, ()))?;
         let x_attn = (x + self.o_proj.forward(&attn_out)?)?;
         let x_norm = self.post_attention_layernorm.forward(&x_attn)?;
         x_attn + self.moe.forward(&x_norm)?
@@ -305,7 +305,7 @@ impl PrivacyFilterModel {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_dir.join("model.safetensors")], dtype, device)? };
         let layers = (0..config.num_hidden_layers).map(|i| TransformerLayer::new(&config, vb.pp(format!("model.layers.{}", i)))).collect::<Result<Vec<_>>>()?;
         let norm = RmsNorm::new(config.hidden_size, config.rms_norm_eps, vb.pp("model.norm"))?;
-        let score_weight = vb.get((config.num_labels(), config.hidden_size), "score.weight")?.transpose(0, 1)?;
+        let score_weight = vb.get((config.num_labels(), config.hidden_size), "score.weight")?.transpose(0, 1)?.contiguous()?;
         let score_bias = vb.get(config.num_labels(), "score.bias")?;
         let viterbi_config = ViterbiConfig::from_file(&model_dir.join("viterbi_calibration.json"), "default").unwrap_or_default();
 
@@ -313,24 +313,53 @@ impl PrivacyFilterModel {
     }
 
     pub fn forward(&self, input_ids: &[u32]) -> candle_core::Result<Tensor> {
+        println!("[PrivacyFilterModel] forward 시작 - 토큰 개수: {}", input_ids.len());
+        
         // Look up on CPU, then move to device
         let mut x = self.embed_tokens.forward(&Tensor::new(input_ids, &Device::Cpu)?)?.to_device(&self.device)?.unsqueeze(0)?;
+        println!("[PrivacyFilterModel] 임베딩 통과 (Shape: {:?})", x.shape());
         
         let rope = RotaryEmbedding::new_yarn(&self.config.rope_parameters, self.config.head_dim, input_ids.len(), self.dtype, &self.device).map_err(candle_core::Error::msg)?;
         let mask = create_sliding_window_mask(input_ids.len(), self.config.sliding_window, &self.device)?.to_dtype(self.dtype)?;
+        println!("[PrivacyFilterModel] RoPE 및 Attention Mask 생성 완료");
 
-        for layer in &self.layers {
-            x = layer.forward(&x, &rope, &mask)?;
+        for (i, layer) in self.layers.iter().enumerate() {
+            x = match layer.forward(&x, &rope, &mask) {
+                Ok(out) => {
+                    println!("[PrivacyFilterModel] Layer {} forward 완료", i);
+                    out
+                },
+                Err(e) => {
+                    println!("[PrivacyFilterModel] Layer {} 에서 연산 실패: {:?}", i, e);
+                    return Err(e);
+                }
+            };
         }
 
+        println!("[PrivacyFilterModel] 모든 Transformer Layer 통과, Norm 적용 진입");
         let x = self.norm.forward(&x)?;
-        x.matmul(&self.score_weight.unsqueeze(0)?)?.broadcast_add(&self.score_bias.unsqueeze(0)?.unsqueeze(0)?)
+        
+        println!("[PrivacyFilterModel] 최종 Score 행렬 Matmul 연산 진입 (이곳에서 죽는다면 score_weight 연속성 문제)");
+        let out = x.contiguous()?.matmul(&self.score_weight.unsqueeze(0)?.contiguous()?)?.broadcast_add(&self.score_bias.unsqueeze(0)?.unsqueeze(0)?);
+        
+        println!("[PrivacyFilterModel] forward 무사히 종료");
+        out
     }
 
     pub fn predict(&self, text: &str) -> Result<Vec<PrivacySpan>> {
+        if text.trim().is_empty() {
+            return Ok(vec![]);
+        }
+
         let tokens = self.tokenizer.encode(text, false).map_err(anyhow::Error::msg)?;
         let input_ids = tokens.get_ids();
         let s = input_ids.len();
+        
+        // 토크나이저 인코딩 후에도 토큰이 0개라면 CUDA 에러 방지를 위해 빈 배열을 반환합니다.
+        if s == 0 {
+            return Ok(vec![]);
+        }
+
         let logits = self.forward(input_ids).map_err(anyhow::Error::msg)?;
         let logits_data = logits.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>().map_err(anyhow::Error::msg)?;
         

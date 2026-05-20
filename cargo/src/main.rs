@@ -520,7 +520,8 @@ const OVERLAY_SCRIPT: &str = r#"
             log.replaceChildren(); 
             // 현재 선택된 도메인에 해당하는 항목만 엄격하게 필터링
             const filtered = stagedItems.filter(i => i.domain === currentTabFilter);
-            draftBtn.textContent = `Draft (${filtered.length})`; // Draft 전체 카운트 갱신
+            const draftOnlyCount = filtered.filter(i => i.status !== 'PUSHED').length;
+            draftBtn.textContent = `Draft (${draftOnlyCount})`; // 순수 Draft 카운트만 갱신
             
             if (filtered.length === 0) {
                 const empty = document.createElement('div');
@@ -553,9 +554,11 @@ const OVERLAY_SCRIPT: &str = r#"
                     const descText = parts.slice(1).join('\n') || '';
 
                     const titleSpan = document.createElement('span');
-                    titleSpan.textContent = `[${item.domain}] ${mainTitle}`;
+                    const statusBadge = item.status === 'PUSHED' ? '✅ [PUSHED] ' : '';
+                    titleSpan.textContent = `${statusBadge}[${item.domain}] ${mainTitle}`;
                     titleSpan.style.fontSize = '13px';
                     titleSpan.style.fontWeight = 'bold';
+                    titleSpan.style.color = item.status === 'PUSHED' ? '#28a745' : '#000';
                     titleSpan.style.whiteSpace = 'nowrap';
                     titleSpan.style.overflow = 'hidden';
                     titleSpan.style.textOverflow = 'ellipsis';
@@ -766,7 +769,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 *model_guard = Some(model);
                                             }
                                         }
-                                        if let Some(model) = model_guard.as_mut() {
+                                        let res = if let Some(model) = model_guard.as_mut() {
                                             let params = ChatCompletionParameters {
                                                 messages: vec![Message {
                                                     role: "user".to_string(),
@@ -778,7 +781,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 top_p: None, top_k: None, repeat_penalty: None, repeat_last_n: None, seed: None,
                                             };
                                             model.generate(params).map(|res| res.choices[0].message.content.clone()).unwrap_or_default()
-                                        } else { "OCR Model Load Error".to_string() }
+                                        } else { "OCR Model Load Error".to_string() };
+                                        
+                                        // ★ VRAM 해제: 다음 작업을 위해 OCR 모델 메모리를 즉시 반환합니다.
+                                        *model_guard = None;
+                                        res
                                     };
                                     record.context = format!("{}\n---\n[OCR]\n{}", record.context, ocr_result);
                                 }
@@ -817,83 +824,96 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 // 현재 가용한 최적의 장치(CUDA 0번 우선)를 할당합니다.
                                 let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
 
-                                for record in &mut target_records {
-                                    // 0. OCR Extract (데이터가 이미지나 pdf 포맷 데이터인 경우)
-                                    let mut text_to_process = record.context.clone();
-                                    if text_to_process.starts_with("data:image/") || text_to_process.starts_with("data:application/pdf") {
-                                        let mut model_guard = OCR_MODEL.lock().unwrap();
-                                        if model_guard.is_none() {
-                                            let model_path = "..\\models\\glm_ocr";
-                                            if let Ok(model) = GlmOcrGenerateModel::init(model_path, Some(&device), None) {
-                                                *model_guard = Some(model);
-                                            }
-                                        }
-                                        if let Some(model) = model_guard.as_mut() {
-                                            let params = ChatCompletionParameters {
-                                                messages: vec![Message {
-                                                    role: "user".to_string(),
-                                                    parts: vec![Part { text: "Extract text".to_string(), image_url: Some(text_to_process.clone()) }],
-                                                }],
-                                                model: "glm-ocr".to_string(),
-                                                max_tokens: Some(1024),
-                                                temperature: Some(0.0),
-                                                top_p: None, top_k: None, repeat_penalty: None, repeat_last_n: None, seed: None,
-                                            };
-                                            match model.generate(params) {
-                                                Ok(res) => text_to_process = res.choices[0].message.content.clone(),
-                                                Err(e) => has_error = Some(format!("OCR Error: {}", e)),
-                                            }
-                                        } else {
-                                            has_error = Some("OCR 모델 로드에 실패했습니다.".to_string());
+                                // ★ Phase 0: OCR 일괄 처리 및 VRAM 해제
+                                let needs_ocr = target_records.iter().any(|r| r.context.starts_with("data:image/") || r.context.starts_with("data:application/pdf"));
+                                if needs_ocr {
+                                    let mut model_guard = OCR_MODEL.lock().unwrap();
+                                    if model_guard.is_none() {
+                                        let model_path = "..\\models\\glm_ocr";
+                                        if let Ok(model) = GlmOcrGenerateModel::init(model_path, Some(&device), None) {
+                                            *model_guard = Some(model);
                                         }
                                     }
-
-                                    // 1. Privacy Filter 마스킹 처리 (OCR 추출 결과 또는 원본 텍스트 기준)
-                                    let masked_text = {
-                                        let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                        if pm_guard.is_none() {
-                                            // 생성자에 확보한 device를 전달하여 GPU 로드를 유도합니다.
-                                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new("..\\models\\privacy-filter", &device).ok();
+                                    for record in &mut target_records {
+                                        if record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf") {
+                                            if let Some(model) = model_guard.as_mut() {
+                                                let params = ChatCompletionParameters {
+                                                    messages: vec![Message {
+                                                        role: "user".to_string(),
+                                                        parts: vec![Part { text: "Extract text".to_string(), image_url: Some(record.context.clone()) }],
+                                                    }],
+                                                    model: "glm-ocr".to_string(),
+                                                    max_tokens: Some(1024),
+                                                    temperature: Some(0.0),
+                                                    top_p: None, top_k: None, repeat_penalty: None, repeat_last_n: None, seed: None,
+                                                };
+                                                match model.generate(params) {
+                                                    Ok(res) => record.context = res.choices[0].message.content.clone(),
+                                                    Err(e) => has_error = Some(format!("OCR Error: {}", e)),
+                                                }
+                                            } else {
+                                                has_error = Some("OCR 모델 로드에 실패했습니다.".to_string());
+                                            }
                                         }
-                                        if let Some(pm) = pm_guard.as_ref() {
-                                            pm.mask_text(&text_to_process).unwrap_or_else(|e| {
-                                                has_error = Some(format!("Masking failed: {}", e));
-                                                text_to_process.clone()
-                                            })
-                                        } else {
-                                            has_error = Some("Privacy Filter 모델 로드에 실패했습니다.".to_string());
-                                            text_to_process.clone()
-                                        }
-                                    };
-                                    record.masking = masked_text;
-
-                                    // 2. Embedding 벡터화 처리 (마스킹 처리 이후 실행 및 로드됨)
-                                    let vector = {
-                                        let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
-                                        if em_guard.is_none() {
-                                            // 명시적으로 장치를 지정하여 임베딩 모델을 GPU에 올립니다.
-                                            *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device("..\\models\\embeddings", &device).ok();
-                                        }
-                                        if let Some(em) = em_guard.as_ref() {
-                                            em.embed(&record.masking).unwrap_or_else(|e| {
-                                                has_error = Some(format!("Embedding failed: {}", e));
-                                                vec![0.0; 768]
-                                            })
-                                        } else {
-                                            has_error = Some("Embedding 모델 로드에 실패했습니다.".to_string());
-                                            vec![0.0; 768]
-                                        }
-                                    };
-                                    record.vector = vector;
-                                    
-                                    // 업데이트를 위해 기존 레코드 선제 삭제
-                                    let expr = format!("id = '{}'", record.id);
-                                    let _ = table.delete(&expr).await;
+                                    }
+                                    *model_guard = None; // VRAM 완전 해제
                                 }
 
+                                // ★ Phase 1: Privacy Filter 일괄 마스킹 및 VRAM 해제
+                                if has_error.is_none() {
+                                    println!("\n[System] === Phase 1: Privacy Filter 마스킹 시작 ===");
+                                    let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                    if pm_guard.is_none() {
+                                        println!("[System] PrivacyManager 모델을 GPU 메모리에 로드 중...");
+                                        *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new("..\\models\\privacy-filter", &device).ok();
+                                    }
+                                    for record in &mut target_records {
+                                        if let Some(pm) = pm_guard.as_ref() {
+                                            println!("[System] 마스킹 진행 중 (Record ID: {})", record.id);
+                                            record.masking = pm.mask_text(&record.context).unwrap_or_else(|e| {
+                                                let err_str = format!("Masking failed: {}", e);
+                                                println!("[Error] Rust Backend Error Caught: {}", err_str);
+                                                has_error = Some(err_str);
+                                                record.context.clone()
+                                            });
+                                        } else {
+                                            let err_str = "Privacy Filter 모델 로드에 실패했습니다.".to_string();
+                                            println!("[Error] {}", err_str);
+                                            has_error = Some(err_str);
+                                        }
+                                    }
+                                    *pm_guard = None; // VRAM 완전 해제
+                                    println!("[System] === Phase 1: Privacy Filter 마스킹 종료 (VRAM 해제됨) ===\n");
+                                }
+
+                                // ★ Phase 2: Embedding 일괄 벡터화 및 VRAM 해제
+                                if has_error.is_none() {
+                                    let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
+                                    if em_guard.is_none() {
+                                        *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device("..\\models\\embeddings", &device).ok();
+                                    }
+                                    for record in &mut target_records {
+                                        if let Some(em) = em_guard.as_ref() {
+                                            record.vector = em.embed(&record.masking).unwrap_or_else(|e| {
+                                                has_error = Some(format!("Embedding failed: {}", e));
+                                                vec![0.0; 768]
+                                            });
+                                        } else {
+                                            has_error = Some("Embedding 모델 로드에 실패했습니다.".to_string());
+                                        }
+                                    }
+                                    *em_guard = None; // VRAM 완전 해제
+                                }
+
+                                // DB 갱신 처리
                                 if let Some(err_msg) = has_error {
                                     json!({"type": "error", "message": err_msg}).to_string()
                                 } else {
+                                    for record in &mut target_records {
+                                        record.status = "PUSHED".to_string();
+                                        let expr = format!("id = '{}'", record.id);
+                                        let _ = table.delete(&expr).await;
+                                    }
                                     // 마스킹과 임베딩 적용된 레코드 LanceDB 저장
                                     match db::save_records(target_records.clone(), None).await {
                                         Ok(_) => json!({"type": "push_success", "payload": target_records}).to_string(),
@@ -944,6 +964,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         } else {
                             has_error = Some("OCR 모델 로드에 실패했습니다.".to_string());
                         }
+                        // ★ VRAM 해제
+                        *model_guard = None;
                     }
 
                     // 2. Privacy Filter
@@ -962,6 +984,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             has_error = Some("Privacy Filter 모델 로드에 실패했습니다.".to_string());
                             masked_result = ocr_result.clone();
                         }
+                        // ★ VRAM 해제
+                        *pm_guard = None;
                     }
 
                     if let Some(err_msg) = has_error {

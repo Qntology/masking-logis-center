@@ -66,7 +66,25 @@ impl PrivacyManager {
         let mut results = Vec::new();
 
         for (idx, text) in texts.into_iter().enumerate() {
-            let spans = self.model.predict(&text)?;
+            println!("[PrivacyManager] 텍스트 길이 {} 바이트, predict 호출 진입", text.len());
+            
+            // 텍스트가 비어있을 경우 GPU 연산을 수행하지 않고 원본을 바로 반환하도록 예외 처리합니다.
+            if text.trim().is_empty() {
+                println!("[PrivacyManager] 텍스트가 비어있어 마스킹을 건너뜁니다.");
+                results.push(text);
+                continue;
+            }
+
+            let spans = match self.model.predict(&text) {
+                Ok(s) => {
+                    println!("[PrivacyManager] predict 성공, {} 개의 식별된 Span 찾음", s.len());
+                    s
+                },
+                Err(e) => {
+                    println!("[PrivacyManager] predict 내부 모델 추론 중 에러 발생: {:?}", e);
+                    return Err(e);
+                }
+            };
             let mut masked_text = text.clone();
             
             let mut sorted_spans = spans;

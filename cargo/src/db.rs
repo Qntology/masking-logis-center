@@ -88,11 +88,10 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
         }
     }
     
+    // 상태와 무관하게 동일한 ID가 존재하면 덮어쓰기 위해 선제 삭제합니다.
     for record in &records {
-        if record.status == "DRAFT" {
-            let expr = format!("id = '{}' AND status = 'DRAFT'", record.id);
-            let _ = table.delete(&expr).await;
-        }
+        let expr = format!("id = '{}'", record.id);
+        let _ = table.delete(&expr).await;
     }
 
     if records.is_empty() {
@@ -154,7 +153,8 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
 
 pub async fn fetch_drafts() -> Result<Vec<CommerceRecord>, lancedb::Error> {
     let table = get_or_create_table().await?;
-    let mut stream = table.query().only_if("status = 'DRAFT'").execute().await?;
+    // PUSHED 상태의 아이템도 UI 목록에 유지하기 위해 함께 불러옵니다.
+    let mut stream = table.query().only_if("status IN ('DRAFT', 'PUSHED')").execute().await?;
     let mut results = Vec::new();
 
     while let Some(batch_result) = stream.next().await {
