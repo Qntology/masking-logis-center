@@ -872,6 +872,9 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 println!("[Error] {}", err_msg); // 🌟 Rust 로그 추가
                                                 has_error = Some(err_msg);
                                             }
+                                        } else {
+                                            // 🚀 텍스트 데이터가 GLM OCR을 안전하게 건너뛰었음을 명확히 보여주는 확인용 로그를 추가합니다.
+                                            println!("[System] 텍스트 아이템 감지됨. GLM OCR 처리를 안전하게 건너뜁니다. (Record ID: {})", record.id);
                                         }
                                     }
                                     *model_guard = None; // VRAM 완전 해제

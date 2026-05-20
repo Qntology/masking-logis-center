@@ -73,7 +73,15 @@ impl GlmOcrProcessor {
     /// Output format: [grid_t * grid_h * grid_w, channels * temporal_patch_size * patch_size * patch_size]
     /// For images: grid_t = 1, so [grid_h * grid_w, 3 * 2 * 14 * 14] = [num_patches, 1176]
     pub fn process_image(&self, image_path: &str) -> Result<ProcessedImage> {
-        let img = get_image(image_path)?;
+        let mut img = get_image(image_path)?;
+        
+        // 🚀 가로가 1024를 초과할 경우 가로를 1024로 고정하고, 세로는 원본 비율에 맞춰 자동으로 조정합니다.
+        if img.width() > 1024 {
+            let new_width = 1024;
+            let new_height = (img.height() as f32 * (1024.0 / img.width() as f32)).round() as u32;
+            img = img.resize_exact(new_width, new_height, image::imageops::FilterType::Lanczos3);
+        }
+
         let orig_w = img.width();
         let orig_h = img.height();
         // Use smart_resize to compute target dimensions

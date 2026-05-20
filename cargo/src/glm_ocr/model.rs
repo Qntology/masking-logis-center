@@ -461,12 +461,21 @@ impl GlmOcrTextDecoderLayer {
         self.self_attn.v_proj = load_lin(reader, &format!("{}attn_v", prefix))?;
         self.self_attn.o_proj = load_lin(reader, &format!("{}attn_output", prefix))?;
 
-        let t_gate = ct.tensor(reader, &format!("{}ffn_gate.weight", prefix), device)?;
-        let gate = t_gate.dequantize_f16(device).or_else(|_| t_gate.dequantize(device))?.to_dtype(dtype)?;
-        let t_up = ct.tensor(reader, &format!("{}ffn_up.weight", prefix), device)?;
-        let up = t_up.dequantize_f16(device).or_else(|_| t_up.dequantize(device))?.to_dtype(dtype)?;
+        let gate_name = format!("{}ffn_gate.weight", prefix);
+        let up_name = format!("{}ffn_up.weight", prefix);
         
-        let gate_up = Tensor::cat(&[&gate, &up], 0)?;
+        // 🚀 ffn_gate 텐서가 독립적으로 존재하는지 확인하고, 없다면 ffn_up에 병합되어 있다고 간주합니다.
+        let gate_up = if ct.tensor_infos.contains_key(&gate_name) {
+            let t_gate = ct.tensor(reader, &gate_name, device)?;
+            let gate = t_gate.dequantize_f16(device).or_else(|_| t_gate.dequantize(device))?.to_dtype(dtype)?;
+            let t_up = ct.tensor(reader, &up_name, device)?;
+            let up = t_up.dequantize_f16(device).or_else(|_| t_up.dequantize(device))?.to_dtype(dtype)?;
+            Tensor::cat(&[&gate, &up], 0)?
+        } else {
+            let t_up = ct.tensor(reader, &up_name, device)?;
+            t_up.dequantize_f16(device).or_else(|_| t_up.dequantize(device))?.to_dtype(dtype)?
+        };
+        
         self.mlp.gate_up_proj = Linear::new(gate_up, None);
         self.mlp.down_proj = load_lin(reader, &format!("{}ffn_down", prefix))?;
 
@@ -757,7 +766,7 @@ impl GlmOcrVisionModel {
         
         let mut blocks = Vec::new();
         for i in 0..config.depth {
-            let mut block = if file.is_some() {
+            let block = if file.is_some() {
                 let mut b = GlmOcrVisionBlock::new_skeleton(config, vb.device())?;
                 b.clear_weights();
                 b
@@ -827,9 +836,10 @@ impl GlmOcrVisionModel {
 
             hidden_states = block.forward(&hidden_states, &cu_seqlens, Some(&rotary_pos_emb_gpu), Some(position_embeddings_gpu))?;
 
-            if self.file.is_some() {
-                block.clear_weights(); // 연산 종료 즉시 VRAM 해제
-            }
+            // 🚀 가중치를 VRAM에 계속 유지하기 위해 해제 로직을 비활성화합니다.
+            // if self.file.is_some() {
+            //     block.clear_weights(); // 연산 종료 즉시 VRAM 해제
+            // }
         }
 
         // === RAM 회수 (후처리) ===
@@ -881,7 +891,7 @@ impl GlmOcrTextRotaryEmbedding {
     pub fn forward_with_position_ids(&self, position_ids: &Tensor) -> Result<(Tensor, Tensor)> {
         let (_, bs, _seq_len) = position_ids.dims3()?;
         let inv_freq_len = self.inv_freq.dim(1)?;
-        let inv_freq = self.inv_freq.unsqueeze(0)?.unsqueeze(D::Minus1)?.broadcast_as((3, bs, inv_freq_len, 1))?.to_dtype(DType::F32)?.contiguous()?;
+        let inv_freq = self.inv_freq.to_device(position_ids.device())?.unsqueeze(0)?.unsqueeze(D::Minus1)?.broadcast_as((3, bs, inv_freq_len, 1))?.to_dtype(DType::F32)?.contiguous()?;
         let pos_expanded = position_ids.unsqueeze(D::Minus2)?.to_dtype(DType::F32)?.contiguous()?;
         let freqs = inv_freq.matmul(&pos_expanded)?.transpose(2, 3)?;
         let freqs = self.apply_mrope(&freqs)?; 
@@ -892,7 +902,7 @@ impl GlmOcrTextRotaryEmbedding {
     pub fn forward(&self, seq_len: usize, seqlen_offset: usize, device: &candle_core::Device) -> Result<(Tensor, Tensor)> {
         let positions = Tensor::arange(seqlen_offset as f32, (seqlen_offset + seq_len) as f32, device)?.to_dtype(self.inv_freq.dtype())?;
         let positions_3d = positions.unsqueeze(0)?.unsqueeze(0)?.expand((3, 1, seq_len))?; 
-        let inv_freq = self.inv_freq.unsqueeze(0)?.unsqueeze(D::Minus1)?.broadcast_as((3, 1, self.inv_freq.dim(1)?, 1))?.to_dtype(DType::F32)?.contiguous()?;
+        let inv_freq = self.inv_freq.to_device(device)?.unsqueeze(0)?.unsqueeze(D::Minus1)?.broadcast_as((3, 1, self.inv_freq.dim(1)?, 1))?.to_dtype(DType::F32)?.contiguous()?;
         let positions_expanded = positions_3d.unsqueeze(D::Minus2)?.to_dtype(DType::F32)?.contiguous()?;
         let freqs = inv_freq.matmul(&positions_expanded)?.transpose(2, 3)?;
         let freqs = self.apply_mrope(&freqs)?; 
@@ -1008,7 +1018,10 @@ impl GlmOcrTextModel {
         seqlen_offset: usize,
     ) -> Result<Tensor> {
         let (bs, seq_len) = input_ids.dims2()?;
-        let mut inputs_embeds = self.embed_tokens.forward(input_ids)?;
+        
+        // 🚀 [Fix] 임베딩 텐서는 CPU에 상주하므로 input_ids를 CPU로 내려서 index_select를 수행합니다.
+        let input_ids_cpu = input_ids.to_device(&Device::Cpu)?;
+        let mut inputs_embeds = self.embed_tokens.forward(&input_ids_cpu)?;
 
         if let (Some(img_feats), Some(img_mask)) = (image_features, image_mask) {
             let img_mask_bool = img_mask.squeeze(0)?.to_dtype(DType::U8)?.to_vec1::<u8>()?;
@@ -1028,6 +1041,9 @@ impl GlmOcrTextModel {
             let refs: Vec<&Tensor> = embeds_vec.iter().collect();
             inputs_embeds = Tensor::cat(&refs, 0)?.unsqueeze(0)?;
         }
+
+        // 🚀 [Fix] 이미지 임베딩과 결합이 끝난 뒤, 연산 레이어 통과를 위해 다시 GPU 장치로 올립니다.
+        inputs_embeds = inputs_embeds.to_device(input_ids.device())?;
 
         let attention_mask = if seq_len > 1 { Some(prepare_causal_attention_mask(bs, seq_len, seqlen_offset, input_ids.device())?) } else { None };
 
@@ -1060,10 +1076,14 @@ impl GlmOcrTextModel {
 
             hidden_states = layer.forward(&hidden_states, (&cos, &sin), attention_mask.as_ref())?;
 
-            if self.file.is_some() {
-                layer.clear_weights(); // 연산 종료 즉시 VRAM 해제
-            }
+            // 🚀 가중치를 VRAM에 계속 유지하기 위해 해제 로직을 비활성화합니다.
+            // if self.file.is_some() {
+            //     layer.clear_weights(); // 연산 종료 즉시 VRAM 해제
+            // }
         }
+
+        // 🚀 [Fix] 트랜스포머 레이어 연산이 끝난 후, CPU에 상주하는 전역 Norm 및 lm_head 가중치와 연산하기 위해 텐서를 CPU로 내립니다.
+        hidden_states = hidden_states.to_device(&Device::Cpu)?;
 
         hidden_states = self.norm.forward(&hidden_states)?;
         let last = hidden_states.narrow(1, seq_len - 1, 1)?;
