@@ -7,8 +7,9 @@ use crate::privacy_filter::PrivacyFilterModel;
 
 lazy_static! {
     static ref ADJECTIVES: Vec<String> = {
-        // 🚀 파일이 없으면 서버 실행 시 즉각 에러를 발생시킵니다.
-        let content = fs::read_to_string("adjectives.txt").expect("[에러] adjectives.txt 파일이 실행 경로에 없습니다!");
+        // 🚀 파일이 없더라도 앱이 죽지 않도록 예외 처리 폴백을 추가하고, AppData 경로를 참조합니다.
+        let adj_path = crate::utils::get_app_dir().join("adjectives.txt");
+        let content = fs::read_to_string(&adj_path).unwrap_or_else(|_| "멋진\n빠른\n놀라운\n착한\n아름다운".to_string());
         
         let words: Vec<String> = content.lines()
             .map(|s| s.split_whitespace().last().unwrap_or("").to_string())
@@ -22,8 +23,9 @@ lazy_static! {
     };
     
     static ref NOUNS: Vec<String> = {
-        // 🚀 파일이 없으면 서버 실행 시 즉각 에러를 발생시킵니다.
-        let content = fs::read_to_string("nouns.txt").expect("[에러] nouns.txt 파일이 실행 경로에 없습니다!");
+        // 🚀 파일이 없더라도 앱이 죽지 않도록 예외 처리 폴백을 추가하고, AppData 경로를 참조합니다.
+        let noun_path = crate::utils::get_app_dir().join("nouns.txt");
+        let content = fs::read_to_string(&noun_path).unwrap_or_else(|_| "사과\n자동차\n고양이\n비행기\n우주선".to_string());
         
         let words: Vec<String> = content.lines()
             .map(|s| s.split_whitespace().last().unwrap_or("").to_string())

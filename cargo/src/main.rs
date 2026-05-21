@@ -77,16 +77,16 @@ struct AppConfig {
 }
 
 fn load_app_config() -> AppConfig {
-    let _ = std::fs::create_dir_all("data");
+    let app_dir = gemini_gui_lib::utils::get_app_dir();
     // 사용자가 설정을 저장할 때 사용하는 app_config.json을 우선적으로 읽습니다.
-    let config_path = std::path::PathBuf::from("data/app_config.json");
+    let config_path = app_dir.join("app_config.json");
     if let Ok(content) = std::fs::read_to_string(&config_path) {
         if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
             return config;
         }
     }
     // 하위 호환성을 위해 config.json도 체크합니다.
-    let legacy_path = std::path::PathBuf::from("data/config.json");
+    let legacy_path = app_dir.join("config.json");
     if let Ok(content) = std::fs::read_to_string(&legacy_path) {
         if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
             return config;
@@ -452,7 +452,7 @@ const OVERLAY_SCRIPT: &str = r#"
         asideBottom.style.borderTop = '1px solid #ddd';
 
         let dynamicTabs = window.custom_tabs || ['COMMERCE', 'LOGISTICS', 'TRADE'];
-        const fixedTabs = ['PROMPT', 'CONFIG'];
+        const fixedTabs = ['TRASH', 'PROMPT', 'CONFIG']; // 🚀 휴지통 탭 추가
         const defaultTab = (window.default_tab === 'DRAFT' ? dynamicTabs[0] : window.default_tab) || dynamicTabs[0];
         let currentTabFilter = defaultTab;
         
@@ -474,21 +474,33 @@ const OVERLAY_SCRIPT: &str = r#"
                 confirmBtn.style.width = '100%';
                 confirmBtn.style.borderRadius = '4px';
                 confirmBtn.onclick = () => {
-                    // 🚀 기존 탭 이름이 변경되었을 경우, 메모리와 DB의 도메인(Domain)을 일괄 업데이트합니다.
-                    dynamicTabs.forEach((oldTab, idx) => {
-                        const newTab = tempDynamicTabs[idx] ? tempDynamicTabs[idx].trim().toUpperCase() : '';
-                        if (newTab && newTab !== oldTab) {
+                    // 🚀 1. 삭제된 탭 검사: 원래 있던 탭인데 임시 배열에 없으면 TRASH로 이동
+                    const deletedTabs = dynamicTabs.filter(t => !tempDynamicTabs.some(temp => temp.original === t));
+                    deletedTabs.forEach(delTab => {
+                        stagedItems.forEach(item => {
+                            if (item.domain === delTab) item.domain = 'TRASH';
+                        });
+                        if (window.rpc) window.rpc("rename_domain:" + JSON.stringify({ old: delTab, new: 'TRASH' }));
+                    });
+
+                    // 🚀 2. 이름이 변경된 탭 검사 (TRASH로 보내진 탭 제외)
+                    tempDynamicTabs.forEach(temp => {
+                        const oldTab = temp.original;
+                        const newTab = temp.current ? temp.current.trim().toUpperCase() : '';
+                        if (oldTab && newTab && newTab !== oldTab && !deletedTabs.includes(oldTab)) {
                             stagedItems.forEach(item => {
                                 if (item.domain === oldTab) item.domain = newTab;
                             });
-                            if (window.rpc) {
-                                window.rpc("rename_domain:" + JSON.stringify({ old: oldTab, new: newTab }));
-                            }
+                            if (window.rpc) window.rpc("rename_domain:" + JSON.stringify({ old: oldTab, new: newTab }));
                         }
                     });
 
-                    dynamicTabs = tempDynamicTabs.map(t => t.trim().toUpperCase()).filter(t => t !== '');
-                    if (dynamicTabs.length === 0) dynamicTabs = ['COMMERCE'];
+                    // 최종 메뉴 확정
+                    dynamicTabs = tempDynamicTabs.map(t => t.current.trim().toUpperCase()).filter(t => t !== '');
+                    if (dynamicTabs.length === 0) {
+                        // 🚀 하드코딩된 COMMERCE 대신, 기존 설정의 첫 번째 탭을 살리거나 GENERAL을 기본값으로 사용합니다.
+                        dynamicTabs = window.custom_tabs && window.custom_tabs.length > 0 ? [window.custom_tabs[0]] : ['GENERAL'];
+                    }
                     isEditMode = false;
                     
                     if (!dynamicTabs.includes(currentTabFilter) && !fixedTabs.includes(currentTabFilter)) {
@@ -524,7 +536,8 @@ const OVERLAY_SCRIPT: &str = r#"
                 editBtn.style.borderRadius = '4px';
                 editBtn.onclick = () => {
                     isEditMode = true;
-                    tempDynamicTabs = [...dynamicTabs];
+                    // 🚀 인덱스 꼬임 방지를 위해 원본 이름과 현재 이름을 객체로 묶어 관리합니다.
+                    tempDynamicTabs = dynamicTabs.map(t => ({ original: t, current: t }));
                     updateGnbUI();
                 };
                 asideBottom.appendChild(editBtn);
@@ -534,9 +547,10 @@ const OVERLAY_SCRIPT: &str = r#"
         function updateGnbUI() {
             gnbMenu.replaceChildren();
 
-            const tabsToRender = isEditMode ? tempDynamicTabs : dynamicTabs;
+            const tabsToRender = isEditMode ? tempDynamicTabs : dynamicTabs.map(t => ({ original: t, current: t }));
 
-            tabsToRender.forEach((t, index) => {
+            tabsToRender.forEach((tabObj, index) => {
+                const t = tabObj.current;
                 const domainCount = stagedItems.filter(i => i.domain === t).length;
                 const item = document.createElement('div');
                 item.className = 'gnb-item' + (!isEditMode && t === currentTabFilter ? ' active' : '');
@@ -590,7 +604,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     input.style.fontSize = '12px';
                     input.style.padding = '2px 4px';
                     input.oninput = (e) => {
-                        tempDynamicTabs[index] = e.target.value.toUpperCase();
+                        tempDynamicTabs[index].current = e.target.value.toUpperCase();
                     };
 
                     const delBtn = document.createElement('span');
@@ -661,7 +675,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 addBtn.style.textAlign = 'center';
                 addBtn.style.padding = '10px';
                 addBtn.onclick = () => {
-                    tempDynamicTabs.push('NEW');
+                    tempDynamicTabs.push({ original: null, current: 'NEW' });
                     updateGnbUI();
                 };
                 gnbMenu.appendChild(addBtn);
@@ -674,9 +688,11 @@ const OVERLAY_SCRIPT: &str = r#"
             gnbMenu.appendChild(spacer);
 
             fixedTabs.forEach(t => {
+                // 🚀 TRASH 탭일 경우 아이템 카운트를 함께 표시합니다.
+                const domainCount = t === 'TRASH' ? stagedItems.filter(i => i.domain === t).length : 0;
                 const item = document.createElement('div');
                 item.className = 'gnb-item' + (t === currentTabFilter && !isEditMode ? ' active' : '');
-                item.textContent = t;
+                item.textContent = t === 'TRASH' ? `${t} (${domainCount})` : t;
                 item.onclick = () => {
                     if (isEditMode) return;
                     currentTabFilter = t;
@@ -1450,10 +1466,10 @@ const OVERLAY_SCRIPT: &str = r#"
                     const descText = parts.slice(1).join('\n') || '';
 
                     const titleSpan = document.createElement('span');
-                    const statusBadge = item.status === 'PUSHED' ? '✅ [PUSHED] ' : '';
+                    const statusBadge = item.status === 'PUSHED' ? '✅ [완료됨] ' : '';
                     
                     // 🚀 처리 중인 아이템일 경우 제목 앞에 ⏳(모래시계) 이모지를 추가하여 직관성을 극대화합니다.
-                    const processingBadge = processingIds.includes(item.id) ? '⏳ [처리 중...] ' : '';
+                    const processingBadge = processingIds.includes(item.id) ? '⏳ [처리중...] ' : '';
                     
                     // 🚀 현재 접속한 페이지 UI 텍스트 꾸미기
                     if (item.url === currentUrl) {
@@ -1617,6 +1633,14 @@ const OVERLAY_SCRIPT: &str = r#"
                     }
                     if (data.payload.processing_ids && JSON.stringify(processingIds) !== JSON.stringify(data.payload.processing_ids)) {
                         processingIds = data.payload.processing_ids;
+                        needsRender = true;
+                    }
+                    // 🚀 개별 아이템 처리가 완료될 때마다 실시간으로 화면과 메모리에 반영합니다. (순차적 완료 처리)
+                    if (data.payload.completed_item) {
+                        const item = data.payload.completed_item;
+                        const idx = stagedItems.findIndex(i => i.id === item.id);
+                        if (idx !== -1) stagedItems[idx] = item;
+                        checkedSessionIds.delete(item.id); // 완료된 아이템은 체크 해제
                         needsRender = true;
                     }
                     if (needsRender) {
@@ -1861,18 +1885,19 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let custom_tabs_str = app_config.custom_tabs.map(|tabs| serde_json::to_string(&tabs).unwrap_or_else(|_| "null".to_string())).unwrap_or_else(|| "null".to_string());
     let auto_extract = app_config.auto_extract.unwrap_or(true); // 🚀 기본값은 활성화(true)
     
+    let app_dir = gemini_gui_lib::utils::get_app_dir();
     // 🚀 각 모델 디렉토리에 핵심 설정 파일이나 모델 파일이 존재하는지 검사하여 다운로드 상태를 판별합니다.
-    let glm_exists = std::path::Path::new("../models/glm_ocr/config.json").exists() || std::path::Path::new("../models/glm_ocr/GLM-OCR-Q8_0.gguf").exists();
-    let privacy_exists = std::path::Path::new("../models/privacy-filter/config.json").exists();
-    let embed_exists = std::path::Path::new("../models/embeddings/config.json").exists() || std::path::Path::new("../models/embeddings/embeddinggemma-300m-Q4_0.gguf").exists();
+    let glm_exists = app_dir.join("models/glm_ocr/config.json").exists() || app_dir.join("models/glm_ocr/GLM-OCR-Q8_0.gguf").exists();
+    let privacy_exists = app_dir.join("models/privacy-filter/config.json").exists();
+    let embed_exists = app_dir.join("models/embeddings/config.json").exists() || app_dir.join("models/embeddings/embeddinggemma-300m-Q4_0.gguf").exists();
     let model_status_str = json!({
         "GLM-OCR": glm_exists,
         "Privacy-Filter": privacy_exists,
         "Embedding": embed_exists
     }).to_string();
     
-    // 🚀 language.json 파일을 읽어서 프론트엔드로 전달합니다. 파일이 없거나 오류 시 빈 객체 전달
-    let lang_dict_str = std::fs::read_to_string("src/language.json").unwrap_or_else(|_| "{}".to_string());
+    // 🚀 컴파일 시 빌드에 language.json 파일을 아예 내장(Embed)시켜버려, 배포 후에도 경로 문제 없이 다국어를 100% 보장합니다.
+    let lang_dict_str = include_str!("language.json").to_string();
     
     // OVERLAY_SCRIPT 내의 예측 가능한 전역 변수(window.rpc 등)를 랜덤 생성한 이름으로 동적 치환
     let overlay_script_replaced = OVERLAY_SCRIPT
@@ -1888,6 +1913,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let _browser_clone = browser.clone();
     
     tokio::task::spawn(async move {
+        let app_dir = gemini_gui_lib::utils::get_app_dir();
         while let Some(event) = bindings.next().await {
             if event.name == rpc_binding_name { // 이벤트 수신명 변경
                 let payload = event.payload.trim_matches('"').to_string();
@@ -1905,10 +1931,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     let ocr_result = {
                                         let mut model_guard = OCR_MODEL.lock().unwrap();
                                         if model_guard.is_none() {
-                                            let model_path = "..\\models\\glm_ocr";
+                                            let model_path = app_dir.join("models/glm_ocr");
+                                            let model_path_str = model_path.to_string_lossy().to_string();
                                             // 🚀 SSD 오프로딩이 적용되었으므로 당당하게 4GB CUDA VRAM을 100% 활용합니다.
                                             let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu); 
-                                            if let Ok(model) = GlmOcrGenerateModel::init(model_path, Some(&ocr_device), None) {
+                                            if let Ok(model) = GlmOcrGenerateModel::init(&model_path_str, Some(&ocr_device), None) {
                                                 *model_guard = Some(model);
                                             }
                                         }
@@ -1991,10 +2018,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 let total_steps = total_items * 3;
                                 let mut current_step = 0;
 
+                                // 🚀 진행 중 렌더링을 갱신하기 위해 현재 남은 처리 대상 ID들을 관리하는 동적 배열입니다.
+                                let mut active_processing_ids = id_strings.clone();
+
                                 // 🚀 [Fix] 작업 시작 즉시 전역 상태를 0%로 잠가서, 긴 OCR 추론 중에 탭을 전환해도 상태가 풀리지 않게 방어합니다.
                                 {
                                     // 🚀 진행 중인 아이템 ID 목록(processing_ids)을 함께 브로드캐스트하여 프론트엔드에서 흐리게(Opacity) 처리할 수 있도록 합니다.
-                                    let initial_payload = json!({"item_display": 1, "total_items": total_items, "percent": 0, "processing_ids": id_strings.clone()});
+                                    let initial_payload = json!({"item_display": 1, "total_items": total_items, "percent": 0, "processing_ids": active_processing_ids.clone()});
                                     *GLOBAL_PROGRESS.lock().unwrap() = Some(initial_payload.clone());
                                     let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": initial_payload})));
                                     let _ = page_clone.evaluate(script).await;
@@ -2028,8 +2058,9 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     {
                                         let mut model_guard = OCR_MODEL.lock().unwrap();
                                         if model_guard.is_none() {
-                                            let model_path = "..\\models\\glm_ocr";
-                                            match GlmOcrGenerateModel::init(model_path, Some(&device), None) {
+                                            let model_path = app_dir.join("models/glm_ocr");
+                                            let model_path_str = model_path.to_string_lossy().to_string();
+                                            match GlmOcrGenerateModel::init(&model_path_str, Some(&device), None) {
                                                 Ok(model) => *model_guard = Some(model),
                                                 Err(e) => {
                                                     let err_msg = format!("OCR Init Error: {:?}", e);
@@ -2041,6 +2072,12 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     }
 
                                     for (idx, record) in target_records.iter_mut().enumerate() {
+                                        // 🚀 사용자가 Cancel 버튼을 눌렀다면 루프를 즉시 중단합니다.
+                                        if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                            has_error = Some("Push operation cancelled by user.".to_string());
+                                            break;
+                                        }
+
                                         let is_image = record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf");
                                         let item_type = if is_image { "이미지" } else { "텍스트" };
                                         println!("[System] Phase 0 - [{}]순서-{} 처리 시작 (ID: {})", idx, item_type, record.id);
@@ -2086,7 +2123,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         // 🚀 실시간 퍼센트 전송 및 브로드캐스트
                                         current_step += 1;
                                         let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
+                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
                                         *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                         let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
                                         let _ = page_clone.evaluate(script).await;
@@ -2109,12 +2146,20 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     {
                                         let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
                                         if pm_guard.is_none() {
+                                            let pm_path = app_dir.join("models/privacy-filter");
+                                            let pm_path_str = pm_path.to_string_lossy().to_string();
                                             println!("[System] PrivacyManager 모델을 GPU 메모리에 로드 중...");
-                                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new("..\\models\\privacy-filter", &device).ok();
+                                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
                                         }
                                     }
                                     
                                     for (idx, record) in target_records.iter_mut().enumerate() {
+                                        // 🚀 사용자가 Cancel 버튼을 눌렀다면 루프를 즉시 중단합니다.
+                                        if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                            has_error = Some("Push operation cancelled by user.".to_string());
+                                            break;
+                                        }
+
                                         let mut masked_success = false;
                                         let mut masked_text = String::new();
                                         {
@@ -2142,7 +2187,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         // 🚀 실시간 퍼센트 전송 및 브로드캐스트
                                         current_step += 1;
                                         let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
+                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
                                         *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                         let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
                                         let _ = page_clone.evaluate(script).await;
@@ -2166,10 +2211,18 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         {
                                             let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
                                             if em_guard.is_none() {
-                                                *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device("..\\models\\embeddings", &device).ok();
+                                                let em_path = app_dir.join("models/embeddings");
+                                                let em_path_str = em_path.to_string_lossy().to_string();
+                                                *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device(&em_path_str, &device).ok();
                                             }
                                         }
                                         for (idx, record) in target_records.iter_mut().enumerate() {
+                                            // 🚀 사용자가 Cancel 버튼을 눌렀다면 루프를 즉시 중단합니다.
+                                            if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                                has_error = Some("Push operation cancelled by user.".to_string());
+                                                break;
+                                            }
+
                                             let text_to_embed = record.masking.trim();
                                             if text_to_embed.is_empty() {
                                                 println!("[System] Phase 2 - [{}]순서 임베딩 건너뜐 (빈 텍스트)", idx);
@@ -2186,14 +2239,29 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     has_error = Some("Embedding 모델 로드에 실패했습니다.".to_string());
                                                 }
                                             }
-                                            
-                                            // 🚀 실시간 퍼센트 전송 및 브로드캐스트
+
+                                            // 🚀 순차적 완료 처리: 아이템 하나가 완전히 끝났으므로 DB에 즉각 저장하고 상태를 변경합니다.
+                                            record.status = "PUSHED".to_string();
+                                            let expr = format!("id = '{}'", record.id);
+                                            let _ = table.delete(&expr).await;
+                                            let _ = db::save_records(vec![record.clone()], None).await;
+
+                                            // 진행 중인 아이템 목록에서 현재 아이템 제거
+                                            active_processing_ids.retain(|id| id != &record.id);
+
+                                            // 🚀 실시간 퍼센트 전송 및 완료된 아이템(completed_item) 개별 브로드캐스트
                                             current_step += 1;
                                             let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                            let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
+                                            let payload = json!({
+                                                "item_display": idx + 1, 
+                                                "total_items": total_items, 
+                                                "percent": percent, 
+                                                "processing_ids": active_processing_ids.clone(),
+                                                "completed_item": record.clone()
+                                            });
                                             *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                             let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
-                                            if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
+                                            let _ = page_clone.evaluate(script).await;
                                         }
                                         
                                         {
@@ -2203,15 +2271,32 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         force_memory_cleanup();
                                     } else {
                                         println!("[System] === Phase 2: 임베딩 대상 텍스트가 모두 비어있어 모델 로드를 완전히 건너뜁니다. ===");
-                                        for record in &mut target_records {
+                                        for (idx, record) in target_records.iter_mut().enumerate() {
+                                            if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                                has_error = Some("Push operation cancelled by user.".to_string());
+                                                break;
+                                            }
+
                                             record.vector = vec![0.0; 768];
+                                            record.status = "PUSHED".to_string();
+                                            let expr = format!("id = '{}'", record.id);
+                                            let _ = table.delete(&expr).await;
+                                            let _ = db::save_records(vec![record.clone()], None).await;
+
+                                            active_processing_ids.retain(|id| id != &record.id);
+                                            current_step += 1;
+                                            let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                            let payload = json!({
+                                                "item_display": idx + 1, 
+                                                "total_items": total_items, 
+                                                "percent": percent, 
+                                                "processing_ids": active_processing_ids.clone(),
+                                                "completed_item": record.clone()
+                                            });
+                                            *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                            let _ = page_clone.evaluate(script).await;
                                         }
-                                        current_step += total_items;
-                                        let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let payload = json!({"item_display": total_items, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
-                                        *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
-                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
-                                        let _ = page_clone.evaluate(script).await;
                                     }
                                 }
 
@@ -2226,15 +2311,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 if let Some(err_msg) = has_error {
                                     json!({"type": "error", "message": err_msg}).to_string()
                                 } else {
-                                    for record in &mut target_records {
-                                        record.status = "PUSHED".to_string();
-                                        let expr = format!("id = '{}'", record.id);
-                                        let _ = table.delete(&expr).await;
-                                    }
-                                    match db::save_records(target_records.clone(), None).await {
-                                        Ok(_) => json!({"type": "push_success", "payload": target_records}).to_string(),
-                                        Err(e) => json!({"type": "error", "message": format!("DB Save Error: {}", e)}).to_string(),
-                                    }
+                                    // 🚀 이미 Phase 2 내부에서 개별적으로 save_records를 순차 호출했으므로 일괄 저장은 생략합니다.
+                                    json!({"type": "push_success", "payload": target_records}).to_string()
                                 }
                             } else {
                                 json!({"type": "error", "message": "Failed to access database table."}).to_string()
@@ -2261,10 +2339,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         {
                             let mut model_guard = OCR_MODEL.lock().unwrap();
                             if model_guard.is_none() {
-                                let model_path = "..\\models\\glm_ocr";
+                                let model_path = app_dir.join("models/glm_ocr");
+                                let model_path_str = model_path.to_string_lossy().to_string();
                                 // 🚀 수동 파일 업로드 시에도 CUDA VRAM 기반 SSD 오프로딩을 적극 적용합니다.
                                 let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-                                match GlmOcrGenerateModel::init(model_path, Some(&ocr_device), None) {
+                                match GlmOcrGenerateModel::init(&model_path_str, Some(&ocr_device), None) {
                                     Ok(model) => *model_guard = Some(model),
                                     Err(e) => {
                                         let err_msg = format!("OCR Init Error: {:?}", e);
@@ -2317,7 +2396,9 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
                         let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
                         if pm_guard.is_none() {
-                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new("..\\models\\privacy-filter", &device).ok();
+                            let pm_path = app_dir.join("models/privacy-filter");
+                            let pm_path_str = pm_path.to_string_lossy().to_string();
+                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
                         }
                         if let Some(pm) = pm_guard.as_ref() {
                             masked_result = pm.mask_text(&ocr_result).unwrap_or_else(|e| {
@@ -2371,9 +2452,10 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 item.id, item.domain, item.title, content));
                         }
                         
-                        // 🚀 파일명을 고정하여 매번 새로운 파일이 생기지 않고 덮어씌워지도록 수정
-                        let _ = std::fs::create_dir_all("data/exports");
-                        let file_path = "data/exports/drag.context".to_string();
+                        // 🚀 OS 호환성을 위해 AppData 폴더를 사용합니다.
+                        let export_dir = app_dir.join("exports");
+                        let _ = std::fs::create_dir_all(&export_dir);
+                        let file_path = export_dir.join("drag.context").to_string_lossy().to_string();
                         
                         match std::fs::write(&file_path, export_content) {
                             Ok(_) => {
@@ -2402,9 +2484,9 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     }
                 } else if payload.starts_with("save_config:") {
                     let config_data = &payload["save_config:".len()..];
-                    let _ = std::fs::create_dir_all("data");
+                    let config_path = app_dir.join("app_config.json");
                     
-                    let mut current_config: serde_json::Value = std::fs::read_to_string("data/app_config.json")
+                    let mut current_config: serde_json::Value = std::fs::read_to_string(&config_path)
                         .ok()
                         .and_then(|s| serde_json::from_str(&s).ok())
                         .unwrap_or_else(|| json!({}));
@@ -2417,7 +2499,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 }
                             }
                         }
-                        if let Ok(_) = std::fs::write("data/app_config.json", current_config.to_string()) {
+                        if let Ok(_) = std::fs::write(&config_path, current_config.to_string()) {
                             json!({"type": "config_saved"}).to_string()
                         } else {
                             json!({"type": "error", "message": "설정 저장 실패"}).to_string()
@@ -2442,29 +2524,29 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     json!({"type": "domain_renamed"}).to_string()
                 } else if payload.starts_with("save_prompt:") {
                     let prompt_data = &payload["save_prompt:".len()..];
-                    let prompt_path = "data/prompts.json";
-                    let _ = std::fs::create_dir_all("data");
-                    let mut prompts: Vec<String> = std::fs::read_to_string(prompt_path)
+                    let prompt_path = app_dir.join("prompts.json");
+                    let mut prompts: Vec<String> = std::fs::read_to_string(&prompt_path)
                         .ok()
                         .and_then(|s| serde_json::from_str(&s).ok())
                         .unwrap_or_default();
                     if !prompts.contains(&prompt_data.to_string()) && !prompt_data.is_empty() {
                         prompts.push(prompt_data.to_string());
-                        let _ = std::fs::write(prompt_path, serde_json::to_string(&prompts).unwrap_or_default());
+                        let _ = std::fs::write(&prompt_path, serde_json::to_string(&prompts).unwrap_or_default());
                     }
                     json!({"type": "prompts_loaded", "payload": prompts}).to_string()
                 } else if payload.starts_with("delete_prompt:") {
                     let prompt_data = &payload["delete_prompt:".len()..];
-                    let prompt_path = "data/prompts.json";
-                    let mut prompts: Vec<String> = std::fs::read_to_string(prompt_path)
+                    let prompt_path = app_dir.join("prompts.json");
+                    let mut prompts: Vec<String> = std::fs::read_to_string(&prompt_path)
                         .ok()
                         .and_then(|s| serde_json::from_str(&s).ok())
                         .unwrap_or_default();
                     prompts.retain(|p| p != prompt_data);
-                    let _ = std::fs::write(prompt_path, serde_json::to_string(&prompts).unwrap_or_default());
+                    let _ = std::fs::write(&prompt_path, serde_json::to_string(&prompts).unwrap_or_default());
                     json!({"type": "prompts_loaded", "payload": prompts}).to_string()
                 } else if payload == "fetch_prompts" {
-                    let prompts: Vec<String> = std::fs::read_to_string("data/prompts.json")
+                    let prompt_path = app_dir.join("prompts.json");
+                    let prompts: Vec<String> = std::fs::read_to_string(&prompt_path)
                         .ok()
                         .and_then(|s| serde_json::from_str(&s).ok())
                         .unwrap_or_default();
@@ -2482,7 +2564,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             _ => "unknown"
                         };
 
-                        let dir_path = format!("../models/{}", folder_name);
+                        let dir_path = app_dir.join("models").join(folder_name);
                         let _ = std::fs::create_dir_all(&dir_path);
 
                         // 🚀 실제 Hugging Face 다운로드 URL 리스트 매핑
@@ -2521,7 +2603,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 let total_size = res.content_length().unwrap_or(0) as f64;
                                 let mut downloaded = 0.0;
                                 
-                                let file_path = format!("{}/{}", dir_path, filename);
+                                let file_path = dir_path.join(filename);
                                 use tokio::io::AsyncWriteExt;
                                 if let Ok(mut file) = tokio::fs::File::create(&file_path).await {
                                     let mut stream = res.bytes_stream();

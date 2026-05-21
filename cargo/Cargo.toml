@@ -29,6 +29,7 @@ bytes = "1.11.1"
 base64 = "0.22.1"
 image = "0.25.5"
 lazy_static = "1.5.0"
+dirs = "5.0.1"
 
 [features]
 default = ["cuda"]

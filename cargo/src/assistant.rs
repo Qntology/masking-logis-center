@@ -18,7 +18,7 @@ impl Assistant {
 
     pub async fn answer_question(&self, query: &str) -> Result<String> {
         // 1. 도메인 분류 (Intent Routing) 제거 - 외부 config.json 로드 후 바로 검색
-        let config_path = std::path::PathBuf::from("data/config.json");
+        let config_path = crate::utils::get_app_dir().join("app_config.json");
         let loaded_domain = if let Ok(content) = std::fs::read_to_string(config_path) {
             let v: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
             let tab = v["default_tab"].as_str().unwrap_or("COMMERCE").to_uppercase();
