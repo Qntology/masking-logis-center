@@ -2768,6 +2768,7 @@ dependencies = [
  "lance-tokenizer",
  "lancedb",
  "lazy_static",
+ "libc",
  "reqwest 0.13.3",
  "scraper",
  "serde",

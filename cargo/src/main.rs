@@ -45,9 +45,16 @@ fn force_memory_cleanup() {
         windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx(handle, min_size, max_size, flags);
     }
     #[cfg(target_os = "linux")]
-    unsafe { extern "C" { fn malloc_trim(pad: usize) -> i32; } malloc_trim(0); }
+    unsafe { 
+        // 🚀 [Linux] libc를 통해 glibc의 캐시된 힙 메모리를 OS로 즉시 강제 반환합니다.
+        libc::malloc_trim(0); 
+    }
     #[cfg(target_os = "macos")]
-    unsafe { extern "C" { fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize; } malloc_zone_pressure_relief(std::ptr::null_mut(), 0); }
+    unsafe { 
+        // 🚀 [macOS] Darwin 커널의 모든 메모리 존(zone)에 대해 메모리 압박 해제를 강제 실행하여 캐시를 비웁니다.
+        extern "C" { fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: usize) -> usize; }
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0); 
+    }
 }
 
 fn _mask_pii(text: &str, spans: &[PrivacySpan]) -> String {
