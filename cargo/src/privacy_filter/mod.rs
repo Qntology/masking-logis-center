@@ -307,7 +307,11 @@ impl PrivacyFilterModel {
         let norm = RmsNorm::new(config.hidden_size, config.rms_norm_eps, vb.pp("model.norm"))?;
         let score_weight = vb.get((config.num_labels(), config.hidden_size), "score.weight")?.transpose(0, 1)?.contiguous()?;
         let score_bias = vb.get(config.num_labels(), "score.bias")?;
-        let viterbi_config = ViterbiConfig::from_file(&model_dir.join("viterbi_calibration.json"), "default").unwrap_or_default();
+        let mut viterbi_config = ViterbiConfig::from_file(&model_dir.join("viterbi_calibration.json"), "default").unwrap_or_default();
+        
+        // 🚀 [정밀도 튜닝] 배경(O)에서 갑자기 마스킹 시작(B/S)으로 전환될 때 강력한 음수 바이어스를 부여합니다.
+        // 이렇게 하면 모델이 어설프게 아는 단어를 함부로 마스킹하지 못하게 되어 '글라스틱' 같은 단어가 쪼개지는 현상을 방지합니다.
+        viterbi_config.transition_bias_background_to_start = -5.0; 
 
         Ok(Self { embed_tokens, layers, norm, score_weight, score_bias, tokenizer, config, viterbi_config, device: device.clone(), dtype })
     }

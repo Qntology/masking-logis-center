@@ -6,11 +6,15 @@ use params::chat::{ChatCompletionParameters, Message, Part};
 use std::sync::Mutex;
 use lazy_static::lazy_static;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 lazy_static! {
     static ref OCR_MODEL: Mutex<Option<GlmOcrGenerateModel>> = Mutex::new(None);
     static ref PRIVACY_MANAGER: Mutex<Option<gemini_gui_lib::privacy_filter::masking::PrivacyManager>> = Mutex::new(None);
     static ref EMBEDDING_MODEL: Mutex<Option<gemini_gui_lib::embedding::EmbeddingModel>> = Mutex::new(None);
     static ref GLOBAL_PROGRESS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+    // 🚀 Push 작업을 실시간으로 중단하기 위한 전역 플래그입니다.
+    static ref PUSH_CANCEL_SIGNAL: AtomicBool = AtomicBool::new(false);
 }
 
 // Simplified stub for chat completion
@@ -266,21 +270,31 @@ const OVERLAY_SCRIPT: &str = r#"
         pushBtn.disabled = true;
 
         function updatePushBtnState() {
+            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
+            const checkedCount = checkedBoxes.length;
+            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
+
+            // 🚀 작업 중일 때 Push 버튼을 Cancel 버튼으로 전환합니다.
             if (isProcessing) {
-                pushBtn.disabled = true;
+                pushBtn.disabled = false;
+                pushBtn.textContent = 'Cancel';
+                pushBtn.style.background = '#ffc107'; // 경고색(노란색)
                 deleteBtn.disabled = true;
                 draftBtn.disabled = true;
                 return;
             }
 
-            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
-            const checkedCount = checkedBoxes.length;
-            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
             const draftCount = stagedItems.filter(i => selectedIds.includes(i.id) && i.status !== 'PUSHED').length;
             
+            pushBtn.style.background = '#007bff'; // 기본색(파란색)
             pushBtn.disabled = (draftCount === 0);
             pushBtn.textContent = `Push (${draftCount})`;
+
+            // 🚀 Delete 버튼에 선택된 아이템 개수를 표기합니다.
+            deleteBtn.textContent = `Delete (${checkedCount})`;
             deleteBtn.style.display = (checkedCount > 0) ? 'inline-block' : 'none';
+            deleteBtn.disabled = false;
+            draftBtn.disabled = false;
             
             const totalCount = log.querySelectorAll('.item-checkbox').length;
             selectAllCheck.checked = (totalCount > 0 && checkedCount === totalCount);
@@ -313,7 +327,15 @@ const OVERLAY_SCRIPT: &str = r#"
         }
 
         pushBtn.onclick = async () => {
-            if (isProcessing) return;
+            // 🚀 이미 진행 중일 때 클릭하면 사용자에게 확인을 받은 후 중단(Cancel) rpc를 호출합니다.
+            if (isProcessing) {
+                if (confirm('현재 진행 중인 작업을 정말 중단하시겠습니까?')) {
+                    if (window.rpc) {
+                        window.rpc("cancel_push");
+                    }
+                }
+                return;
+            }
             
             const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
             const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
@@ -322,10 +344,11 @@ const OVERLAY_SCRIPT: &str = r#"
             if (draftIds.length === 0) return;
             
             isProcessing = true;
-            pushStartTime = Date.now(); // 🚀 Push 작업이 로컬에서 시작된 시간을 기록합니다.
-            processingIds = draftIds; // 🚀 현재 탭에서 누른 즉시 진행 상태 배열에 로컬로 담습니다.
-            renderStagedList();       // 🚀 즉시 흐리게(Opacity) 화면을 다시 그립니다.
+            pushStartTime = Date.now();
+            processingIds = draftIds;
+            renderStagedList();
             startPushSpinner(); 
+            updatePushBtnState(); // Cancel로 버튼 텍스트 변경 유도
             
             if (window.rpc) {
                 window.rpc("mask_and_push_batch:" + JSON.stringify({ 
@@ -808,6 +831,16 @@ const OVERLAY_SCRIPT: &str = r#"
                         stopPushSpinner();
                         updatePushBtnState();
                         renderStagedList();
+
+                        // 🚀 중단 완료 후 사용자에게 시스템 로그로 피드백을 제공합니다.
+                        const div = document.createElement('div');
+                        div.className = 'system';
+                        div.style.padding = '10px';
+                        div.style.background = '#fff3cd'; // 경고 배경색
+                        div.style.borderRadius = '4px';
+                        div.textContent = `System: 사용자의 요청으로 작업이 중단되었습니다.`;
+                        log.appendChild(div);
+                        div.scrollIntoView({ behavior: 'smooth', block: 'end' });
                     }
                     return;
                 }
@@ -1029,6 +1062,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     }
                     json!({"type":"delete_success"}).to_string()
                 } else if payload.starts_with("mask_and_push_batch:") {
+                    // 🚀 배치 작업 시작 전 중단 신호를 초기화합니다.
+                    PUSH_CANCEL_SIGNAL.store(false, Ordering::SeqCst);
                     let data = &payload["mask_and_push_batch:".len()..];
                     let response_json = if let Ok(req) = serde_json::from_str::<serde_json::Value>(data) {
                         if let Some(ids) = req.get("ids").and_then(|i| i.as_array()) {
@@ -1274,7 +1309,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 }
 
                                 // DB 갱신 처리
-                                *GLOBAL_PROGRESS.lock().unwrap() = None; // 🚀 작업 완료 시 전역 진행률을 안전하게 초기화합니다.
+                                *GLOBAL_PROGRESS.lock().unwrap() = None; 
+                                
+                                // 🚀 루프 도중 중단 신호가 켜졌다면 에러 메시지를 할당합니다.
+                                if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                    has_error = Some("Push operation cancelled by user.".to_string());
+                                }
+
                                 if let Some(err_msg) = has_error {
                                     json!({"type": "error", "message": err_msg}).to_string()
                                 } else {
@@ -1283,7 +1324,6 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         let expr = format!("id = '{}'", record.id);
                                         let _ = table.delete(&expr).await;
                                     }
-                                    // 마스킹과 임베딩 적용된 레코드 LanceDB 저장
                                     match db::save_records(target_records.clone(), None).await {
                                         Ok(_) => json!({"type": "push_success", "payload": target_records}).to_string(),
                                         Err(e) => json!({"type": "error", "message": format!("DB Save Error: {}", e)}).to_string(),
@@ -1299,6 +1339,10 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         json!({"type": "error", "message": "Invalid request payload format."}).to_string()
                     };
                     response_json
+                } else if payload == "cancel_push" {
+                    // 🚀 중단 신호를 켭니다. mask_and_push_batch의 각 Phase 진입 전후에 이 플래그를 체크하게 됩니다.
+                    PUSH_CANCEL_SIGNAL.store(true, Ordering::SeqCst);
+                    json!({"type": "push_idle"}).to_string()
                 } else if payload.starts_with("process_file:") {
                     let full_data_url = &payload["process_file:".len()..];
                     let mut ocr_result = String::new();
