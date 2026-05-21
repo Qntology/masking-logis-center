@@ -13,7 +13,7 @@ pub fn load_glm_ocr_gguf<P: AsRef<Path>>(
     config: &GlmOcrConfig,
     _device: &Device,
 ) -> Result<GlmOcrModel> {
-    // 🚀 실행 환경에 맞춰 목표 DType을 결정합니다. CUDA는 BF16을 사용해야 충돌이 나지 않습니다.
+    // 🚀 CUDA 환경에서 Vision 프로젝터 텐서도 다른 모듈과 동일하게 BF16으로 일원화하여 로드합니다.
     let target_dtype = if _device.is_cuda() { DType::BF16 } else { DType::F32 };
 
     let mut vision_file = File::open(mmproj_path)?;
@@ -39,17 +39,6 @@ pub fn load_glm_ocr_gguf<P: AsRef<Path>>(
                 ))?;
                 patch_t = (patch_t.to_dtype(DType::F32)? / (temporal as f64))?.to_dtype(target_dtype)?;
                 tensors.insert(mapped_name, patch_t);
-            } else if mapped_name == "model.visual.merger.proj.weight" {
-                if t.rank() == 4 {
-                    let out_c = t.dim(0)?;
-                    let flattened_in = t.dim(1)? * t.dim(2)? * t.dim(3)?;
-                    let reshaped_t = t.reshape((out_c, flattened_in))?;
-                    tensors.insert(mapped_name, reshaped_t);
-                } else if t.rank() == 2 && t.dim(1)? == 4096 {
-                    tensors.insert(mapped_name, t);
-                } else {
-                    tensors.insert(mapped_name, t);
-                }
             } else {
                 tensors.insert(mapped_name, t);
             }
@@ -127,12 +116,8 @@ fn map_vision_name(name: &str) -> String {
     else if n.starts_with("vision.") { n = n.replacen("vision.", "", 1); }
     else if n.starts_with("model.visual.") { n = n.replacen("model.visual.", "", 1); }
 
-    n = n.replace("patch_embd.weight.1", "downsample.weight")
-         .replace("patch_embd.bias.1", "downsample.bias")
-         .replace("patch_embd.weight", "patch_embed.proj.weight")
+    n = n.replace("patch_embd.weight", "patch_embed.proj.weight")
          .replace("patch_embd.bias", "patch_embed.proj.bias")
-         .replace("patch_embed.weight", "patch_embed.proj.weight")
-         .replace("patch_embed.bias", "patch_embed.proj.bias")
          .replace("blk.", "blocks.")
          .replace("attn_qkv", "attn.qkv")
          .replace("attn_out", "attn.proj")
@@ -144,17 +129,12 @@ fn map_vision_name(name: &str) -> String {
          .replace("ln1", "norm1")
          .replace("ln2", "norm2")
          .replace("post_ln", "post_layernorm")
-         .replace("merger.patch_merger", "merger.proj")
+         .replace("merger.patch_merger", "downsample")
+         .replace("merger.model.fc", "merger.proj") // 🚀 핵심 누락 텐서 매핑 추가
          .replace("merger.post_norm", "merger.post_projection_norm")
          .replace("merger.gate", "merger.gate_proj")
          .replace("merger.up", "merger.up_proj")
          .replace("merger.down", "merger.down_proj");
-
-    if n == "merger.model.fc.weight" {
-        n = "downsample.weight".to_string();
-    } else if n == "merger.model.fc.bias" {
-        n = "downsample.bias".to_string();
-    }
 
     format!("model.visual.{}", n)
 }

@@ -57,6 +57,8 @@ pub fn generate_generic(
     // [Fix] 매 생성 시작 시 반드시 이전 상태(KV Cache)를 초기화하여 아이템 간 간섭(병합 현상)을 방지합니다.
     model.clear_cache();
     
+    println!("[Debug:Generate] 프롬프트 입력 토큰 길이: {}", input_ids.dim(1).unwrap_or(0));
+    
     let mut tokens = Vec::new();
     let mut current_input_ids = input_ids;
     let mut seqlen_offset = 0;
@@ -74,11 +76,22 @@ pub fn generate_generic(
     
     // LogitsProcessor를 통한 샘플링 수행
     let last_logits = logits.i((0, logits.dim(1)? - 1))?;
+    
+    // 🌟 NaN 값 발생 여부 체크 로그 (0바이트 증발의 핵심 원인 추적)
+    let sum_val = last_logits.to_dtype(candle_core::DType::F32)?.sum_all()?.to_scalar::<f32>()?;
+    let is_nan = sum_val.is_nan();
+    if is_nan {
+        println!("[Debug:Generate] ⚠️ 경고: 초기 Logits 연산 결과에 NaN(Not a Number) 값이 포함되어 있습니다! (데이터 타입 또는 하드웨어 호환성 충돌 의심)");
+    }
+
     let mut next_token = logits_processor.sample(&last_logits)?;
+    println!("[Debug:Generate] 첫 번째 생성된 토큰 ID: {} (종료 토큰 여부: {})", next_token, model.stop_token_ids().contains(&next_token));
     tokens.push(next_token);
 
+    let mut generate_count = 1;
     for _ in 1..ctx.max_tokens {
         if model.stop_token_ids().contains(&next_token) {
+            println!("[Debug:Generate] {}번째 루프에서 EOS(종료) 토큰을 만나 생성을 정상 중단합니다.", generate_count);
             break;
         }
         current_input_ids = Tensor::new(&[next_token], &ctx.device)?.unsqueeze(0)?;
@@ -87,10 +100,21 @@ pub fn generate_generic(
         
         let next_logits = logits.i((0, 0))?;
         next_token = logits_processor.sample(&next_logits)?;
+        
+        // 🌟 루프마다 어떤 토큰 ID가 뽑히는지 실시간으로 추적합니다.
+        println!("[Debug:Generate] {}번째 루프 생성 토큰 ID: {}", generate_count, next_token);
+        
         tokens.push(next_token);
+        generate_count += 1;
     }
 
     let text = tokenizer.decode(&tokens, true)?;
+    println!("[Debug:Generate] 총 생성된 토큰 개수: {}, 디코딩된 텍스트 길이: {} 바이트", tokens.len(), text.len());
+    
+    // 🌟 텍스트가 비어 보이는 원인을 찾기 위해 배열 전체와 특수문자(공백, 개행 등)가 이스케이프된 Raw 텍스트를 출력합니다.
+    println!("[Debug:Generate] 생성된 토큰 ID 배열 전체: {:?}", tokens);
+    println!("[Debug:Generate] 생성된 텍스트 (Raw 포맷): {:?}", text);
+    
     Ok(ChatCompletionResponse {
         id: "chat-id".to_string(),
         object: "chat.completion".to_string(),

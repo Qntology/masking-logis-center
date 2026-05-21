@@ -653,9 +653,7 @@ pub struct GlmOcrVisionPatchMerger {
 
 impl GlmOcrVisionPatchMerger {
     pub fn new(vb: VarBuilder, config: &GlmOcrVisionConfig) -> Result<Self> {
-        // 🚀 Shape Mismatch 에러 해결: GGUF 모델의 텐서 규격에 맞게 입력 차원을 4096으로 강제 고정합니다.
-        let in_dim = 4096;
-        let proj = linear_no_bias(in_dim, config.out_hidden_size, vb.pp("proj"))?;
+        let proj = linear_no_bias(config.out_hidden_size, config.out_hidden_size, vb.pp("proj"))?;
         let post_projection_norm = layer_norm(config.out_hidden_size, config.rms_norm_eps, vb.pp("post_projection_norm"))?;
         let context_dim = config.out_hidden_size * config.in_channels;
         let gate_proj = linear_no_bias(config.out_hidden_size, context_dim, vb.pp("gate_proj"))?;
@@ -666,16 +664,16 @@ impl GlmOcrVisionPatchMerger {
     }
 
     pub fn forward(&self, hidden_state: &Tensor) -> Result<Tensor> {
-        let target_dtype = self.proj.weight().dtype();
-        let hs_f32 = hidden_state.to_dtype(DType::F32)?; // 🚀 CPU BF16 matmul 에러 원천 차단
+        let target_dtype = self.post_projection_norm.weight().dtype();
         
+        let hs_f32 = hidden_state.to_dtype(DType::F32)?;
         let w_proj = self.proj.weight().to_dtype(DType::F32)?;
         let b_proj = match self.proj.bias() { Some(b) => Some(b.to_dtype(DType::F32)?), None => None };
         let proj_f32 = Linear::new(w_proj, b_proj);
         let mut hs = proj_f32.forward(&hs_f32)?.to_dtype(target_dtype)?;
         
         hs = self.post_projection_norm.forward(&hs)?;
-        hs = hs.gelu()?.to_dtype(DType::F32)?; // 활성화 함수 후 다시 F32로 변경
+        hs = hs.gelu()?.to_dtype(DType::F32)?; // 🚀 CPU BF16 matmul 에러 원천 차단
 
         let w_gate = self.gate_proj.weight().to_dtype(DType::F32)?;
         let b_gate = match self.gate_proj.bias() { Some(b) => Some(b.to_dtype(DType::F32)?), None => None };
@@ -746,6 +744,7 @@ pub struct GlmOcrVisionModel {
     rotary_pos_emb: GlmOcrVisionRotaryEmbedding,
     blocks: Vec<GlmOcrVisionBlock>,
     merger: GlmOcrVisionPatchMerger,
+    downsample: candle_nn::Conv2d, // 🚀 잃어버렸던 원본 Conv2d 레이어 복구
     post_layernorm: GlmOcrRMSNorm,
     config: GlmOcrVisionConfig,
     pub file: Option<std::fs::File>,
@@ -777,9 +776,22 @@ impl GlmOcrVisionModel {
         }
 
         let merger = GlmOcrVisionPatchMerger::new(vb.pp("merger"), config)?;
+        
+        // 🚀 원본 GLM-OCR의 공간 병합을 담당하는 Conv2d 초기화 복구
+        let downsample = candle_nn::conv2d(
+            config.hidden_size,
+            config.out_hidden_size,
+            config.spatial_merge_size,
+            candle_nn::Conv2dConfig {
+                stride: config.spatial_merge_size,
+                ..Default::default()
+            },
+            vb.pp("downsample"),
+        )?;
+
         let post_layernorm = GlmOcrRMSNorm::new(vb.pp("post_layernorm"), config.hidden_size, config.rms_norm_eps)?;
 
-        Ok(Self { patch_embed, rotary_pos_emb, blocks, merger, post_layernorm, config: config.clone(), file, ct, dtype: vb.dtype() })
+        Ok(Self { patch_embed, rotary_pos_emb, blocks, merger, downsample, post_layernorm, config: config.clone(), file, ct, dtype: vb.dtype() })
     }
 
     pub fn forward(&mut self, pixel_values: &Tensor, grid_thw: &Tensor) -> Result<Tensor> {
@@ -849,15 +861,24 @@ impl GlmOcrVisionModel {
         let sms = self.config.spatial_merge_size;
         let hidden_dim = hidden_states.dim(hidden_states.dims().len() - 1)?;
         
-        let (t, h, w) = grid_thw_parsed[0];
-        let merged_h = h / sms;
-        let merged_w = w / sms;
-        let merged_patches = t * merged_h * merged_w;
+        let total_patches = hidden_states.dim(0)?; 
+        let merged_patches = total_patches / (sms * sms); 
         
-        let hidden_states = hidden_states.reshape((t, h, w, hidden_dim))?;
-        let hidden_states = hidden_states.reshape((t, merged_h, sms, merged_w, sms, hidden_dim))?;
-        let hidden_states = hidden_states.permute((0, 1, 3, 5, 2, 4))?;
-        let hidden_states = hidden_states.reshape((merged_patches, hidden_dim * sms * sms))?; 
+        let hidden_states = hidden_states.reshape((merged_patches, sms, sms, hidden_dim))?;
+        // 🚀 [Conv2d 입력 규격 맞춤] [batch, height, width, channels] -> [batch, channels, height, width]
+        let hidden_states = hidden_states.permute((0, 3, 1, 2))?;
+        
+        // 🚀 CPU 연산 호환성을 위해 F32로 안전하게 Conv2d 처리 (원본 모델의 시각 압축 로직 복구 완료)
+        let target_dtype = hidden_states.dtype();
+        let hidden_states_f32 = hidden_states.to_dtype(DType::F32)?;
+        
+        let w_ds = self.downsample.weight().to_dtype(DType::F32)?;
+        let b_ds = match self.downsample.bias() { Some(b) => Some(b.to_dtype(DType::F32)?), None => None };
+        let downsample_cfg = candle_nn::Conv2dConfig { stride: sms, ..Default::default() };
+        let downsample_f32 = candle_nn::Conv2d::new(w_ds, b_ds, downsample_cfg);
+        
+        let hidden_states = downsample_f32.forward(&hidden_states_f32)?.to_dtype(target_dtype)?;
+        let hidden_states = hidden_states.reshape((merged_patches, self.config.out_hidden_size))?; 
         
         Ok(self.merger.forward(&hidden_states)?.unsqueeze(0)?)
     }
@@ -953,7 +974,11 @@ impl GlmOcrTextModel {
         }
 
         let norm = GlmOcrRMSNorm::new(vb.pp("norm"), config.hidden_size, config.rms_norm_eps)?;
-        let lm_head = linear_no_bias(config.hidden_size, config.vocab_size, vb.root().pp("lm_head"))?;
+        
+        // 🚀 [고속 추론 최적화] 매 토큰마다 F32로 변환하는 끔찍한 병목을 막기 위해 초기화 시점에 미리 F32로 캐싱해 둡니다.
+        let w_lm = vb.root().pp("lm_head").get((config.vocab_size, config.hidden_size), "weight")?.to_dtype(DType::F32)?;
+        let lm_head = Linear::new(w_lm, None);
+        
         let rotary_emb = GlmOcrTextRotaryEmbedding::new(&config, vb.device(), vb.dtype())?;
 
         Ok(Self {
@@ -1093,11 +1118,8 @@ impl GlmOcrTextModel {
         hidden_states = self.norm.forward(&hidden_states)?;
         let last = hidden_states.narrow(1, seq_len - 1, 1)?;
         
-        // 🚀 CPU BF16 matmul 에러 방지용 임시 F32 변환
-        let w_lm = self.lm_head.weight().to_dtype(DType::F32)?;
-        let b_lm = match self.lm_head.bias() { Some(b) => Some(b.to_dtype(DType::F32)?), None => None };
-        let lm_f32 = Linear::new(w_lm, b_lm);
-        let logits_cpu = lm_f32.forward(&last.to_dtype(DType::F32)?)?.to_dtype(self.dtype)?;
+        // 🚀 [고속 추론 최적화] 캐싱된 F32 가중치를 사용하여 실시간 형변환 병목 없이 즉시 연산합니다.
+        let logits_cpu = self.lm_head.forward(&last.to_dtype(DType::F32)?)?.to_dtype(self.dtype)?;
         
         Ok(logits_cpu.to_device(input_ids.device())?) // 최종 결과만 원본 입력 장치(GPU)로 반환
     }

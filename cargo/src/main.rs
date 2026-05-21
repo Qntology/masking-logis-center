@@ -364,7 +364,7 @@ const OVERLAY_SCRIPT: &str = r#"
 
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
-        fileInput.accept = 'image/*, application/pdf';
+        fileInput.accept = 'image/*, application/pdf, text/csv';
         fileInput.style.width = '100%';
         fileInput.style.fontSize = '12px';
         fileInput.style.cursor = 'pointer';
@@ -423,6 +423,34 @@ const OVERLAY_SCRIPT: &str = r#"
         fileInput.onchange = (e) => {
             const file = e.target.files[0];
             if (!file) return;
+
+            // 🚀 CSV 파일인 경우 무거운 OCR 엔진을 거치지 않고, 텍스트를 바로 파싱하여 Draft 대기열로 밀어넣습니다.
+            if (file.name.toLowerCase().endsWith('.csv') || file.type === 'text/csv') {
+                const reader = new FileReader();
+                reader.onload = async (ev) => {
+                    const textData = ev.target.result;
+                    const pageId = await generatePageId(file.name + Date.now());
+                    const item = { 
+                        id: pageId, 
+                        host: window.location.host,
+                        url: "file://" + file.name,
+                        title: `[File] ${file.name}`, 
+                        domain: currentTabFilter,
+                        context: textData, 
+                        status: 'DRAFT',
+                        track: '',
+                        version: 1,
+                        created_at: Date.now(),
+                        updated_at: Date.now()
+                    };
+                    if (window.rpc) {
+                        window.rpc("sync_data:" + JSON.stringify(item));
+                        alert(file.name + " 파일이 " + currentTabFilter + " 대기열에 추가되었습니다.");
+                    }
+                };
+                reader.readAsText(file); // OCR용 DataURL이 아닌 순수 텍스트로 읽습니다.
+                return;
+            }
 
             fileSpinner.style.display = 'flex';
             fileInput.style.display = 'none';
@@ -616,22 +644,25 @@ const OVERLAY_SCRIPT: &str = r#"
         }
 
         async function autoExtract() {
-            const pageId = await generatePageId(window.location.href);
-            const extractedText = extractVisibleText();
-            const item = { 
-                id: pageId, 
-                host: window.location.host,
-                url: window.location.href,
-                title: getPageMeta(), 
-                domain: 'COMMERCE', 
-                context: extractedText, 
-                status: 'DRAFT',
-                track: '',
-                version: 1,
-                created_at: Date.now(),
-                updated_at: Date.now()
-            };
-            if (window.rpc) window.rpc("sync_data:" + JSON.stringify(item));
+            // 🚀 SPA(React/Vue 등) 웹페이지의 DOM 렌더링이 완료될 시간을 주기 위해 1.5초 지연 후 텍스트를 추출합니다.
+            setTimeout(async () => {
+                const pageId = await generatePageId(window.location.href);
+                const extractedText = extractVisibleText();
+                const item = { 
+                    id: pageId, 
+                    host: window.location.host,
+                    url: window.location.href,
+                    title: getPageMeta(), 
+                    domain: 'COMMERCE', 
+                    context: extractedText, 
+                    status: 'DRAFT',
+                    track: '',
+                    version: 1,
+                    created_at: Date.now(),
+                    updated_at: Date.now()
+                };
+                if (window.rpc) window.rpc("sync_data:" + JSON.stringify(item));
+            }, 1500);
         }
 
         window.addEventListener('keydown', (e) => {
@@ -894,6 +925,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         } else {
                                             println!("[System] 웹페이지 순수 텍스트 유지됨. (ID: {})", record.id);
                                         }
+                                        
+                                        // 🌟 전처리 완료된 순수 텍스트의 앞부분 100글자를 안전하게 추출하여 로그로 남깁니다.
+                                        let text_len = record.context.len();
+                                        let preview_text: String = record.context.chars().take(100).collect();
+                                        println!("[Debug:Phase0-1] 웹페이지 텍스트 미리보기 (총 {}바이트) :\n{}", text_len, preview_text);
                                     }
                                 }
 
@@ -913,8 +949,12 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             }
                                         }
 
-                                        for record in &mut target_records {
-                                            if record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf") {
+                                        for (idx, record) in target_records.iter_mut().enumerate() {
+                                            let is_image = record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf");
+                                            let item_type = if is_image { "이미지" } else { "텍스트" };
+                                            println!("[System] Phase 0 - [{}]순서-{} 처리 시작 (ID: {})", idx, item_type, record.id);
+                                            
+                                            if is_image {
                                                 if let Some(model) = model_guard.as_mut() {
                                                     let params = ChatCompletionParameters {
                                                         messages: vec![Message {
@@ -993,22 +1033,40 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                                 // ★ Phase 2: Embedding 일괄 벡터화 및 VRAM 해제
                                 if has_error.is_none() {
-                                    let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
-                                    if em_guard.is_none() {
-                                        *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device("..\\models\\embeddings", &device).ok();
-                                    }
-                                    for record in &mut target_records {
-                                        if let Some(em) = em_guard.as_ref() {
-                                            record.vector = em.embed(&record.masking).unwrap_or_else(|e| {
-                                                has_error = Some(format!("Embedding failed: {}", e));
-                                                vec![0.0; 768]
-                                            });
-                                        } else {
-                                            has_error = Some("Embedding 모델 로드에 실패했습니다.".to_string());
+                                    // 🚀 [Fix] 회원님 요청사항 반영: 모든 아이템의 텍스트를 trim하여 실제로 임베딩할 유효한 문자가 있는지 선제 검사합니다.
+                                    let needs_embedding = target_records.iter().any(|r| !r.masking.trim().is_empty());
+                                    
+                                    if needs_embedding {
+                                        let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
+                                        if em_guard.is_none() {
+                                            *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device("..\\models\\embeddings", &device).ok();
+                                        }
+                                        for (idx, record) in target_records.iter_mut().enumerate() {
+                                            let text_to_embed = record.masking.trim();
+                                            if text_to_embed.is_empty() {
+                                                println!("[System] Phase 2 - [{}]순서 임베딩 건너뜐 (빈 텍스트)", idx);
+                                                record.vector = vec![0.0; 768];
+                                                continue;
+                                            }
+                                            println!("[System] Phase 2 - [{}]순서 임베딩 진행 중...", idx);
+                                            if let Some(em) = em_guard.as_ref() {
+                                                record.vector = em.embed(text_to_embed).unwrap_or_else(|e| {
+                                                    has_error = Some(format!("Embedding failed: {}", e));
+                                                    vec![0.0; 768]
+                                                });
+                                            } else {
+                                                has_error = Some("Embedding 모델 로드에 실패했습니다.".to_string());
+                                            }
+                                        }
+                                        *em_guard = None; // VRAM 완전 해제
+                                        force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
+                                    } else {
+                                        println!("[System] === Phase 2: 임베딩 대상 텍스트가 모두 비어있어 모델 로드를 완전히 건너뜁니다. ===");
+                                        // 에러가 나지 않도록 빈 레코드에 기본 영벡터를 삽입해 줍니다.
+                                        for record in &mut target_records {
+                                            record.vector = vec![0.0; 768];
                                         }
                                     }
-                                    *em_guard = None; // VRAM 완전 해제
-                                    force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
                                 }
 
                                 // DB 갱신 처리

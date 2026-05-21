@@ -60,7 +60,9 @@ impl GlmOcrGenerateModel {
         let cfg: GlmOcrConfig = serde_json::from_slice(&std::fs::read(config_path)?)?;
         let device = get_device(device);
         let cfg_dtype = cfg.text_config.dtype.as_str();
-        let dtype = get_dtype(dtype, cfg_dtype);
+        
+        // 🚀 CUDA 환경에서는 설정 파일 값과 상관없이 정밀도 손실 방지와 타입 호환성을 위해 DType을 BF16으로 완벽히 일원화합니다.
+        let dtype = if device.is_cuda() { candle_core::DType::BF16 } else { get_dtype(dtype, cfg_dtype) };
         let processor = GlmOcrProcessor::new(path, &device, dtype)?;
 
         let gguf_model_path = format!("{}/GLM-OCR-Q8_0.gguf", path);
