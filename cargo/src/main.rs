@@ -1915,10 +1915,32 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let auto_extract = app_config.auto_extract.unwrap_or(true); // 🚀 기본값은 활성화(true)
     
     let app_dir = gemini_gui_lib::utils::get_app_dir();
-    // 🚀 각 모델 디렉토리에 핵심 설정 파일이나 모델 파일이 존재하는지 검사하여 다운로드 상태를 판별합니다.
-    let glm_exists = app_dir.join("models/glm_ocr/config.json").exists() || app_dir.join("models/glm_ocr/GLM-OCR-Q8_0.gguf").exists();
-    let privacy_exists = app_dir.join("models/privacy-filter/config.json").exists();
-    let embed_exists = app_dir.join("models/embeddings/config.json").exists() || app_dir.join("models/embeddings/embeddinggemma-300m-Q4_0.gguf").exists();
+
+    // 🚀 [초기 실행 시 파일 자동 연결] 가중치 파일(.gguf 등)이 이미 존재한다면, 
+    // 누락된 설정 JSON 파일들을 시스템 바이너리에서 즉시 복원하여 연결합니다.
+    let glm_weights = app_dir.join("models/glm_ocr/GLM-OCR-Q8_0.gguf");
+    let privacy_weights = app_dir.join("models/privacy-filter/model.safetensors");
+    let embed_weights = app_dir.join("models/embeddings/embeddinggemma-300m-Q4_0.gguf");
+
+    if glm_weights.exists() {
+        let base = app_dir.join("models/glm_ocr");
+        let _ = std::fs::write(base.join("config.json"), include_str!("../models/glm_ocr/config.json"));
+        let _ = std::fs::write(base.join("tokenizer_config.json"), include_str!("../models/glm_ocr/tokenizer_config.json"));
+    }
+    if privacy_weights.exists() {
+        let base = app_dir.join("models/privacy-filter");
+        let _ = std::fs::write(base.join("config.json"), include_str!("../models/privacy-filter/config.json"));
+        let _ = std::fs::write(base.join("tokenizer_config.json"), include_str!("../models/privacy-filter/tokenizer_config.json"));
+    }
+    if embed_weights.exists() {
+        let base = app_dir.join("models/embeddings");
+        let _ = std::fs::write(base.join("config.json"), include_str!("../models/embeddings/config.json"));
+    }
+
+    // 🚀 이제 가중치 파일 존재 여부만으로 모델 설치 상태를 판단합니다.
+    let glm_exists = glm_weights.exists();
+    let privacy_exists = privacy_weights.exists();
+    let embed_exists = embed_weights.exists();
     let model_status_str = json!({
         "GLM-OCR": glm_exists,
         "Privacy-Filter": privacy_exists,
@@ -1927,6 +1949,39 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     
     // 🚀 컴파일 시 빌드에 language.json 파일을 아예 내장(Embed)시켜버려, 배포 후에도 경로 문제 없이 다국어를 100% 보장합니다.
     let lang_dict_str = include_str!("language.json").to_string();
+
+    // 🚀 [시스템 파일 자동 연결] 모델 구동에 필요한 JSON 설정 파일들을 바이너리에 내장합니다.
+    // 사용자가 무거운 모델 파일(.gguf)만 받아도 즉시 연동되도록 하기 위함입니다.
+    let glm_config = include_str!("../models/glm_ocr/config.json");
+    let glm_tokenizer_config = include_str!("../models/glm_ocr/tokenizer_config.json");
+    let privacy_config = include_str!("../models/privacy-filter/config.json");
+    let privacy_tokenizer_config = include_str!("../models/privacy-filter/tokenizer_config.json");
+    let embed_config = include_str!("../models/embeddings/config.json");
+
+    // 헬퍼 클로저: 특정 모델 폴더에 내장된 JSON 파일들을 자동으로 생성/복원합니다.
+    let ensure_model_configs = |app_dir: &std::path::Path, model_type: &str| {
+        let base = app_dir.join("models").join(match model_type {
+            "GLM-OCR" => "glm_ocr",
+            "Privacy-Filter" => "privacy-filter",
+            "Embedding" => "embeddings",
+            _ => return,
+        });
+        let _ = std::fs::create_dir_all(&base);
+        match model_type {
+            "GLM-OCR" => {
+                let _ = std::fs::write(base.join("config.json"), glm_config);
+                let _ = std::fs::write(base.join("tokenizer_config.json"), glm_tokenizer_config);
+            },
+            "Privacy-Filter" => {
+                let _ = std::fs::write(base.join("config.json"), privacy_config);
+                let _ = std::fs::write(base.join("tokenizer_config.json"), privacy_tokenizer_config);
+            },
+            "Embedding" => {
+                let _ = std::fs::write(base.join("config.json"), embed_config);
+            },
+            _ => (),
+        }
+    };
     
     // OVERLAY_SCRIPT 내의 예측 가능한 전역 변수(window.rpc 등)를 랜덤 생성한 이름으로 동적 치환
     let overlay_script_replaced = OVERLAY_SCRIPT
@@ -2604,24 +2659,45 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             return;
                         }
 
-                        // 🚀 실제 Hugging Face 다운로드 URL 리스트 매핑
+                        // 🚀 [시스템 자동 연결] 다운로드 시작 전, 시스템에 내장된 JSON 설정 파일들을 먼저 폴더에 생성합니다.
+                        // 이제 사용자는 무거운 가중치(.gguf, .safetensors) 파일만 다운로드 받으면 됩니다.
+                        let base_config_dir = app_dir_clone.clone();
+                        let m_name_for_config = model_name.clone();
+                        
+                        // JSON 파일들 복원
+                        let glm_c = include_str!("../models/glm_ocr/config.json");
+                        let glm_t = include_str!("../models/glm_ocr/tokenizer_config.json");
+                        let priv_c = include_str!("../models/privacy-filter/config.json");
+                        let priv_t = include_str!("../models/privacy-filter/tokenizer_config.json");
+                        let emb_c = include_str!("../models/embeddings/config.json");
+
+                        let target_base = base_config_dir.join("models").join(folder_name);
+                        let _ = std::fs::create_dir_all(&target_base);
+                        match m_name_for_config.as_str() {
+                            "GLM-OCR" => {
+                                let _ = std::fs::write(target_base.join("config.json"), glm_c);
+                                let _ = std::fs::write(target_base.join("tokenizer_config.json"), glm_t);
+                            },
+                            "Privacy-Filter" => {
+                                let _ = std::fs::write(target_base.join("config.json"), priv_c);
+                                let _ = std::fs::write(target_base.join("tokenizer_config.json"), priv_t);
+                            },
+                            "Embedding" => {
+                                let _ = std::fs::write(target_base.join("config.json"), emb_c);
+                            },
+                            _ => (),
+                        }
+
+                        // 🚀 실제 Hugging Face 다운로드 URL 리스트 매핑 (가중치 파일만 받도록 최소화)
                         let files_to_download = match model_name.as_str() {
                             "GLM-OCR" => vec![
-                                ("https://huggingface.co/zai-org/GLM-OCR/resolve/main/config.json", "config.json"),
-                                ("https://huggingface.co/zai-org/GLM-OCR/resolve/main/tokenizer.json", "tokenizer.json"),
-                                ("https://huggingface.co/zai-org/GLM-OCR/resolve/main/preprocessor_config.json", "preprocessor_config.json"),
                                 ("https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/GLM-OCR-Q8_0.gguf", "GLM-OCR-Q8_0.gguf"),
                                 ("https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/mmproj-GLM-OCR-Q8_0.gguf", "mmproj-GLM-OCR-Q8_0.gguf"),
                             ],
                             "Privacy-Filter" => vec![
-                                ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/config.json", "config.json"),
-                                ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/tokenizer.json", "tokenizer.json"),
-                                ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/tokenizer_config.json", "tokenizer_config.json"),
                                 ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/model.safetensors", "model.safetensors"),
                             ],
                             "Embedding" => vec![
-                                ("https://huggingface.co/google/embeddinggemma-300m/resolve/main/config.json", "config.json"),
-                                ("https://huggingface.co/google/embeddinggemma-300m/resolve/main/tokenizer.json", "tokenizer.json"),
                                 ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300m-Q4_0.gguf", "embeddinggemma-300m-Q4_0.gguf"),
                             ],
                             _ => vec![]
