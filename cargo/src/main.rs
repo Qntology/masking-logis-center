@@ -2554,6 +2554,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                 } else if payload.starts_with("download_model:") {
                     let model_name = payload["download_model:".len()..].to_string();
                     let page_c = page_clone.clone();
+                    let app_dir_clone = app_dir.clone(); // 🚀 복제본을 생성하여 태스크 안으로 이동시킵니다.
                     
                     // 🚀 비동기 다운로드 태스크 스폰
                     tokio::task::spawn(async move {
@@ -2564,7 +2565,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             _ => "unknown"
                         };
 
-                        let dir_path = app_dir.join("models").join(folder_name);
+                        let dir_path = app_dir_clone.join("models").join(folder_name); // 🚀 복제된 app_dir_clone 사용
                         let _ = std::fs::create_dir_all(&dir_path);
 
                         // 🚀 실제 Hugging Face 다운로드 URL 리스트 매핑
