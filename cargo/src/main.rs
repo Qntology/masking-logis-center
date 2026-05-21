@@ -70,6 +70,8 @@ struct AppConfig {
     default_tab: Option<String>,
     #[serde(default)]
     language: Option<String>,
+    #[serde(default)]
+    custom_tabs: Option<Vec<String>>,
 }
 
 fn load_app_config() -> AppConfig {
@@ -198,6 +200,7 @@ const OVERLAY_SCRIPT: &str = r#"
         searchInputBox.style.fontSize = '13px';
         searchInputBox.oninput = (e) => {
             window.searchQuery = e.target.value.toLowerCase();
+            window.currentPage = 1; // 🚀 검색 시 페이지 초기화
             renderStagedList();
         };
         header.appendChild(searchInputBox);
@@ -224,15 +227,31 @@ const OVERLAY_SCRIPT: &str = r#"
         selectAllCheck.type = 'checkbox';
         selectAllCheck.title = 'Select All';
         selectAllCheck.onclick = (e) => {
-            const checkboxes = log.querySelectorAll('.item-checkbox');
-            checkboxes.forEach(cb => {
-                cb.checked = e.target.checked;
+            // 🚀 DOM(보이는 10개) 기준이 아닌 필터링된 전체 목록(100개 등)을 기준으로 메모리에 추가합니다.
+            const query = window.searchQuery || '';
+            const filtered = stagedItems.filter(i => {
+                if (i.domain !== currentTabFilter) return false;
+                if (!query) return true;
+                const matchTitle = i.title && i.title.toLowerCase().includes(query);
+                const matchContent = i.context && i.context.toLowerCase().includes(query);
+                const matchMask = i.masking && i.masking.toLowerCase().includes(query);
+                return matchTitle || matchContent || matchMask;
+            });
+            
+            filtered.forEach(item => {
                 if (e.target.checked) {
-                    checkedSessionIds.add(cb.dataset.id);
+                    checkedSessionIds.add(item.id);
                 } else {
-                    checkedSessionIds.delete(cb.dataset.id);
+                    checkedSessionIds.delete(item.id);
                 }
             });
+            
+            // 현재 렌더링된 체크박스들의 뷰만 업데이트
+            const checkboxes = log.querySelectorAll('.item-checkbox');
+            checkboxes.forEach(cb => {
+                cb.checked = checkedSessionIds.has(cb.dataset.id);
+            });
+            
             updatePushBtnState();
         };
 
@@ -254,8 +273,8 @@ const OVERLAY_SCRIPT: &str = r#"
         deleteBtn.style.display = 'none'; 
         deleteBtn.onclick = () => {
             if (isProcessing) return;
-            const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
-            const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
+            // 🚀 메모리에서 전체 선택된 ID를 조회합니다.
+            const selectedIds = Array.from(checkedSessionIds);
             
             // 🚀 로컬 상태에 삭제된 ID를 기록하여 focus 이벤트로 인한 좀비 복구를 원천 차단합니다.
             selectedIds.forEach(id => {
@@ -304,9 +323,9 @@ const OVERLAY_SCRIPT: &str = r#"
         pushBtn.disabled = true;
 
         function updatePushBtnState() {
-            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
-            const checkedCount = checkedBoxes.length;
-            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
+            // 🚀 DOM 기준이 아닌 세션(메모리) 기준으로 선택된 전체 ID들을 가져옵니다.
+            const selectedIds = Array.from(checkedSessionIds);
+            const checkedCount = selectedIds.length;
 
             // 🚀 작업 중일 때 Push 버튼을 Cancel 버튼으로 전환합니다.
             if (isProcessing) {
@@ -330,8 +349,18 @@ const OVERLAY_SCRIPT: &str = r#"
             deleteBtn.disabled = false;
             draftBtn.disabled = false;
             
-            const totalCount = log.querySelectorAll('.item-checkbox').length;
-            selectAllCheck.checked = (totalCount > 0 && checkedCount === totalCount);
+            // 전체 선택 체크박스 상태 갱신
+            const query = window.searchQuery || '';
+            const filtered = stagedItems.filter(i => {
+                if (i.domain !== currentTabFilter) return false;
+                if (!query) return true;
+                const matchTitle = i.title && i.title.toLowerCase().includes(query);
+                const matchContent = i.context && i.context.toLowerCase().includes(query);
+                const matchMask = i.masking && i.masking.toLowerCase().includes(query);
+                return matchTitle || matchContent || matchMask;
+            });
+            const isAllChecked = filtered.length > 0 && filtered.every(i => checkedSessionIds.has(i.id));
+            selectAllCheck.checked = isAllChecked;
 
             if (typeof updateSubmitToDrag === 'function') {
                 updateSubmitToDrag();
@@ -371,8 +400,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 return;
             }
             
-            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
-            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
+            const selectedIds = Array.from(checkedSessionIds);
             const draftIds = stagedItems.filter(i => selectedIds.includes(i.id) && i.status !== 'PUSHED').map(i => i.id);
             
             if (draftIds.length === 0) return;
@@ -402,45 +430,269 @@ const OVERLAY_SCRIPT: &str = r#"
         mainLayout.id = 'main-layout';
 
         const aside = document.createElement('aside');
+        aside.style.display = 'flex';
+        aside.style.flexDirection = 'column';
+        aside.style.justifyContent = 'space-between';
+
+        const gnbMenuWrapper = document.createElement('div');
+        gnbMenuWrapper.style.flex = '1';
+        gnbMenuWrapper.style.overflowY = 'auto';
+
         const gnbMenu = document.createElement('div');
         gnbMenu.className = 'gnb-menu';
+        gnbMenuWrapper.appendChild(gnbMenu);
 
-        const tabs = ['COMMERCE', 'LOGISTICS', 'TRADE', 'PROMPT', 'CONFIG'];
-        const defaultTab = (window.default_tab === 'DRAFT' ? 'COMMERCE' : window.default_tab) || 'COMMERCE';
+        const asideBottom = document.createElement('div');
+        asideBottom.style.padding = '10px';
+        asideBottom.style.display = 'flex';
+        asideBottom.style.flexDirection = 'column';
+        asideBottom.style.gap = '5px';
+        asideBottom.style.borderTop = '1px solid #ddd';
+
+        let dynamicTabs = window.custom_tabs || ['COMMERCE', 'LOGISTICS', 'TRADE'];
+        const fixedTabs = ['PROMPT', 'CONFIG'];
+        const defaultTab = (window.default_tab === 'DRAFT' ? dynamicTabs[0] : window.default_tab) || dynamicTabs[0];
         let currentTabFilter = defaultTab;
         
+        let isEditMode = false;
+        let tempDynamicTabs = [];
+        
         let stagedItems = []; 
-        let savedPrompts = []; // 🚀 프롬프트 목록을 관리하기 위한 상태 변수입니다.
-        let deletedSessionIds = new Set(); // 🚀 삭제된 ID를 세션 동안 기억하여 백엔드 처리 지연에 따른 자동 복구를 방지합니다.
-        let checkedSessionIds = new Set(); // 🚀 탭 이동이나 리렌더링 시 체크박스 상태를 유지하기 위한 세션 변수입니다.
+        let savedPrompts = []; 
+        let deletedSessionIds = new Set(); 
+        let checkedSessionIds = new Set(); 
+
+        function updateAsideBottomUI() {
+            asideBottom.replaceChildren();
+            if (isEditMode) {
+                const confirmBtn = document.createElement('button');
+                confirmBtn.textContent = '확인';
+                confirmBtn.style.background = '#28a745';
+                confirmBtn.style.color = '#fff';
+                confirmBtn.style.width = '100%';
+                confirmBtn.style.borderRadius = '4px';
+                confirmBtn.onclick = () => {
+                    // 🚀 기존 탭 이름이 변경되었을 경우, 메모리와 DB의 도메인(Domain)을 일괄 업데이트합니다.
+                    dynamicTabs.forEach((oldTab, idx) => {
+                        const newTab = tempDynamicTabs[idx] ? tempDynamicTabs[idx].trim().toUpperCase() : '';
+                        if (newTab && newTab !== oldTab) {
+                            stagedItems.forEach(item => {
+                                if (item.domain === oldTab) item.domain = newTab;
+                            });
+                            if (window.rpc) {
+                                window.rpc("rename_domain:" + JSON.stringify({ old: oldTab, new: newTab }));
+                            }
+                        }
+                    });
+
+                    dynamicTabs = tempDynamicTabs.map(t => t.trim().toUpperCase()).filter(t => t !== '');
+                    if (dynamicTabs.length === 0) dynamicTabs = ['COMMERCE'];
+                    isEditMode = false;
+                    
+                    if (!dynamicTabs.includes(currentTabFilter) && !fixedTabs.includes(currentTabFilter)) {
+                        currentTabFilter = dynamicTabs[0];
+                    }
+                    
+                    if (window.rpc) {
+                        window.rpc("save_config:" + JSON.stringify({ custom_tabs: dynamicTabs }));
+                    }
+                    updateGnbUI();
+                    renderStagedList();
+                };
+
+                const cancelBtn = document.createElement('button');
+                cancelBtn.textContent = '취소';
+                cancelBtn.style.background = '#6c757d';
+                cancelBtn.style.color = '#fff';
+                cancelBtn.style.width = '100%';
+                cancelBtn.style.borderRadius = '4px';
+                cancelBtn.onclick = () => {
+                    isEditMode = false;
+                    updateGnbUI();
+                };
+
+                asideBottom.appendChild(confirmBtn);
+                asideBottom.appendChild(cancelBtn);
+            } else {
+                const editBtn = document.createElement('button');
+                editBtn.textContent = '메뉴 수정';
+                editBtn.style.background = '#007bff';
+                editBtn.style.color = '#fff';
+                editBtn.style.width = '100%';
+                editBtn.style.borderRadius = '4px';
+                editBtn.onclick = () => {
+                    isEditMode = true;
+                    tempDynamicTabs = [...dynamicTabs];
+                    updateGnbUI();
+                };
+                asideBottom.appendChild(editBtn);
+            }
+        }
 
         function updateGnbUI() {
             gnbMenu.replaceChildren();
 
-            tabs.forEach(t => {
+            const tabsToRender = isEditMode ? tempDynamicTabs : dynamicTabs;
+
+            tabsToRender.forEach((t, index) => {
                 const domainCount = stagedItems.filter(i => i.domain === t).length;
                 const item = document.createElement('div');
-                item.className = 'gnb-item' + (t === currentTabFilter ? ' active' : '');
+                item.className = 'gnb-item' + (!isEditMode && t === currentTabFilter ? ' active' : '');
                 
-                if (t === 'CONFIG') {
-                    item.textContent = t;
+                if (isEditMode) {
+                    item.style.display = 'flex';
+                    item.style.alignItems = 'center';
+                    item.style.gap = '5px';
+                    item.style.padding = '5px 10px';
+
+                    const dragHandle = document.createElement('span');
+                    dragHandle.textContent = '≡';
+                    dragHandle.style.cursor = 'grab';
+                    dragHandle.style.color = '#aaa';
+
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.title = 'Select';
+
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.value = t;
+                    input.style.flex = '1';
+                    input.style.width = '60px';
+                    input.style.fontSize = '12px';
+                    input.style.padding = '2px 4px';
+                    input.oninput = (e) => {
+                        tempDynamicTabs[index] = e.target.value.toUpperCase();
+                    };
+
+                    const delBtn = document.createElement('span');
+                    delBtn.textContent = '🗑️';
+                    delBtn.style.cursor = 'pointer';
+                    delBtn.style.fontSize = '12px';
+                    delBtn.title = '삭제';
+                    delBtn.onclick = () => {
+                        tempDynamicTabs.splice(index, 1);
+                        updateGnbUI();
+                    };
+
+                    item.appendChild(dragHandle);
+                    item.appendChild(cb);
+                    item.appendChild(input);
+                    item.appendChild(delBtn);
                 } else {
                     item.textContent = `${t} (${domainCount})`;
+                    item.onclick = () => {
+                        currentTabFilter = t;
+                        window.currentPage = 1; // 🚀 탭 전환 시 페이지 초기화
+                        updateGnbUI();
+                        renderStagedList();
+                    };
+                    
+                    // 🚀 드래그 앤 드랍으로 아이템을 해당 메뉴(도메인)로 이동시키는 이벤트를 추가합니다.
+                    item.ondragover = (e) => {
+                        if (e.dataTransfer.types.includes('application/x-item-id')) {
+                            e.preventDefault();
+                            item.style.background = '#d0d0d0'; // 드랍 가능 표시 효과
+                        }
+                    };
+                    item.ondragleave = (e) => {
+                        if (e.dataTransfer.types.includes('application/x-item-id')) {
+                            e.preventDefault();
+                            item.style.background = ''; // 효과 원복
+                        }
+                    };
+                    item.ondrop = (e) => {
+                        if (e.dataTransfer.types.includes('application/x-item-id')) {
+                            e.preventDefault();
+                            item.style.background = '';
+                            const droppedId = e.dataTransfer.getData('application/x-item-id');
+                            if (droppedId) {
+                                const targetItem = stagedItems.find(i => i.id === droppedId);
+                                if (targetItem && targetItem.domain !== t) {
+                                    targetItem.domain = t; // 🚀 아이템 도메인 변경
+                                    // 변경된 데이터를 백엔드로 동기화하여 DB에 반영합니다.
+                                    if (window.rpc) {
+                                        window.rpc("sync_data:" + JSON.stringify(targetItem));
+                                    }
+                                    updateGnbUI();
+                                    renderStagedList();
+                                }
+                            }
+                        }
+                    };
                 }
-                
+                gnbMenu.appendChild(item);
+            });
+
+            if (isEditMode) {
+                const addBtn = document.createElement('div');
+                addBtn.className = 'gnb-item';
+                addBtn.textContent = '+ 메뉴 추가';
+                addBtn.style.color = '#007bff';
+                addBtn.style.fontWeight = 'bold';
+                addBtn.style.textAlign = 'center';
+                addBtn.style.padding = '10px';
+                addBtn.onclick = () => {
+                    tempDynamicTabs.push('NEW');
+                    updateGnbUI();
+                };
+                gnbMenu.appendChild(addBtn);
+            }
+
+            const spacer = document.createElement('div');
+            spacer.style.marginTop = '20px';
+            spacer.style.borderTop = '1px solid #ddd';
+            spacer.style.paddingTop = '10px';
+            gnbMenu.appendChild(spacer);
+
+            fixedTabs.forEach(t => {
+                const item = document.createElement('div');
+                item.className = 'gnb-item' + (t === currentTabFilter && !isEditMode ? ' active' : '');
+                item.textContent = t;
                 item.onclick = () => {
+                    if (isEditMode) return;
                     currentTabFilter = t;
+                    window.currentPage = 1; // 🚀 탭 전환 시 페이지 초기화
                     updateGnbUI();
                     renderStagedList();
                 };
+                if (isEditMode) {
+                    item.style.opacity = '0.5';
+                    item.style.cursor = 'not-allowed';
+                }
                 gnbMenu.appendChild(item);
             });
+
+            updateAsideBottomUI();
         }
         updateGnbUI();
-        aside.appendChild(gnbMenu);
+        aside.appendChild(gnbMenuWrapper);
+        aside.appendChild(asideBottom);
 
         const stagedList = document.createElement('div');
         stagedList.className = 'content';
+        
+        // 🚀 인피니티 스크롤 이벤트 부착
+        stagedList.onscroll = () => {
+            if (currentTabFilter === 'CONFIG' || currentTabFilter === 'PROMPT') return;
+            // 끝에 도달했는지 확인 (여유 공간 20px 허용)
+            if (stagedList.scrollTop + stagedList.clientHeight >= stagedList.scrollHeight - 20) {
+                const query = window.searchQuery || '';
+                const filtered = stagedItems.filter(i => {
+                    if (i.domain !== currentTabFilter) return false;
+                    if (!query) return true;
+                    const matchTitle = i.title && i.title.toLowerCase().includes(query);
+                    const matchContent = i.context && i.context.toLowerCase().includes(query);
+                    const matchMask = i.masking && i.masking.toLowerCase().includes(query);
+                    return matchTitle || matchContent || matchMask;
+                });
+                if (window.currentPage * 20 < filtered.length) {
+                    window.currentPage++;
+                    renderStagedList(true); // append 모드로 추가 렌더링
+                }
+            }
+        };
+
         const log = document.createElement('div');
         log.id = 'log';
         // 🚀 생성해둔 listHeader를 리스트 컨테이너 최상단에 붙입니다.
@@ -499,8 +751,7 @@ const OVERLAY_SCRIPT: &str = r#"
         let fileSpinnerInterval = null;
 
         function updateSubmitToDrag() {
-            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
-            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
+            const selectedIds = Array.from(checkedSessionIds);
             const pushedCount = stagedItems.filter(i => selectedIds.includes(i.id) && i.status === 'PUSHED').length;
             
             if (pushedCount > 0) {
@@ -576,8 +827,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 return;
             }
             
-            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
-            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
+            const selectedIds = Array.from(checkedSessionIds);
             
             const promptValue = textInput.value || 'N/A';
             const payload = {
@@ -634,14 +884,17 @@ const OVERLAY_SCRIPT: &str = r#"
         shadow.appendChild(agentContainer);
 
         agentContainer.addEventListener('dragover', (e) => {
+            if (!e.dataTransfer.types.includes('Files')) return; // 🚀 파일 드래그가 아닌 메뉴 이동 등의 텍스트 드래그면 무시합니다.
             e.preventDefault();
             agentContainer.style.border = '2px dashed #007bff';
         });
         agentContainer.addEventListener('dragleave', (e) => {
+            if (!e.dataTransfer.types.includes('Files')) return;
             e.preventDefault();
             agentContainer.style.border = 'none';
         });
         agentContainer.addEventListener('drop', (e) => {
+            if (!e.dataTransfer.types.includes('Files')) return;
             e.preventDefault();
             agentContainer.style.border = 'none';
             
@@ -679,11 +932,16 @@ const OVERLAY_SCRIPT: &str = r#"
             }
         });
 
-        function renderStagedList() {
-            log.replaceChildren(); 
+        window.currentPage = 1;
+        
+        function renderStagedList(append = false) {
+            if (!append) {
+                log.replaceChildren(); 
+            }
 
             // PROMPT 탭인 경우 UI 렌더링
             if (currentTabFilter === 'PROMPT') {
+                if (append) return; // 🚀 PROMPT 탭은 페이징 안함
                 listHeader.style.display = 'none'; // 🚀 Draft, Push 버튼이 포함된 헤더를 숨깁니다.
                 footer.style.display = 'none'; // 하단 입력 영역도 숨깁니다.
 
@@ -749,6 +1007,7 @@ const OVERLAY_SCRIPT: &str = r#"
 
             // CONFIG 탭인 경우 UI를 다르게 렌더링
             if (currentTabFilter === 'CONFIG') {
+                if (append) return; // 🚀 CONFIG 탭은 페이징 안함
                 listHeader.style.display = 'none'; // 🚀 기능 버튼과 체크박스가 묶인 헤더 전체 숨김
                 footer.style.display = 'none';
 
@@ -856,7 +1115,7 @@ const OVERLAY_SCRIPT: &str = r#"
 
             // 🚀 선택된 도메인 탭 검사 및 검색어 필터링 동시 적용
             const query = window.searchQuery || '';
-            const filtered = stagedItems.filter(i => {
+            let filtered = stagedItems.filter(i => {
                 if (i.domain !== currentTabFilter) return false;
                 if (!query) return true;
                 const matchTitle = i.title && i.title.toLowerCase().includes(query);
@@ -864,6 +1123,19 @@ const OVERLAY_SCRIPT: &str = r#"
                 const matchMask = i.masking && i.masking.toLowerCase().includes(query);
                 return matchTitle || matchContent || matchMask;
             });
+            
+            // 🚀 현재 접속한 브라우저의 URL 판별
+            const currentUrl = window.location.href;
+            
+            // 🚀 현재 접속 중인 페이지의 아이템이 항상 최상단에 오도록 정렬 (나머지는 최신순)
+            filtered.sort((a, b) => {
+                const aIsCurrent = (a.url === currentUrl);
+                const bIsCurrent = (b.url === currentUrl);
+                if (aIsCurrent && !bIsCurrent) return -1;
+                if (!aIsCurrent && bIsCurrent) return 1;
+                return b.updated_at - a.updated_at; // 🚀 updated_at 기준으로 변경
+            });
+
             const draftOnlyCount = filtered.filter(i => i.status !== 'PUSHED').length;
             
             // 🚀 작업 중일 때는 Push 상태 메시지를 유지하고, 아닐 때만 카운트를 갱신합니다.
@@ -876,18 +1148,32 @@ const OVERLAY_SCRIPT: &str = r#"
             }
             
             if (filtered.length === 0) {
-                const empty = document.createElement('div');
-                empty.style.color = '#999';
-                empty.style.fontSize = '12px';
-                empty.style.padding = '20px';
-                empty.textContent = 'No records found for ' + currentTabFilter;
-                log.appendChild(empty);
+                if (!append) {
+                    const empty = document.createElement('div');
+                    empty.style.color = '#999';
+                    empty.style.fontSize = '12px';
+                    empty.style.padding = '20px';
+                    empty.textContent = 'No records found for ' + currentTabFilter;
+                    log.appendChild(empty);
+                }
                 selectAllCheck.checked = false;
                 updatePushBtnState();
             } else {
-                filtered.forEach(item => {
+                // 🚀 인피니티 스크롤을 위한 Pagination 처리 (최대 20개 노출)
+                const startIndex = append ? (window.currentPage - 1) * 20 : 0;
+                const endIndex = window.currentPage * 20;
+                const itemsToRender = filtered.slice(startIndex, endIndex);
+
+                itemsToRender.forEach(item => {
                     const wrapper = document.createElement('div');
                     wrapper.className = 'item-row-wrapper';
+                    
+                    // 🚀 아이템을 드래그 앤 드랍으로 이동할 수 있도록 속성 및 이벤트를 추가합니다.
+                    wrapper.draggable = true;
+                    wrapper.ondragstart = (e) => {
+                        e.dataTransfer.setData('application/x-item-id', item.id);
+                        e.dataTransfer.effectAllowed = 'move';
+                    };
                     
                     // 🚀 현재 진행 중인 아이템인 경우 시각적으로 흐리게(Opacity) 처리하고 상호작용을 막습니다.
                     if (processingIds.includes(item.id)) {
@@ -933,9 +1219,18 @@ const OVERLAY_SCRIPT: &str = r#"
                     // 🚀 처리 중인 아이템일 경우 제목 앞에 ⏳(모래시계) 이모지를 추가하여 직관성을 극대화합니다.
                     const processingBadge = processingIds.includes(item.id) ? '⏳ [처리 중...] ' : '';
                     
-                    titleSpan.textContent = `${processingBadge}${statusBadge}[${item.domain}] ${mainTitle}`;
-                    titleSpan.style.fontSize = '13px';
-                    titleSpan.style.fontWeight = 'bold';
+                    // 🚀 현재 접속한 페이지 UI 텍스트 꾸미기
+                    if (item.url === currentUrl) {
+                        titleSpan.textContent = `📌 [현재 페이지] ${processingBadge}${statusBadge}[${item.domain}] ${mainTitle}`;
+                        titleSpan.style.fontSize = '14px';
+                        titleSpan.style.fontWeight = '900';
+                        titleSpan.style.textDecoration = 'underline';
+                    } else {
+                        titleSpan.textContent = `${processingBadge}${statusBadge}[${item.domain}] ${mainTitle}`;
+                        titleSpan.style.fontSize = '13px';
+                        titleSpan.style.fontWeight = 'bold';
+                        titleSpan.style.textDecoration = 'none';
+                    }
                     
                     // 🚀 처리 중인 아이템은 색상을 파란색 계열로 주어 시각적으로 분리합니다.
                     if (processingIds.includes(item.id)) {
@@ -1275,6 +1570,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let app_config = load_app_config();
     let default_tab = app_config.default_tab.unwrap_or_else(|| "DRAFT".to_string()).to_uppercase();
     let default_language = app_config.language.unwrap_or_else(|| "English".to_string());
+    let custom_tabs_str = app_config.custom_tabs.map(|tabs| serde_json::to_string(&tabs).unwrap_or_else(|_| "null".to_string())).unwrap_or_else(|| "null".to_string());
     
     // 🚀 language.json 파일을 읽어서 프론트엔드로 전달합니다. 파일이 없거나 오류 시 빈 객체 전달
     let lang_dict_str = std::fs::read_to_string("src/language.json").unwrap_or_else(|_| "{}".to_string());
@@ -1284,7 +1580,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
         .replace("window.rpc", &format!("window.{}", rpc_binding_name))
         .replace("window.geminiSidebarLoaded", &format!("window.{}", sidebar_var_name));
 
-    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\nwindow.default_language = \"{}\";\nwindow.lang_dict = {};\n{}", is_authenticated, default_tab, default_language, lang_dict_str, overlay_script_replaced);
+    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\nwindow.default_language = \"{}\";\nwindow.custom_tabs = {};\nwindow.lang_dict = {};\n{}", is_authenticated, default_tab, default_language, custom_tabs_str, lang_dict_str, overlay_script_replaced);
     // 페이지가 새로고침되거나 다른 페이지로 이동하더라도 스크립트가 유지되도록 등록합니다.
     let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(&full_script)).await;
     let _ = page.evaluate(full_script).await;
@@ -1808,11 +2104,43 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                 } else if payload.starts_with("save_config:") {
                     let config_data = &payload["save_config:".len()..];
                     let _ = std::fs::create_dir_all("data");
-                    if let Ok(_) = std::fs::write("data/app_config.json", config_data) {
-                        json!({"type": "config_saved"}).to_string()
+                    
+                    let mut current_config: serde_json::Value = std::fs::read_to_string("data/app_config.json")
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_else(|| json!({}));
+                    
+                    if let Ok(new_config) = serde_json::from_str::<serde_json::Value>(config_data) {
+                        if let Some(obj) = current_config.as_object_mut() {
+                            if let Some(new_obj) = new_config.as_object() {
+                                for (k, v) in new_obj {
+                                    obj.insert(k.clone(), v.clone());
+                                }
+                            }
+                        }
+                        if let Ok(_) = std::fs::write("data/app_config.json", current_config.to_string()) {
+                            json!({"type": "config_saved"}).to_string()
+                        } else {
+                            json!({"type": "error", "message": "설정 저장 실패"}).to_string()
+                        }
                     } else {
-                        json!({"type": "error", "message": "설정 저장 실패"}).to_string()
+                        json!({"type": "error", "message": "잘못된 JSON 페이로드"}).to_string()
                     }
+                } else if payload.starts_with("rename_domain:") {
+                    // 🚀 프론트엔드에서 메뉴명을 바꿀 때 발생하며, DB 전체에 저장된 해당 도메인명 기록을 전부 갱신합니다.
+                    let data = &payload["rename_domain:".len()..];
+                    if let Ok(req) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let (Some(old_dom), Some(new_dom)) = (req.get("old").and_then(|v| v.as_str()), req.get("new").and_then(|v| v.as_str())) {
+                            if let Ok(drafts) = db::fetch_drafts().await {
+                                let mut to_update: Vec<_> = drafts.into_iter().filter(|r| r.domain == old_dom).collect();
+                                for record in &mut to_update {
+                                    record.domain = new_dom.to_string();
+                                }
+                                let _ = db::save_records(to_update, None).await;
+                            }
+                        }
+                    }
+                    json!({"type": "domain_renamed"}).to_string()
                 } else if payload.starts_with("save_prompt:") {
                     let prompt_data = &payload["save_prompt:".len()..];
                     let prompt_path = "data/prompts.json";
