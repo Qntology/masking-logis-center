@@ -89,8 +89,6 @@ const OVERLAY_SCRIPT: &str = r#"
         return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
-    // 🚀 복잡하고 실패 확률이 높은 커스텀 파서를 제거하고,
-    // 브라우저가 직접 렌더링된 텍스트만 깔끔하게 추출하는 innerText를 활용합니다.
     function extractVisibleText() {
         return document.body.innerText || document.body.textContent || '';
     }
@@ -140,7 +138,7 @@ const OVERLAY_SCRIPT: &str = r#"
             .btn-push:not(:disabled):hover { background: #0069d9 !important; }
             .btn-delete { background: #dc3545 !important; color: white !important; border-color: #dc3545 !important; }
             .btn-delete:hover { background: #c82333 !important; }
-            .item-row-wrapper { display: flex; flex-direction: column; border-bottom: 1px solid #f0f0f0; }
+            .item-row-wrapper { display: flex; flex-direction: column; border-bottom: 1px solid #f0f0f0; transition: opacity 0.3s ease; }
             .item-row { display: flex; align-items: center; gap: 10px; padding: 8px; cursor: pointer; transition: background 0.2s; }
             .item-row:hover { background: #f9f9f9; }
             .item-row input[type="checkbox"] { cursor: pointer; }
@@ -172,8 +170,9 @@ const OVERLAY_SCRIPT: &str = r#"
         const headerLeft = document.createElement('div');
         headerLeft.className = 'header-left';
 
-        // 🚀 UI가 다시 그려질 때 버튼 텍스트가 덮어씌워지는 것을 막는 핵심 락(Lock) 변수
+        // 🚀 UI 락을 위한 상태 변수들
         let isProcessing = false;
+        let processingIds = []; // 현재 처리(Push) 중인 아이템 ID 목록
 
         // 전체 선택 체크박스
         const selectAllCheck = document.createElement('input');
@@ -201,7 +200,6 @@ const OVERLAY_SCRIPT: &str = r#"
             return ogDesc ? `${ogTitle}\n${ogDesc}` : ogTitle;
         }
 
-        // Delete 버튼 생성 (초기에는 숨김 처리)
         const deleteBtn = document.createElement('button');
         deleteBtn.className = 'btn-delete';
         deleteBtn.textContent = 'Delete';
@@ -213,7 +211,6 @@ const OVERLAY_SCRIPT: &str = r#"
             if (window.rpc) {
                 window.rpc("delete_drafts:" + JSON.stringify(selectedIds));
             }
-            // 선택된 아이템을 UI 데이터 배열에서 즉시 제거하고 화면을 갱신합니다.
             stagedItems = stagedItems.filter(i => !selectedIds.includes(i.id));
             updateGnbUI();
             renderStagedList();
@@ -230,7 +227,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 host: window.location.host,
                 url: window.location.href,
                 title: getPageMeta(), 
-                domain: currentTabFilter, // 현재 GNB 탭의 도메인으로 매핑
+                domain: currentTabFilter,
                 context: extractedText, 
                 status: 'DRAFT',
                 track: '',
@@ -244,14 +241,12 @@ const OVERLAY_SCRIPT: &str = r#"
             }
         };
 
-        // Push 버튼: Privacy Filter 마스킹 후 저장 로직 실행
         const pushBtn = document.createElement('button');
         pushBtn.className = 'btn-push';
         pushBtn.textContent = 'Push (0)';
-        pushBtn.disabled = true; // 초기 상태 비활성화
+        pushBtn.disabled = true;
 
         function updatePushBtnState() {
-            // 🚀 백엔드가 작업 중일 때는 UI 갱신을 멈추고 버튼 비활성화를 유지합니다.
             if (isProcessing) {
                 pushBtn.disabled = true;
                 deleteBtn.disabled = true;
@@ -261,35 +256,28 @@ const OVERLAY_SCRIPT: &str = r#"
 
             const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
             const checkedCount = checkedBoxes.length;
-            
-            // 상태별 개수 카운트
             const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
             const draftCount = stagedItems.filter(i => selectedIds.includes(i.id) && i.status !== 'PUSHED').length;
             
             pushBtn.disabled = (draftCount === 0);
-            pushBtn.textContent = `Push (${draftCount})`; // 완료되지 않은 DRAFT 항목만 Push 카운트에 반영
-            
-            // 체크된 항목이 1개 이상일 경우 삭제 버튼을 노출합니다.
+            pushBtn.textContent = `Push (${draftCount})`;
             deleteBtn.style.display = (checkedCount > 0) ? 'inline-block' : 'none';
             
             const totalCount = log.querySelectorAll('.item-checkbox').length;
             selectAllCheck.checked = (totalCount > 0 && checkedCount === totalCount);
 
-            // 체크박스 상태가 변경될 때 하단(Footer)의 Drag 버튼 상태도 즉시 갱신합니다.
             if (typeof updateSubmitToDrag === 'function') {
                 updateSubmitToDrag();
             }
         }
 
-        // 🚀 스피너 구동 로직을 독립적인 함수로 분리하여 어떤 탭에서든 즉시 실행되게 만듭니다.
         let spinnerInterval = null;
         
         function startPushSpinner() {
-            if (spinnerInterval) return; // 이미 동작 중이면 무시
+            if (spinnerInterval) return;
             pushBtn.disabled = true;
             deleteBtn.disabled = true;
             draftBtn.disabled = true;
-            
             let spinnerIdx = 0;
             const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             spinnerInterval = setInterval(() => {
@@ -315,7 +303,9 @@ const OVERLAY_SCRIPT: &str = r#"
             if (draftIds.length === 0) return;
             
             isProcessing = true;
-            startPushSpinner(); // 스피너 강제 기동
+            processingIds = draftIds; // 🚀 현재 탭에서 누른 즉시 진행 상태 배열에 로컬로 담습니다.
+            renderStagedList();       // 🚀 즉시 흐리게(Opacity) 화면을 다시 그립니다.
+            startPushSpinner(); 
             
             if (window.rpc) {
                 window.rpc("mask_and_push_batch:" + JSON.stringify({ 
@@ -325,7 +315,7 @@ const OVERLAY_SCRIPT: &str = r#"
             }
         };
 
-        actionContainer.appendChild(deleteBtn); // Draft 버튼의 왼쪽에 위치하도록 먼저 append
+        actionContainer.appendChild(deleteBtn);
         actionContainer.appendChild(draftBtn);
         actionContainer.appendChild(pushBtn);
         header.appendChild(actionContainer);
@@ -341,11 +331,11 @@ const OVERLAY_SCRIPT: &str = r#"
         const defaultTab = (window.default_tab === 'DRAFT' ? 'COMMERCE' : window.default_tab) || 'COMMERCE';
         let currentTabFilter = defaultTab;
         
-        let stagedItems = []; // GNB 카운트 계산을 위해 상단으로 이동
+        let stagedItems = []; 
 
         function updateGnbUI() {
             gnbMenu.replaceChildren();
-            titleSpan.textContent = currentTabFilter; // 헤더 타이틀을 현재 활성화된 메뉴로 변경
+            titleSpan.textContent = currentTabFilter; 
 
             tabs.forEach(t => {
                 const domainCount = stagedItems.filter(i => i.domain === t).length;
@@ -378,14 +368,13 @@ const OVERLAY_SCRIPT: &str = r#"
         mainLayout.appendChild(aside);
         mainLayout.appendChild(stagedList);
 
-        // Footer UI 생성 (이미지, 텍스트 입력 폼 및 Drag & Drop Export)
         const footer = document.createElement('footer');
         
         const fileInputWrapper = document.createElement('div');
         fileInputWrapper.style.position = 'relative';
         fileInputWrapper.style.width = '140px';
         fileInputWrapper.style.height = '30px';
-        fileInputWrapper.style.display = 'none'; // 파일 인풋 숨김 처리
+        fileInputWrapper.style.display = 'none';
         fileInputWrapper.style.alignItems = 'center';
         fileInputWrapper.style.overflow = 'hidden';
 
@@ -396,7 +385,6 @@ const OVERLAY_SCRIPT: &str = r#"
         fileInput.style.fontSize = '12px';
         fileInput.style.cursor = 'pointer';
 
-        // 파일 처리 중 보여줄 스피너 영역
         const fileSpinner = document.createElement('div');
         fileSpinner.style.display = 'none';
         fileSpinner.style.position = 'absolute';
@@ -421,19 +409,16 @@ const OVERLAY_SCRIPT: &str = r#"
         const submitBtn = document.createElement('button');
         submitBtn.textContent = 'Submit';
         
-        // 상태 저장용 변수들
         let processedFileContent = '';
         let fileSpinnerInterval = null;
 
-        // 프롬프트, 파일 또는 체크된 항목이 준비되면 Submit을 Drag 버튼으로 전환
         function updateSubmitToDrag() {
             const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
             const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
-            // 완료된(PUSHED) 항목만 Drag 카운트에 반영
             const pushedCount = stagedItems.filter(i => selectedIds.includes(i.id) && i.status === 'PUSHED').length;
             
             if (pushedCount > 0) {
-                submitBtn.textContent = `Drag (${pushedCount})`; // 완료된 카운트 반영
+                submitBtn.textContent = `Drag (${pushedCount})`;
                 submitBtn.draggable = true;
             } else if (processedFileContent !== '' || textInput.value.trim() !== '') {
                 submitBtn.textContent = 'Drag';
@@ -446,12 +431,10 @@ const OVERLAY_SCRIPT: &str = r#"
 
         textInput.oninput = updateSubmitToDrag;
 
-        // 파일 선택 시 스피너 동작 및 백엔드로 처리 요청 (기존 로직 유지하되 UI 숨김상태)
         fileInput.onchange = (e) => {
             const file = e.target.files[0];
             if (!file) return;
 
-            // 🚀 CSV 파일인 경우 무거운 OCR 엔진을 거치지 않고, 텍스트를 바로 파싱하여 Draft 대기열로 밀어넣습니다.
             if (file.name.toLowerCase().endsWith('.csv') || file.type === 'text/csv') {
                 const reader = new FileReader();
                 reader.onload = async (ev) => {
@@ -475,7 +458,7 @@ const OVERLAY_SCRIPT: &str = r#"
                         alert(file.name + " 파일이 " + currentTabFilter + " 대기열에 추가되었습니다.");
                     }
                 };
-                reader.readAsText(file); // OCR용 DataURL이 아닌 순수 텍스트로 읽습니다.
+                reader.readAsText(file);
                 return;
             }
 
@@ -497,7 +480,6 @@ const OVERLAY_SCRIPT: &str = r#"
             reader.readAsDataURL(file);
         };
 
-        // Drag 이벤트 발생 시 선택된 항목들과 텍스트를 파일로 바인딩하여 바탕화면으로 내보내기
         submitBtn.ondragstart = (e) => {
             if (!submitBtn.textContent.startsWith('Drag')) {
                 e.preventDefault();
@@ -505,7 +487,6 @@ const OVERLAY_SCRIPT: &str = r#"
             }
             const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
             const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
-            // 드래그 시에는 완료된(PUSHED) 항목만 추출
             const selectedItems = stagedItems.filter(i => selectedIds.includes(i.id) && i.status === 'PUSHED');
 
             let exportContent = `[Prompt]\n${textInput.value || 'N/A'}\n\n`;
@@ -518,16 +499,10 @@ const OVERLAY_SCRIPT: &str = r#"
                 exportContent += `\n--- ID: ${item.id} ---\n[Domain]: ${item.domain}\n[Title]: ${item.title}\n[Content]:\n${item.masking || item.context}\n`;
             });
 
-            // 🚀 브라우저 보안 정책상 로컬 경로(temp)를 직접 참조할 수는 없으므로,
-            // 메모리 상에서 즉시 File 객체를 생성하여 드래그 이벤트에 주입합니다.
-            // 이렇게 하면 다른 웹 페이지의 파일 업로드/드롭존에서 실제 파일로 인식하게 됩니다.
             const file = new File([exportContent], "export.txt", { type: "text/plain" });
             e.dataTransfer.items.add(file);
-
-            // 기존 일반 텍스트 데이터 유지 (텍스트 입력창 드롭 대비)
             e.dataTransfer.setData('text/plain', exportContent);
 
-            // OS 바탕화면 등 외부로 드롭할 경우를 위해 DownloadURL 방식도 함께 유지
             const utf8Bytes = new TextEncoder().encode(exportContent);
             let binary = '';
             for (let i = 0; i < utf8Bytes.length; i++) {
@@ -543,11 +518,10 @@ const OVERLAY_SCRIPT: &str = r#"
 
         agentContainer.appendChild(header);
         agentContainer.appendChild(mainLayout);
-        agentContainer.appendChild(footer); // 생성한 footer 영역 마운트
+        agentContainer.appendChild(footer);
         shadow.appendChild(style);
         shadow.appendChild(agentContainer);
 
-        // agentContainer 영역에 Drag & Drop 시 Draft Item 추가 로직
         agentContainer.addEventListener('dragover', (e) => {
             e.preventDefault();
             agentContainer.style.border = '2px dashed #007bff';
@@ -571,7 +545,7 @@ const OVERLAY_SCRIPT: &str = r#"
                         host: window.location.host,
                         url: file.name,
                         title: `[File] ${file.name}`, 
-                        domain: currentTabFilter, // 현재 활성화된 도메인으로 등록
+                        domain: currentTabFilter,
                         context: dataUrl, 
                         status: 'DRAFT',
                         track: '',
@@ -589,11 +563,9 @@ const OVERLAY_SCRIPT: &str = r#"
 
         function renderStagedList() {
             log.replaceChildren(); 
-            // 현재 선택된 도메인에 해당하는 항목만 엄격하게 필터링
             const filtered = stagedItems.filter(i => i.domain === currentTabFilter);
             const draftOnlyCount = filtered.filter(i => i.status !== 'PUSHED').length;
             
-            // 🚀 백엔드 처리 중이 아닐 때만 텍스트를 Draft 형태로 갱신합니다.
             if (!isProcessing) {
                 draftBtn.textContent = `Draft (${draftOnlyCount})`;
             }
@@ -611,6 +583,12 @@ const OVERLAY_SCRIPT: &str = r#"
                 filtered.forEach(item => {
                     const wrapper = document.createElement('div');
                     wrapper.className = 'item-row-wrapper';
+                    
+                    // 🚀 현재 진행 중인 아이템인 경우 시각적으로 흐리게(Opacity) 처리하고 상호작용을 막습니다.
+                    if (processingIds.includes(item.id)) {
+                        wrapper.style.opacity = '0.4';
+                        wrapper.style.pointerEvents = 'none';
+                    }
 
                     const row = document.createElement('div');
                     row.className = 'item-row';
@@ -620,7 +598,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     cb.className = 'item-checkbox';
                     cb.dataset.id = item.id;
                     cb.onclick = (e) => {
-                        e.stopPropagation(); // 🚀 체크박스 클릭 시 아코디언이 열리는 것을 방지합니다.
+                        e.stopPropagation();
                         updatePushBtnState();
                     };
 
@@ -636,10 +614,23 @@ const OVERLAY_SCRIPT: &str = r#"
 
                     const titleSpan = document.createElement('span');
                     const statusBadge = item.status === 'PUSHED' ? '✅ [PUSHED] ' : '';
-                    titleSpan.textContent = `${statusBadge}[${item.domain}] ${mainTitle}`;
+                    
+                    // 🚀 처리 중인 아이템일 경우 제목 앞에 ⏳(모래시계) 이모지를 추가하여 직관성을 극대화합니다.
+                    const processingBadge = processingIds.includes(item.id) ? '⏳ [처리 중...] ' : '';
+                    
+                    titleSpan.textContent = `${processingBadge}${statusBadge}[${item.domain}] ${mainTitle}`;
                     titleSpan.style.fontSize = '13px';
                     titleSpan.style.fontWeight = 'bold';
-                    titleSpan.style.color = item.status === 'PUSHED' ? '#28a745' : '#000';
+                    
+                    // 🚀 처리 중인 아이템은 색상을 파란색 계열로 주어 시각적으로 분리합니다.
+                    if (processingIds.includes(item.id)) {
+                        titleSpan.style.color = '#007bff';
+                    } else if (item.status === 'PUSHED') {
+                        titleSpan.style.color = '#28a745';
+                    } else {
+                        titleSpan.style.color = '#000';
+                    }
+                    
                     titleSpan.style.whiteSpace = 'nowrap';
                     titleSpan.style.overflow = 'hidden';
                     titleSpan.style.textOverflow = 'ellipsis';
@@ -656,12 +647,10 @@ const OVERLAY_SCRIPT: &str = r#"
                         textContainer.appendChild(descSpan);
                     }
 
-                    // 🚀 전처리 결과를 보여줄 아코디언 상세 뷰를 생성합니다.
                     const detailView = document.createElement('div');
                     detailView.className = 'item-detail';
                     detailView.textContent = item.masking || item.context || '전처리된 텍스트 결과가 없습니다.';
 
-                    // 🚀 row 클릭 시 아코디언 토글 이벤트를 바인딩합니다.
                     row.onclick = () => detailView.classList.toggle('open');
 
                     row.appendChild(cb);
@@ -675,7 +664,6 @@ const OVERLAY_SCRIPT: &str = r#"
         }
 
         async function autoExtract() {
-            // 🚀 SPA(React/Vue 등) 웹페이지의 DOM 렌더링이 완료될 시간을 주기 위해 1.5초 지연 후 텍스트를 추출합니다.
             setTimeout(async () => {
                 const pageId = await generatePageId(window.location.href);
                 const extractedText = extractVisibleText();
@@ -700,58 +688,67 @@ const OVERLAY_SCRIPT: &str = r#"
             if (e.key === 'Escape') agentContainer.classList.toggle('open');
         });
 
-        // 🚀 유저가 다른 탭에 있다가 화면으로 돌아올 때 즉시 최신 진행 상태를 물어보고 동기화합니다.
-        window.addEventListener('focus', () => {
+        function syncStateOnReturn() {
             if (window.rpc) {
                 window.rpc("fetch_drafts");
                 window.rpc("check_progress");
             }
+        }
+        
+        window.addEventListener('focus', syncStateOnReturn);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') syncStateOnReturn();
         });
 
         window.addEventListener('rpc_response', (e) => {
             try {
-                // 백엔드에서 넘겨준 문자열 JSON을 파싱
                 const data = typeof e.detail === 'string' ? JSON.parse(e.detail) : e.detail;
                 
-                // 데이터 불러오기 응답인 경우
                 if (data.type === 'drafts_loaded') {
                     stagedItems = data.payload;
-                    updateGnbUI(); // 데이터가 로드된 후 GNB 메뉴의 카운트 갱신
+                    updateGnbUI(); 
                     renderStagedList();
                     return;
                 } 
-                // Draft 저장(sync) 성공 응답인 경우
                 else if (data.type === 'sync_success') {
-                    // 동일한 ID가 있으면 제거 후 최신 데이터 추가
                     stagedItems = stagedItems.filter(i => i.id !== data.payload.id);
                     stagedItems.push(data.payload);
-                    updateGnbUI(); // 데이터 동기화 후 GNB 메뉴의 카운트 갱신
+                    updateGnbUI();
                     renderStagedList();
                     return;
                 }
-                // 🚀 진행 상황 (퍼센트) 실시간 업데이트 응답인 경우
+                // 🚀 진행 상황 업데이트 시 처리 중인 ID 배열을 동기화하여 현재/다른 탭 모두 흐리게 렌더링되도록 합니다.
                 else if (data.type === 'push_progress') {
+                    let needsRender = false;
                     if (!isProcessing) {
-                        isProcessing = true; // 강제 락 활성화
-                        startPushSpinner(); // 다른 탭에서도 즉시 스피너 가동
+                        isProcessing = true; 
+                        startPushSpinner(); 
+                        needsRender = true;
+                    }
+                    if (data.payload.processing_ids && JSON.stringify(processingIds) !== JSON.stringify(data.payload.processing_ids)) {
+                        processingIds = data.payload.processing_ids;
+                        needsRender = true;
+                    }
+                    if (needsRender) {
+                        renderStagedList(); // 변경점이 있으면 즉시 렌더링하여 타 탭과 상태 일치
                     }
                     draftBtn.textContent = `Draft (${data.payload.item_display}/${data.payload.total_items}) ${data.payload.percent}%...`;
-                    updatePushBtnState(); // 버튼 비활성화 갱신
+                    updatePushBtnState(); 
                     return;
                 }
-                // 🚀 새로고침/포커스 시 백엔드가 작업 중이지 않음을 확인한 경우
                 else if (data.type === 'push_idle') {
                     if (isProcessing) {
                         isProcessing = false;
+                        processingIds = []; // 🚀 작업이 끝난 경우 진행 상태 배열 비움
                         stopPushSpinner();
                         updatePushBtnState();
                         renderStagedList();
                     }
                     return;
                 }
-                // 마스킹 및 Push 대기열 작업 완료 응답인 경우
                 else if (data.type === 'push_success') {
-                    isProcessing = false; // 작업 완료 시 락 해제
+                    isProcessing = false; 
+                    processingIds = []; // 🚀 성공 시 배열 비움
                     stopPushSpinner();
                     deleteBtn.disabled = false;
                     draftBtn.disabled = false;
@@ -759,14 +756,12 @@ const OVERLAY_SCRIPT: &str = r#"
                     const updatedItems = data.payload || [];
                     const updatedIds = updatedItems.map(i => i.id);
                     
-                    // 삭제하지 않고 최신(마스킹 및 벡터화 완료) 데이터로 교체하여 목록 유지
                     stagedItems = stagedItems.filter(i => !updatedIds.includes(i.id));
                     stagedItems.push(...updatedItems);
                     
                     updateGnbUI();
                     renderStagedList();
 
-                    // 성공 시스템 로그
                     const div = document.createElement('div');
                     div.className = 'system';
                     div.style.padding = '10px';
@@ -777,7 +772,6 @@ const OVERLAY_SCRIPT: &str = r#"
                     div.scrollIntoView({ behavior: 'smooth', block: 'end' });
                     return;
                 }
-                // 파일 처리 (OCR + Masking) 완료 응답인 경우
                 else if (data.type === 'file_processed') {
                     if (fileSpinnerInterval) clearInterval(fileSpinnerInterval);
                     fileSpinner.textContent = 'Done!';
@@ -799,9 +793,9 @@ const OVERLAY_SCRIPT: &str = r#"
                     div.scrollIntoView({ behavior: 'smooth', block: 'end' });
                     return;
                 }
-                // 프로세스 중 에러가 발생한 경우
                 else if (data.type === 'error') {
-                    isProcessing = false; // 에러 시 락 해제
+                    isProcessing = false; 
+                    processingIds = []; // 🚀 에러 발생 시 배열 비움
                     stopPushSpinner();
                     if (fileSpinnerInterval) {
                         clearInterval(fileSpinnerInterval);
@@ -810,8 +804,8 @@ const OVERLAY_SCRIPT: &str = r#"
                     }
                     deleteBtn.disabled = false;
                     draftBtn.disabled = false;
-                    updatePushBtnState(); // 버튼 텍스트와 상태를 원래대로 원복
-                    renderStagedList(); // 퍼센트 텍스트로 변한 버튼을 다시 "Draft (N)" 형태로 롤백합니다.
+                    updatePushBtnState(); 
+                    renderStagedList(); 
                     
                     const div = document.createElement('div');
                     div.className = 'system';
@@ -825,10 +819,8 @@ const OVERLAY_SCRIPT: &str = r#"
                     return;
                 }
             } catch (err) {
-                // JSON 파싱 실패시 일반 시스템 로그로 처리
             }
             
-            // 기타 오류 및 시스템 메시지 출력용
             const div = document.createElement('div');
             div.className = 'system';
             div.style.padding = '10px';
@@ -841,7 +833,6 @@ const OVERLAY_SCRIPT: &str = r#"
 
         autoExtract();
         
-        // 🚀 새로고침/새 탭 오픈 시 데이터를 불러오고, 백엔드에 진행 중인 작업이 있는지(check_progress) 확인합니다.
         setTimeout(() => {
             if (window.rpc) {
                 window.rpc("fetch_drafts");
@@ -977,6 +968,15 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 let total_steps = total_items * 3;
                                 let mut current_step = 0;
 
+                                // 🚀 [Fix] 작업 시작 즉시 전역 상태를 0%로 잠가서, 긴 OCR 추론 중에 탭을 전환해도 상태가 풀리지 않게 방어합니다.
+                                {
+                                    // 🚀 진행 중인 아이템 ID 목록(processing_ids)을 함께 브로드캐스트하여 프론트엔드에서 흐리게(Opacity) 처리할 수 있도록 합니다.
+                                    let initial_payload = json!({"item_display": 1, "total_items": total_items, "percent": 0, "processing_ids": id_strings.clone()});
+                                    *GLOBAL_PROGRESS.lock().unwrap() = Some(initial_payload.clone());
+                                    let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": initial_payload})));
+                                    if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
+                                }
+
                                 // ★ Phase 0: OCR 일괄 처리 및 VRAM 해제
                                 let needs_ocr = target_records.iter().any(|r| r.context.starts_with("data:image/") || r.context.starts_with("data:application/pdf"));
                                 
@@ -1063,7 +1063,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         // 🚀 실시간 퍼센트 전송 및 브로드캐스트
                                         current_step += 1;
                                         let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent});
+                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
                                         *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                         let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
                                         if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
@@ -1119,7 +1119,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         // 🚀 실시간 퍼센트 전송 및 브로드캐스트
                                         current_step += 1;
                                         let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent});
+                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
                                         *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                         let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
                                         if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
@@ -1167,7 +1167,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             // 🚀 실시간 퍼센트 전송 및 브로드캐스트
                                             current_step += 1;
                                             let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                            let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent});
+                                            let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
                                             *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                             let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
                                             if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
@@ -1185,7 +1185,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         }
                                         current_step += total_items;
                                         let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let payload = json!({"item_display": total_items, "total_items": total_items, "percent": percent});
+                                        let payload = json!({"item_display": total_items, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
                                         *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                         let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
                                         if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
