@@ -10,6 +10,7 @@ lazy_static! {
     static ref OCR_MODEL: Mutex<Option<GlmOcrGenerateModel>> = Mutex::new(None);
     static ref PRIVACY_MANAGER: Mutex<Option<gemini_gui_lib::privacy_filter::masking::PrivacyManager>> = Mutex::new(None);
     static ref EMBEDDING_MODEL: Mutex<Option<gemini_gui_lib::embedding::EmbeddingModel>> = Mutex::new(None);
+    static ref GLOBAL_PROGRESS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 }
 
 // Simplified stub for chat completion
@@ -171,6 +172,9 @@ const OVERLAY_SCRIPT: &str = r#"
         const headerLeft = document.createElement('div');
         headerLeft.className = 'header-left';
 
+        // 🚀 UI가 다시 그려질 때 버튼 텍스트가 덮어씌워지는 것을 막는 핵심 락(Lock) 변수
+        let isProcessing = false;
+
         // 전체 선택 체크박스
         const selectAllCheck = document.createElement('input');
         selectAllCheck.type = 'checkbox';
@@ -203,6 +207,7 @@ const OVERLAY_SCRIPT: &str = r#"
         deleteBtn.textContent = 'Delete';
         deleteBtn.style.display = 'none'; 
         deleteBtn.onclick = () => {
+            if (isProcessing) return;
             const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
             const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
             if (window.rpc) {
@@ -217,6 +222,7 @@ const OVERLAY_SCRIPT: &str = r#"
         const draftBtn = document.createElement('button');
         draftBtn.textContent = 'Draft (0)';
         draftBtn.onclick = async () => {
+            if (isProcessing) return;
             const pageId = await generatePageId(window.location.href);
             const extractedText = extractVisibleText();
             const item = { 
@@ -245,6 +251,14 @@ const OVERLAY_SCRIPT: &str = r#"
         pushBtn.disabled = true; // 초기 상태 비활성화
 
         function updatePushBtnState() {
+            // 🚀 백엔드가 작업 중일 때는 UI 갱신을 멈추고 버튼 비활성화를 유지합니다.
+            if (isProcessing) {
+                pushBtn.disabled = true;
+                deleteBtn.disabled = true;
+                draftBtn.disabled = true;
+                return;
+            }
+
             const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
             const checkedCount = checkedBoxes.length;
             
@@ -270,6 +284,9 @@ const OVERLAY_SCRIPT: &str = r#"
         let spinnerInterval = null;
 
         pushBtn.onclick = async () => {
+            // 🚀 중복 실행을 막기 위한 락 설정
+            if (isProcessing) return;
+            
             const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
             const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
             // Push는 아직 처리되지 않은 항목만 추려서 백엔드로 전송
@@ -277,7 +294,7 @@ const OVERLAY_SCRIPT: &str = r#"
             
             if (draftIds.length === 0) return;
             
-            // 전송 중 중복 클릭 방지 및 스피너 시작
+            isProcessing = true; // 락 활성화
             pushBtn.disabled = true;
             deleteBtn.disabled = true;
             draftBtn.disabled = true;
@@ -565,7 +582,11 @@ const OVERLAY_SCRIPT: &str = r#"
             // 현재 선택된 도메인에 해당하는 항목만 엄격하게 필터링
             const filtered = stagedItems.filter(i => i.domain === currentTabFilter);
             const draftOnlyCount = filtered.filter(i => i.status !== 'PUSHED').length;
-            draftBtn.textContent = `Draft (${draftOnlyCount})`; // 순수 Draft 카운트만 갱신
+            
+            // 🚀 백엔드 처리 중이 아닐 때만 텍스트를 Draft 형태로 갱신합니다.
+            if (!isProcessing) {
+                draftBtn.textContent = `Draft (${draftOnlyCount})`;
+            }
             
             if (filtered.length === 0) {
                 const empty = document.createElement('div');
@@ -692,11 +713,23 @@ const OVERLAY_SCRIPT: &str = r#"
                 }
                 // 🚀 진행 상황 (퍼센트) 실시간 업데이트 응답인 경우
                 else if (data.type === 'push_progress') {
+                    isProcessing = true; // 강제 락 활성화
                     draftBtn.textContent = `Draft (${data.payload.item_display}/${data.payload.total_items}) ${data.payload.percent}%...`;
+                    updatePushBtnState(); // 버튼 비활성화 갱신
+                    return;
+                }
+                // 🚀 새로고침 시 백엔드가 작업 중이지 않음을 확인한 경우
+                else if (data.type === 'push_idle') {
+                    if (isProcessing) {
+                        isProcessing = false;
+                        updatePushBtnState();
+                        renderStagedList();
+                    }
                     return;
                 }
                 // 마스킹 및 Push 대기열 작업 완료 응답인 경우
                 else if (data.type === 'push_success') {
+                    isProcessing = false; // 작업 완료 시 락 해제
                     if (spinnerInterval) clearInterval(spinnerInterval);
                     deleteBtn.disabled = false;
                     draftBtn.disabled = false;
@@ -746,6 +779,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 }
                 // 프로세스 중 에러가 발생한 경우
                 else if (data.type === 'error') {
+                    isProcessing = false; // 에러 시 락 해제
                     if (spinnerInterval) clearInterval(spinnerInterval);
                     if (fileSpinnerInterval) {
                         clearInterval(fileSpinnerInterval);
@@ -755,7 +789,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     deleteBtn.disabled = false;
                     draftBtn.disabled = false;
                     updatePushBtnState(); // 버튼 텍스트와 상태를 원래대로 원복
-                    renderStagedList(); // 🚀 퍼센트 텍스트로 변한 버튼을 다시 "Draft (N)" 형태로 롤백합니다.
+                    renderStagedList(); // 퍼센트 텍스트로 변한 버튼을 다시 "Draft (N)" 형태로 롤백합니다.
                     
                     const div = document.createElement('div');
                     div.className = 'system';
@@ -785,10 +819,11 @@ const OVERLAY_SCRIPT: &str = r#"
 
         autoExtract();
         
-        // 새로고침 시 저장된 Draft 데이터를 LanceDB에서 불러옵니다.
+        // 🚀 새로고침/새 탭 오픈 시 데이터를 불러오고, 백엔드에 진행 중인 작업이 있는지(check_progress) 확인합니다.
         setTimeout(() => {
             if (window.rpc) {
                 window.rpc("fetch_drafts");
+                window.rpc("check_progress");
             }
         }, 300);
     }
@@ -1003,11 +1038,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             }
                                         }
                                         
-                                        // 🚀 실시간 퍼센트 전송 (await를 위해 락 스코프 밖에서 실행)
+                                        // 🚀 실시간 퍼센트 전송 및 브로드캐스트
                                         current_step += 1;
                                         let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": {"item_display": idx + 1, "total_items": total_items, "percent": percent}})));
-                                        let _ = page_clone.evaluate(script).await;
+                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent});
+                                        *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                        if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
                                     }
 
                                     {
@@ -1057,11 +1094,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
                                         }
 
-                                        // 🚀 실시간 퍼센트 전송
+                                        // 🚀 실시간 퍼센트 전송 및 브로드캐스트
                                         current_step += 1;
                                         let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": {"item_display": idx + 1, "total_items": total_items, "percent": percent}})));
-                                        let _ = page_clone.evaluate(script).await;
+                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent});
+                                        *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                        if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
                                     }
                                     
                                     {
@@ -1103,11 +1142,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 }
                                             }
                                             
-                                            // 🚀 실시간 퍼센트 전송
+                                            // 🚀 실시간 퍼센트 전송 및 브로드캐스트
                                             current_step += 1;
                                             let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": {"item_display": idx + 1, "total_items": total_items, "percent": percent}})));
-                                            let _ = page_clone.evaluate(script).await;
+                                            let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent});
+                                            *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                            if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
                                         }
                                         
                                         {
@@ -1122,12 +1163,15 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         }
                                         current_step += total_items;
                                         let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": {"item_display": total_items, "total_items": total_items, "percent": percent}})));
-                                        let _ = page_clone.evaluate(script).await;
+                                        let payload = json!({"item_display": total_items, "total_items": total_items, "percent": percent});
+                                        *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                        if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
                                     }
                                 }
 
                                 // DB 갱신 처리
+                                *GLOBAL_PROGRESS.lock().unwrap() = None; // 🚀 작업 완료 시 전역 진행률을 안전하게 초기화합니다.
                                 if let Some(err_msg) = has_error {
                                     json!({"type": "error", "message": err_msg}).to_string()
                                 } else {
@@ -1244,10 +1288,18 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     }
                 } else if payload.starts_with("gemini_chat:") {
                     "[System] Gemini 서비스 비활성화됨".to_string()
+                } else if payload == "check_progress" {
+                    if let Some(progress) = GLOBAL_PROGRESS.lock().unwrap().clone() {
+                        json!({"type": "push_progress", "payload": progress}).to_string()
+                    } else {
+                        json!({"type": "push_idle"}).to_string()
+                    }
                 } else { "Unknown command".to_string() };
 
                 let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(response));
-                let _ = page_clone.evaluate(script).await;
+                if let Ok(pages) = _browser_clone.pages().await {
+                    for p in pages { let _ = p.evaluate(script.clone()).await; }
+                }
             }
         }
     });
