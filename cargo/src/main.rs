@@ -185,14 +185,39 @@ const OVERLAY_SCRIPT: &str = r#"
         const agentContainer = document.createElement('div');
         agentContainer.id = 'agent-container';
         
+        // 🚀 1. 헤더 영역을 검색창으로 변경
         const header = document.createElement('header');
-        const headerLeft = document.createElement('div');
-        headerLeft.className = 'header-left';
+        window.searchQuery = ''; // 검색어 상태 저장
+        const searchInputBox = document.createElement('input');
+        searchInputBox.type = 'text';
+        searchInputBox.placeholder = 'Search keyword...';
+        searchInputBox.style.width = '100%';
+        searchInputBox.style.padding = '8px 12px';
+        searchInputBox.style.border = '1px solid #ccc';
+        searchInputBox.style.borderRadius = '4px';
+        searchInputBox.style.fontSize = '13px';
+        searchInputBox.oninput = (e) => {
+            window.searchQuery = e.target.value.toLowerCase();
+            renderStagedList();
+        };
+        header.appendChild(searchInputBox);
 
         // 🚀 UI 락을 위한 상태 변수들
         let isProcessing = false;
         let processingIds = []; // 현재 처리(Push) 중인 아이템 ID 목록
         let pushStartTime = 0; // 🚀 Race Condition 방지를 위한 Push 시작 시간 기록
+
+        // 🚀 2. 리스트 상단으로 배치될 List Header 생성
+        const listHeader = document.createElement('div');
+        listHeader.style.display = 'flex';
+        listHeader.style.justifyContent = 'space-between';
+        listHeader.style.alignItems = 'center';
+        listHeader.style.paddingBottom = '10px';
+        listHeader.style.borderBottom = '1px solid #eee';
+        listHeader.style.marginBottom = '10px';
+
+        const listHeaderLeft = document.createElement('div');
+        listHeaderLeft.className = 'header-left';
 
         // 전체 선택 체크박스
         const selectAllCheck = document.createElement('input');
@@ -202,7 +227,6 @@ const OVERLAY_SCRIPT: &str = r#"
             const checkboxes = log.querySelectorAll('.item-checkbox');
             checkboxes.forEach(cb => {
                 cb.checked = e.target.checked;
-                // 🚀 화면 갱신 시 상태를 잃지 않도록 메모리에도 동기화합니다.
                 if (e.target.checked) {
                     checkedSessionIds.add(cb.dataset.id);
                 } else {
@@ -212,12 +236,8 @@ const OVERLAY_SCRIPT: &str = r#"
             updatePushBtnState();
         };
 
-        const titleSpan = document.createElement('span');
-        titleSpan.textContent = 'COMMERCE'; // 초기화 (이후 updateGnbUI에서 갱신됨)
-        
-        headerLeft.appendChild(selectAllCheck);
-        headerLeft.appendChild(titleSpan);
-        header.appendChild(headerLeft);
+        listHeaderLeft.appendChild(selectAllCheck);
+        listHeader.appendChild(listHeaderLeft);
 
         const actionContainer = document.createElement('div');
         actionContainer.className = 'header-actions';
@@ -375,7 +395,8 @@ const OVERLAY_SCRIPT: &str = r#"
         actionContainer.appendChild(deleteBtn);
         actionContainer.appendChild(draftBtn);
         actionContainer.appendChild(pushBtn);
-        header.appendChild(actionContainer);
+        // 🚀 기능 버튼들을 header 대신 새로 만든 listHeader에 배치합니다.
+        listHeader.appendChild(actionContainer);
 
         const mainLayout = document.createElement('div');
         mainLayout.id = 'main-layout';
@@ -384,17 +405,17 @@ const OVERLAY_SCRIPT: &str = r#"
         const gnbMenu = document.createElement('div');
         gnbMenu.className = 'gnb-menu';
 
-        const tabs = ['COMMERCE', 'LOGISTICS', 'TRADE', 'CONFIG'];
+        const tabs = ['COMMERCE', 'LOGISTICS', 'TRADE', 'PROMPT', 'CONFIG'];
         const defaultTab = (window.default_tab === 'DRAFT' ? 'COMMERCE' : window.default_tab) || 'COMMERCE';
         let currentTabFilter = defaultTab;
         
         let stagedItems = []; 
+        let savedPrompts = []; // 🚀 프롬프트 목록을 관리하기 위한 상태 변수입니다.
         let deletedSessionIds = new Set(); // 🚀 삭제된 ID를 세션 동안 기억하여 백엔드 처리 지연에 따른 자동 복구를 방지합니다.
         let checkedSessionIds = new Set(); // 🚀 탭 이동이나 리렌더링 시 체크박스 상태를 유지하기 위한 세션 변수입니다.
 
         function updateGnbUI() {
             gnbMenu.replaceChildren();
-            titleSpan.textContent = currentTabFilter; 
 
             tabs.forEach(t => {
                 const domainCount = stagedItems.filter(i => i.domain === t).length;
@@ -422,6 +443,8 @@ const OVERLAY_SCRIPT: &str = r#"
         stagedList.className = 'content';
         const log = document.createElement('div');
         log.id = 'log';
+        // 🚀 생성해둔 listHeader를 리스트 컨테이너 최상단에 붙입니다.
+        stagedList.appendChild(listHeader);
         stagedList.appendChild(log);
 
         mainLayout.appendChild(aside);
@@ -464,6 +487,10 @@ const OVERLAY_SCRIPT: &str = r#"
         const textInput = document.createElement('input');
         textInput.type = 'text';
         textInput.placeholder = '프롬프트 텍스트를 입력하세요...';
+        textInput.setAttribute('list', 'prompt-list'); // 🚀 datalist 연결
+
+        const promptDatalist = document.createElement('datalist');
+        promptDatalist.id = 'prompt-list';
         
         const submitBtn = document.createElement('button');
         submitBtn.textContent = 'Submit';
@@ -552,12 +579,18 @@ const OVERLAY_SCRIPT: &str = r#"
             const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
             const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
             
+            const promptValue = textInput.value || 'N/A';
             const payload = {
-                prompt: textInput.value || 'N/A',
+                prompt: promptValue,
                 processed_file: processedFileContent || '',
                 ids: selectedIds
             };
+            
             if (window.rpc) {
+                // 🚀 드래그 시작 시 프롬프트를 DB(JSON)에 저장하도록 RPC 호출
+                if (textInput.value.trim() !== '') {
+                    window.rpc("save_prompt:" + textInput.value.trim());
+                }
                 window.rpc("export_to_file:" + JSON.stringify(payload));
             }
 
@@ -591,6 +624,7 @@ const OVERLAY_SCRIPT: &str = r#"
 
         footer.appendChild(fileInputWrapper);
         footer.appendChild(textInput);
+        footer.appendChild(promptDatalist); // 🚀 datalist 추가
         footer.appendChild(submitBtn);
 
         agentContainer.appendChild(header);
@@ -648,17 +682,88 @@ const OVERLAY_SCRIPT: &str = r#"
         function renderStagedList() {
             log.replaceChildren(); 
 
+            // PROMPT 탭인 경우 UI 렌더링
+            if (currentTabFilter === 'PROMPT') {
+                listHeader.style.display = 'none'; // 🚀 Draft, Push 버튼이 포함된 헤더를 숨깁니다.
+                footer.style.display = 'none'; // 하단 입력 영역도 숨깁니다.
+
+                const promptWrapper = document.createElement('div');
+                promptWrapper.style.padding = '20px';
+
+                const promptTitle = document.createElement('h3');
+                promptTitle.textContent = '저장된 프롬프트 관리';
+                promptTitle.style.marginTop = '0';
+                promptTitle.style.fontSize = '14px';
+                promptWrapper.appendChild(promptTitle);
+
+                if (savedPrompts.length === 0) {
+                    const emptyMsg = document.createElement('div');
+                    emptyMsg.style.color = '#999';
+                    emptyMsg.style.fontSize = '12px';
+                    emptyMsg.style.marginTop = '20px';
+                    emptyMsg.textContent = '저장된 프롬프트가 없습니다.';
+                    promptWrapper.appendChild(emptyMsg);
+                } else {
+                    savedPrompts.forEach(p => {
+                        const row = document.createElement('div');
+                        row.style.display = 'flex';
+                        row.style.justifyContent = 'space-between';
+                        row.style.alignItems = 'center';
+                        row.style.padding = '10px 0';
+                        row.style.borderBottom = '1px solid #eee';
+                        
+                        const textSpan = document.createElement('span');
+                        textSpan.textContent = p;
+                        textSpan.style.fontSize = '13px';
+                        textSpan.style.color = '#333';
+                        textSpan.style.flex = '1';
+
+                        const delBtn = document.createElement('button');
+                        delBtn.textContent = '삭제';
+                        delBtn.style.background = '#dc3545';
+                        delBtn.style.color = 'white';
+                        delBtn.style.border = 'none';
+                        delBtn.style.borderRadius = '3px';
+                        delBtn.style.padding = '5px 10px';
+                        delBtn.style.fontSize = '12px';
+                        delBtn.style.cursor = 'pointer';
+                        
+                        delBtn.onmouseover = () => delBtn.style.background = '#c82333';
+                        delBtn.onmouseout = () => delBtn.style.background = '#dc3545';
+                        
+                        delBtn.onclick = () => {
+                            if (confirm('이 프롬프트를 삭제하시겠습니까?')) {
+                                if (window.rpc) window.rpc("delete_prompt:" + p);
+                            }
+                        };
+
+                        row.appendChild(textSpan);
+                        row.appendChild(delBtn);
+                        promptWrapper.appendChild(row);
+                    });
+                }
+
+                log.appendChild(promptWrapper);
+                return;
+            }
+
             // CONFIG 탭인 경우 UI를 다르게 렌더링
             if (currentTabFilter === 'CONFIG') {
-                actionContainer.style.display = 'none';
+                listHeader.style.display = 'none'; // 🚀 기능 버튼과 체크박스가 묶인 헤더 전체 숨김
                 footer.style.display = 'none';
-                selectAllCheck.style.display = 'none';
 
                 const configWrapper = document.createElement('div');
                 configWrapper.style.padding = '20px';
 
+                // 글로벌 딕셔너리가 없으면 빈 객체로 폴백
+                const dict = window.lang_dict || {};
+                const currentLang = window.default_language || 'English';
+                
+                // 🚀 선택된 언어에 해당하는 텍스트들을 가져옵니다 (데이터가 누락된 경우 기본 영어로 폴백)
+                const getText = (key) => dict[currentLang] ? dict[currentLang][key] : (dict['English'] ? dict['English'][key] : key);
+
                 const langTitle = document.createElement('h3');
-                langTitle.textContent = '기본 언어 설정 (Default Language)';
+                langTitle.textContent = getText('lang_title');
                 langTitle.style.marginTop = '0';
                 langTitle.style.fontSize = '14px';
 
@@ -676,50 +781,18 @@ const OVERLAY_SCRIPT: &str = r#"
                 langDesc.style.background = '#f9f9f9';
                 langDesc.style.borderLeft = '3px solid #007bff';
                 
-                const langMessages = {
-                    'English': 'The system will process and generate text primarily in English.',
-                    'Korean': '시스템이 주로 한국어로 텍스트를 처리하고 생성합니다.',
-                    'Chinese': '系统将主要以中文处理和生成文本。',
-                    'Japanese': 'システムは主に日本語でテキストを処理および生成します。',
-                    'French': 'Le système traitera et générera du texte principalement en français.',
-                    'Spanish': 'El sistema procesará y generará texto principalmente en español.',
-                    'Russian': 'Система будет обрабатывать и генерировать текст преимущественно на русском языке.',
-                    'German': 'Das System wird Text hauptsächlich auf Deutsch verarbeiten und generieren.'
-                };
-
-                // 영어(English)가 최상단에 오도록 배열 순서 변경
-                const langs = ['English', 'Chinese', 'French', 'Spanish', 'Russian', 'German', 'Japanese', 'Korean'];
-                langs.forEach(l => {
-                    const opt = document.createElement('option');
-                    opt.value = l;
-                    opt.textContent = l;
-                    langSelect.appendChild(opt);
-                });
-
-                // 글로벌 변수로 주입된 설정값을 적용 (없으면 English)
-                const currentLang = window.default_language || 'English';
-                langSelect.value = currentLang;
-                langDesc.textContent = langMessages[currentLang] || '';
-
-                langSelect.onchange = (e) => {
-                    const selectedLang = e.target.value;
-                    langDesc.textContent = langMessages[selectedLang] || '';
-                    window.default_language = selectedLang;
-                    if (window.rpc) window.rpc("save_config:" + JSON.stringify({ language: selectedLang }));
-                };
-
                 const resetTitle = document.createElement('h3');
-                resetTitle.textContent = '데이터 초기화 (Data Reset)';
+                resetTitle.textContent = getText('reset_title');
                 resetTitle.style.fontSize = '14px';
 
                 const resetDesc = document.createElement('p');
-                resetDesc.textContent = '저장된 모든 데이터를 삭제합니다. 이 작업은 되돌릴 수 없습니다.';
+                resetDesc.textContent = getText('reset_desc');
                 resetDesc.style.fontSize = '12px';
                 resetDesc.style.color = '#666';
                 resetDesc.style.marginBottom = '15px';
 
                 const resetBtn = document.createElement('button');
-                resetBtn.textContent = '전체 데이터 초기화';
+                resetBtn.textContent = getText('reset_btn');
                 resetBtn.style.background = '#dc3545';
                 resetBtn.style.color = 'white';
                 resetBtn.style.padding = '10px 15px';
@@ -728,11 +801,40 @@ const OVERLAY_SCRIPT: &str = r#"
                 resetBtn.style.cursor = 'pointer';
                 resetBtn.style.fontWeight = 'bold';
                 
+                // 영어(English)가 최상단에 오도록 배열 순서 유지
+                const langs = ['English', 'Chinese', 'French', 'Spanish', 'Russian', 'German', 'Japanese', 'Korean'];
+                langs.forEach(l => {
+                    const opt = document.createElement('option');
+                    opt.value = l;
+                    opt.textContent = l;
+                    langSelect.appendChild(opt);
+                });
+
+                langSelect.value = currentLang;
+                langDesc.textContent = getText('lang_desc');
+
+                langSelect.onchange = (e) => {
+                    const selectedLang = e.target.value;
+                    window.default_language = selectedLang;
+                    
+                    // 🚀 언어 셀렉트박스를 바꾸는 순간 화면의 텍스트가 해당 언어로 즉시 전환됩니다.
+                    const updateText = (key) => dict[selectedLang] ? dict[selectedLang][key] : (dict['English'] ? dict['English'][key] : key);
+                    langTitle.textContent = updateText('lang_title');
+                    langDesc.textContent = updateText('lang_desc');
+                    resetTitle.textContent = updateText('reset_title');
+                    resetDesc.textContent = updateText('reset_desc');
+                    resetBtn.textContent = updateText('reset_btn');
+
+                    if (window.rpc) window.rpc("save_config:" + JSON.stringify({ language: selectedLang }));
+                };
+
                 resetBtn.onmouseover = () => resetBtn.style.background = '#c82333';
                 resetBtn.onmouseout = () => resetBtn.style.background = '#dc3545';
                 
                 resetBtn.onclick = () => {
-                    if (confirm('정말로 모든 데이터를 삭제하시겠습니까?')) {
+                    // 🚀 확인 알림창 역시 설정된 언어에 따라 표시합니다.
+                    const confirmMsg = dict[window.default_language] ? dict[window.default_language]['reset_confirm'] : (dict['English'] ? dict['English']['reset_confirm'] : 'Are you sure you want to delete all data?');
+                    if (confirm(confirmMsg)) {
                         if (window.rpc) window.rpc("reset_all_data");
                     }
                 };
@@ -749,11 +851,19 @@ const OVERLAY_SCRIPT: &str = r#"
             }
 
             // 일반 탭 복구
-            actionContainer.style.display = 'flex';
+            listHeader.style.display = 'flex'; // 🚀 기능 버튼과 체크박스가 묶인 헤더 전체 노출
             footer.style.display = 'flex';
-            selectAllCheck.style.display = 'inline-block';
 
-            const filtered = stagedItems.filter(i => i.domain === currentTabFilter);
+            // 🚀 선택된 도메인 탭 검사 및 검색어 필터링 동시 적용
+            const query = window.searchQuery || '';
+            const filtered = stagedItems.filter(i => {
+                if (i.domain !== currentTabFilter) return false;
+                if (!query) return true;
+                const matchTitle = i.title && i.title.toLowerCase().includes(query);
+                const matchContent = i.context && i.context.toLowerCase().includes(query);
+                const matchMask = i.masking && i.masking.toLowerCase().includes(query);
+                return matchTitle || matchContent || matchMask;
+            });
             const draftOnlyCount = filtered.filter(i => i.status !== 'PUSHED').length;
             
             // 🚀 작업 중일 때는 Push 상태 메시지를 유지하고, 아닐 때만 카운트를 갱신합니다.
@@ -1111,6 +1221,22 @@ const OVERLAY_SCRIPT: &str = r#"
                     div.scrollIntoView({ behavior: 'smooth', block: 'end' });
                     return;
                 }
+                else if (data.type === 'prompts_loaded') {
+                    // 🚀 로드된 프롬프트 목록으로 datalist 옵션 구성 및 상태 업데이트
+                    savedPrompts = data.payload || [];
+                    promptDatalist.replaceChildren();
+                    savedPrompts.forEach(pText => {
+                        const opt = document.createElement('option');
+                        opt.value = pText;
+                        promptDatalist.appendChild(opt);
+                    });
+                    
+                    // PROMPT 탭에 있을 경우 리스트 즉시 갱신
+                    if (currentTabFilter === 'PROMPT') {
+                        renderStagedList();
+                    }
+                    return;
+                }
             } catch (err) {
             }
             
@@ -1130,6 +1256,7 @@ const OVERLAY_SCRIPT: &str = r#"
             if (window.rpc) {
                 window.rpc("fetch_drafts");
                 window.rpc("check_progress");
+                window.rpc("fetch_prompts"); // 🚀 초기 구동 시 프롬프트 목록 불러오기
             }
         }, 300);
     }
@@ -1149,12 +1276,15 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let default_tab = app_config.default_tab.unwrap_or_else(|| "DRAFT".to_string()).to_uppercase();
     let default_language = app_config.language.unwrap_or_else(|| "English".to_string());
     
+    // 🚀 language.json 파일을 읽어서 프론트엔드로 전달합니다. 파일이 없거나 오류 시 빈 객체 전달
+    let lang_dict_str = std::fs::read_to_string("src/language.json").unwrap_or_else(|_| "{}".to_string());
+    
     // OVERLAY_SCRIPT 내의 예측 가능한 전역 변수(window.rpc 등)를 랜덤 생성한 이름으로 동적 치환
     let overlay_script_replaced = OVERLAY_SCRIPT
         .replace("window.rpc", &format!("window.{}", rpc_binding_name))
         .replace("window.geminiSidebarLoaded", &format!("window.{}", sidebar_var_name));
 
-    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\nwindow.default_language = \"{}\";\n{}", is_authenticated, default_tab, default_language, overlay_script_replaced);
+    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\nwindow.default_language = \"{}\";\nwindow.lang_dict = {};\n{}", is_authenticated, default_tab, default_language, lang_dict_str, overlay_script_replaced);
     // 페이지가 새로고침되거나 다른 페이지로 이동하더라도 스크립트가 유지되도록 등록합니다.
     let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(&full_script)).await;
     let _ = page.evaluate(full_script).await;
@@ -1683,6 +1813,35 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     } else {
                         json!({"type": "error", "message": "설정 저장 실패"}).to_string()
                     }
+                } else if payload.starts_with("save_prompt:") {
+                    let prompt_data = &payload["save_prompt:".len()..];
+                    let prompt_path = "data/prompts.json";
+                    let _ = std::fs::create_dir_all("data");
+                    let mut prompts: Vec<String> = std::fs::read_to_string(prompt_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                    if !prompts.contains(&prompt_data.to_string()) && !prompt_data.is_empty() {
+                        prompts.push(prompt_data.to_string());
+                        let _ = std::fs::write(prompt_path, serde_json::to_string(&prompts).unwrap_or_default());
+                    }
+                    json!({"type": "prompts_loaded", "payload": prompts}).to_string()
+                } else if payload.starts_with("delete_prompt:") {
+                    let prompt_data = &payload["delete_prompt:".len()..];
+                    let prompt_path = "data/prompts.json";
+                    let mut prompts: Vec<String> = std::fs::read_to_string(prompt_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                    prompts.retain(|p| p != prompt_data);
+                    let _ = std::fs::write(prompt_path, serde_json::to_string(&prompts).unwrap_or_default());
+                    json!({"type": "prompts_loaded", "payload": prompts}).to_string()
+                } else if payload == "fetch_prompts" {
+                    let prompts: Vec<String> = std::fs::read_to_string("data/prompts.json")
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                    json!({"type": "prompts_loaded", "payload": prompts}).to_string()
                 } else { "Unknown command".to_string() };
 
                 let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(response));

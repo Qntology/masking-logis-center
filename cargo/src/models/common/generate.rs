@@ -87,7 +87,6 @@ pub fn generate_generic(
 
     tokens.push(next_token);
 
-    let mut generate_count = 1;
     for _ in 1..ctx.max_tokens {
         if model.stop_token_ids().contains(&next_token) {
             break;
@@ -110,9 +109,7 @@ pub fn generate_generic(
         
         next_token = logits_processor.sample(&next_logits)?;
 
-        
         tokens.push(next_token);
-        generate_count += 1;
     }
 
     let text = tokenizer.decode(&tokens, true)?;

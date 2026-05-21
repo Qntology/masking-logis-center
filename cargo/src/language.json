@@ -1,0 +1,66 @@
+{
+  "English": {
+    "lang_title": "Default Language Setting",
+    "lang_desc": "The system will process and generate text primarily in English.",
+    "reset_title": "Data Reset",
+    "reset_desc": "Deletes all saved data. This action cannot be undone.",
+    "reset_btn": "Reset All Data",
+    "reset_confirm": "Are you sure you want to delete all data?"
+  },
+  "Korean": {
+    "lang_title": "기본 언어 설정 (Default Language)",
+    "lang_desc": "시스템이 주로 한국어로 텍스트를 처리하고 생성합니다.",
+    "reset_title": "데이터 초기화 (Data Reset)",
+    "reset_desc": "저장된 모든 데이터를 삭제합니다. 이 작업은 되돌릴 수 없습니다.",
+    "reset_btn": "전체 데이터 초기화",
+    "reset_confirm": "정말로 모든 데이터를 삭제하시겠습니까?"
+  },
+  "Chinese": {
+    "lang_title": "默认语言设置 (Default Language)",
+    "lang_desc": "系统将主要以中文处理和生成文本。",
+    "reset_title": "数据重置 (Data Reset)",
+    "reset_desc": "删除所有保存的数据。此操作无法撤销。",
+    "reset_btn": "重置所有数据",
+    "reset_confirm": "您确定要删除所有数据吗？"
+  },
+  "Japanese": {
+    "lang_title": "デフォルト言語設定 (Default Language)",
+    "lang_desc": "システムは主に日本語でテキストを処理および生成します。",
+    "reset_title": "データ初期化 (Data Reset)",
+    "reset_desc": "保存されているすべてのデータを削除します。この操作は元に戻せません。",
+    "reset_btn": "すべてのデータを初期化",
+    "reset_confirm": "本当にすべてのデータを削除しますか？"
+  },
+  "French": {
+    "lang_title": "Paramètre de langue par défaut (Default Language)",
+    "lang_desc": "Le système traitera et générera du texte principalement en français.",
+    "reset_title": "Réinitialisation des données (Data Reset)",
+    "reset_desc": "Supprime toutes les données enregistrées. Cette action est irréversible.",
+    "reset_btn": "Réinitialiser toutes les données",
+    "reset_confirm": "Êtes-vous sûr de vouloir supprimer toutes les données ?"
+  },
+  "Spanish": {
+    "lang_title": "Configuración de idioma predeterminado (Default Language)",
+    "lang_desc": "El sistema procesará y generará texto principalmente en español.",
+    "reset_title": "Restablecimiento de datos (Data Reset)",
+    "reset_desc": "Elimina todos los datos guardados. Esta acción no se puede deshacer.",
+    "reset_btn": "Restablecer todos los datos",
+    "reset_confirm": "¿Está seguro de que desea eliminar todos los datos?"
+  },
+  "Russian": {
+    "lang_title": "Настройка языка по умолчанию (Default Language)",
+    "lang_desc": "Система будет обрабатывать и генерировать текст преимущественно на русском языке.",
+    "reset_title": "Сброс данных (Data Reset)",
+    "reset_desc": "Удаляет все сохраненные данные. Это действие нельзя отменить.",
+    "reset_btn": "Сбросить все данные",
+    "reset_confirm": "Вы уверены, что хотите удалить все данные?"
+  },
+  "German": {
+    "lang_title": "Standardspracheinstellung (Default Language)",
+    "lang_desc": "Das System wird Text hauptsächlich auf Deutsch verarbeiten und generieren.",
+    "reset_title": "Daten zurücksetzen (Data Reset)",
+    "reset_desc": "Löscht alle gespeicherten Daten. Diese Aktion kann nicht rückgängig gemacht werden.",
+    "reset_btn": "Alle Daten zurücksetzen",
+    "reset_confirm": "Sind Sie sicher, dass Sie alle Daten löschen möchten?"
+  }
+}
