@@ -64,20 +64,31 @@ fn _mask_pii(text: &str, spans: &[PrivacySpan]) -> String {
     masked_text
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 struct AppConfig {
-    default_tab: String,
+    #[serde(default)]
+    default_tab: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
 }
 
-fn load_default_tab() -> String {
+fn load_app_config() -> AppConfig {
     let _ = std::fs::create_dir_all("data");
-    let config_path = std::path::PathBuf::from("data/config.json");
-    if let Ok(content) = std::fs::read_to_string(config_path) {
+    // 사용자가 설정을 저장할 때 사용하는 app_config.json을 우선적으로 읽습니다.
+    let config_path = std::path::PathBuf::from("data/app_config.json");
+    if let Ok(content) = std::fs::read_to_string(&config_path) {
         if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
-            return config.default_tab.to_uppercase();
+            return config;
         }
     }
-    "DRAFT".to_string()
+    // 하위 호환성을 위해 config.json도 체크합니다.
+    let legacy_path = std::path::PathBuf::from("data/config.json");
+    if let Ok(content) = std::fs::read_to_string(&legacy_path) {
+        if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
+            return config;
+        }
+    }
+    AppConfig::default()
 }
 
 const OVERLAY_SCRIPT: &str = r#"
@@ -148,6 +159,10 @@ const OVERLAY_SCRIPT: &str = r#"
             .item-row input[type="checkbox"] { cursor: pointer; }
             .item-detail { display: none; padding: 10px 10px 10px 32px; font-size: 11px; color: #555; background: #fafafa; border-top: 1px dashed #eee; white-space: pre-wrap; max-height: 200px; overflow-y: auto; word-break: break-all; }
             .item-detail.open { display: block; }
+            /* 🚀 CSV 테이블용 추가 스타일 */
+            .item-detail table { width: 100%; border-collapse: collapse; margin-top: 5px; background: white; }
+            .item-detail th { background: #eee; font-weight: bold; }
+            .item-detail td, .item-detail th { border: 1px solid #ddd; padding: 4px; text-align: left; }
             #main-layout { display: flex !important; flex: 1; overflow: hidden; }
             aside { width: 180px; background: #f0f0f0; border-right: 1px solid #ddd; display: flex; flex-direction: column; padding: 10px 0; flex-shrink: 0; }
             .gnb-menu { display: flex; flex-direction: column; gap: 2px; }
@@ -239,10 +254,9 @@ const OVERLAY_SCRIPT: &str = r#"
         const draftBtn = document.createElement('button');
         draftBtn.textContent = 'Draft (0)';
         draftBtn.onclick = async () => {
-            if (isProcessing) return;
+            // 🚀 전처리(Push) 중에도 Draft 추가가 가능하도록 if (isProcessing) return; 제거
             const pageId = await generatePageId(window.location.href);
             
-            // 🚀 사용자가 수동으로 다시 등록 버튼을 눌렀으므로, 차단(삭제) 목록에서 즉시 해제합니다.
             deletedSessionIds.delete(pageId);
             
             const extractedText = extractVisibleText();
@@ -596,20 +610,22 @@ const OVERLAY_SCRIPT: &str = r#"
         agentContainer.addEventListener('drop', (e) => {
             e.preventDefault();
             agentContainer.style.border = 'none';
+            
+            // 🚀 추가적인 제한 없이 파일 드랍을 수용합니다.
             const files = e.dataTransfer.files;
             if (files.length > 0) {
                 const file = files[0];
                 const reader = new FileReader();
                 reader.onload = async (ev) => {
-                    const dataUrl = ev.target.result;
-                    const pageId = await generatePageId(dataUrl + Date.now());
+                    const content = ev.target.result;
+                    const pageId = await generatePageId(content + Date.now());
                     const item = { 
                         id: pageId, 
                         host: window.location.host,
                         url: file.name,
                         title: `[File] ${file.name}`, 
                         domain: currentTabFilter,
-                        context: dataUrl, 
+                        context: content, // 이미지면 dataURL, 텍스트면 문자열이 담깁니다.
                         status: 'DRAFT',
                         track: '',
                         version: 1,
@@ -620,17 +636,133 @@ const OVERLAY_SCRIPT: &str = r#"
                         window.rpc("sync_data:" + JSON.stringify(item));
                     }
                 };
-                reader.readAsDataURL(file);
+                // 🚀 파일 타입에 따라 읽기 방식을 결정합니다. 이미지면 Base64로, 그 외(CSV 등)는 텍스트로 읽습니다.
+                if (file.type.startsWith('image/')) {
+                    reader.readAsDataURL(file);
+                } else {
+                    reader.readAsText(file);
+                }
             }
         });
 
         function renderStagedList() {
             log.replaceChildren(); 
+
+            // CONFIG 탭인 경우 UI를 다르게 렌더링
+            if (currentTabFilter === 'CONFIG') {
+                actionContainer.style.display = 'none';
+                footer.style.display = 'none';
+                selectAllCheck.style.display = 'none';
+
+                const configWrapper = document.createElement('div');
+                configWrapper.style.padding = '20px';
+
+                const langTitle = document.createElement('h3');
+                langTitle.textContent = '기본 언어 설정 (Default Language)';
+                langTitle.style.marginTop = '0';
+                langTitle.style.fontSize = '14px';
+
+                const langSelect = document.createElement('select');
+                langSelect.style.padding = '8px';
+                langSelect.style.width = '100%';
+                langSelect.style.marginBottom = '10px';
+                langSelect.style.fontSize = '13px';
+                
+                const langDesc = document.createElement('div');
+                langDesc.style.fontSize = '12px';
+                langDesc.style.color = '#555';
+                langDesc.style.marginBottom = '30px';
+                langDesc.style.padding = '10px';
+                langDesc.style.background = '#f9f9f9';
+                langDesc.style.borderLeft = '3px solid #007bff';
+                
+                const langMessages = {
+                    'English': 'The system will process and generate text primarily in English.',
+                    'Korean': '시스템이 주로 한국어로 텍스트를 처리하고 생성합니다.',
+                    'Chinese': '系统将主要以中文处理和生成文本。',
+                    'Japanese': 'システムは主に日本語でテキストを処理および生成します。',
+                    'French': 'Le système traitera et générera du texte principalement en français.',
+                    'Spanish': 'El sistema procesará y generará texto principalmente en español.',
+                    'Russian': 'Система будет обрабатывать и генерировать текст преимущественно на русском языке.',
+                    'German': 'Das System wird Text hauptsächlich auf Deutsch verarbeiten und generieren.'
+                };
+
+                // 영어(English)가 최상단에 오도록 배열 순서 변경
+                const langs = ['English', 'Chinese', 'French', 'Spanish', 'Russian', 'German', 'Japanese', 'Korean'];
+                langs.forEach(l => {
+                    const opt = document.createElement('option');
+                    opt.value = l;
+                    opt.textContent = l;
+                    langSelect.appendChild(opt);
+                });
+
+                // 글로벌 변수로 주입된 설정값을 적용 (없으면 English)
+                const currentLang = window.default_language || 'English';
+                langSelect.value = currentLang;
+                langDesc.textContent = langMessages[currentLang] || '';
+
+                langSelect.onchange = (e) => {
+                    const selectedLang = e.target.value;
+                    langDesc.textContent = langMessages[selectedLang] || '';
+                    window.default_language = selectedLang;
+                    if (window.rpc) window.rpc("save_config:" + JSON.stringify({ language: selectedLang }));
+                };
+
+                const resetTitle = document.createElement('h3');
+                resetTitle.textContent = '데이터 초기화 (Data Reset)';
+                resetTitle.style.fontSize = '14px';
+
+                const resetDesc = document.createElement('p');
+                resetDesc.textContent = '저장된 모든 데이터를 삭제합니다. 이 작업은 되돌릴 수 없습니다.';
+                resetDesc.style.fontSize = '12px';
+                resetDesc.style.color = '#666';
+                resetDesc.style.marginBottom = '15px';
+
+                const resetBtn = document.createElement('button');
+                resetBtn.textContent = '전체 데이터 초기화';
+                resetBtn.style.background = '#dc3545';
+                resetBtn.style.color = 'white';
+                resetBtn.style.padding = '10px 15px';
+                resetBtn.style.border = 'none';
+                resetBtn.style.borderRadius = '4px';
+                resetBtn.style.cursor = 'pointer';
+                resetBtn.style.fontWeight = 'bold';
+                
+                resetBtn.onmouseover = () => resetBtn.style.background = '#c82333';
+                resetBtn.onmouseout = () => resetBtn.style.background = '#dc3545';
+                
+                resetBtn.onclick = () => {
+                    if (confirm('정말로 모든 데이터를 삭제하시겠습니까?')) {
+                        if (window.rpc) window.rpc("reset_all_data");
+                    }
+                };
+
+                configWrapper.appendChild(langTitle);
+                configWrapper.appendChild(langSelect);
+                configWrapper.appendChild(langDesc);
+                configWrapper.appendChild(resetTitle);
+                configWrapper.appendChild(resetDesc);
+                configWrapper.appendChild(resetBtn);
+
+                log.appendChild(configWrapper);
+                return;
+            }
+
+            // 일반 탭 복구
+            actionContainer.style.display = 'flex';
+            footer.style.display = 'flex';
+            selectAllCheck.style.display = 'inline-block';
+
             const filtered = stagedItems.filter(i => i.domain === currentTabFilter);
             const draftOnlyCount = filtered.filter(i => i.status !== 'PUSHED').length;
             
+            // 🚀 작업 중일 때는 Push 상태 메시지를 유지하고, 아닐 때만 카운트를 갱신합니다.
             if (!isProcessing) {
                 draftBtn.textContent = `Draft (${draftOnlyCount})`;
+                draftBtn.disabled = false;
+            } else {
+                // 🚀 작업 중이라도 Draft 버튼 자체는 활성화 상태를 유지하여 추가가 가능하게 합니다.
+                draftBtn.disabled = false;
             }
             
             if (filtered.length === 0) {
@@ -722,7 +854,27 @@ const OVERLAY_SCRIPT: &str = r#"
 
                     const detailView = document.createElement('div');
                     detailView.className = 'item-detail';
-                    detailView.textContent = item.masking || item.context || '전처리된 텍스트 결과가 없습니다.';
+                    
+                    // 🚀 콘텐츠 타입에 따른 시각화 로직
+                    const rawContent = item.masking || item.context || '';
+                    if (rawContent.startsWith('data:image/')) {
+                        // 🚀 이미지인 경우 img 태그로 렌더링
+                        detailView.innerHTML = `<img src="${rawContent}" style="max-width:100%; border-radius:4px; border:1px solid #ddd;">`;
+                    } else if (item.url.toLowerCase().endsWith('.csv')) {
+                        // 🚀 CSV 파일인 경우 테이블로 변환
+                        const rows = rawContent.split('\n').filter(r => r.trim());
+                        const tableHtml = rows.map((r, i) => {
+                            const cells = r.split(',').map(c => i === 0 ? `<th>${c}</th>` : `<td>${c}</td>`).join('');
+                            return `<tr>${cells}</tr>`;
+                        }).join('');
+                        detailView.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:11px; border:1px solid #ccc;">${tableHtml}</table>`;
+                        // 스타일 보정 (Shadow DOM 내부에 직접 스타일 주입)
+                        const tableStyle = document.createElement('style');
+                        tableStyle.textContent = `table th, table td { border: 1px solid #eee; padding: 4px; text-align: left; } table th { background: #f0f0f0; }`;
+                        detailView.appendChild(tableStyle);
+                    } else {
+                        detailView.textContent = rawContent || '전처리된 텍스트 결과가 없습니다.';
+                    }
 
                     row.onclick = () => detailView.classList.toggle('open');
 
@@ -791,13 +943,20 @@ const OVERLAY_SCRIPT: &str = r#"
                     return;
                 } 
                 else if (data.type === 'sync_success') {
-                    // 🚀 수동으로 Draft를 등록하거나 파일이 추가되어 성공한 경우, 삭제 세션 기록에서 명시적으로 해제하여 자동 삭제(필터링)되는 부작용을 방지합니다.
                     deletedSessionIds.delete(data.payload.id);
                     
                     stagedItems = stagedItems.filter(i => i.id !== data.payload.id);
                     stagedItems.push(data.payload);
                     updateGnbUI();
+                    // 🚀 작업 중이라도 리스트를 다시 그려서 새로 추가된 아이템이 즉시 보이게 합니다.
                     renderStagedList();
+                    
+                    // 🚀 작업 중이 아닐 때만 버튼 숫자를 일반적인 형태로 갱신합니다.
+                    if (!isProcessing) {
+                        const filtered = stagedItems.filter(i => i.domain === currentTabFilter);
+                        const draftOnlyCount = filtered.filter(i => i.status !== 'PUSHED').length;
+                        draftBtn.textContent = `Draft (${draftOnlyCount})`;
+                    }
                     return;
                 }
                 // 🚀 진행 상황 업데이트 시 처리 중인 ID 배열을 동기화하여 현재/다른 탭 모두 흐리게 렌더링되도록 합니다.
@@ -858,6 +1017,9 @@ const OVERLAY_SCRIPT: &str = r#"
                     const updatedItems = data.payload || [];
                     const updatedIds = updatedItems.map(i => i.id);
                     
+                    // 🚀 성공적으로 푸시된 아이템의 체크박스를 해제하기 위해 세션에서 제거합니다.
+                    updatedIds.forEach(id => checkedSessionIds.delete(id));
+                    
                     stagedItems = stagedItems.filter(i => !updatedIds.includes(i.id));
                     stagedItems.push(...updatedItems);
                     
@@ -903,6 +1065,23 @@ const OVERLAY_SCRIPT: &str = r#"
                     div.style.background = '#e6fffa';
                     div.style.borderRadius = '4px';
                     div.textContent = `System: 파일이 성공적으로 디스크에 저장되었습니다. 경로: ${data.payload}`;
+                    log.appendChild(div);
+                    div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                    return;
+                }
+                else if (data.type === 'reset_success') {
+                    stagedItems = [];
+                    checkedSessionIds.clear();
+                    deletedSessionIds.clear();
+                    updateGnbUI();
+                    renderStagedList();
+                    
+                    const div = document.createElement('div');
+                    div.className = 'system';
+                    div.style.padding = '10px';
+                    div.style.background = '#e6fffa';
+                    div.style.borderRadius = '4px';
+                    div.textContent = `System: ${data.message}`;
                     log.appendChild(div);
                     div.scrollIntoView({ behavior: 'smooth', block: 'end' });
                     return;
@@ -965,14 +1144,17 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let sidebar_var_name = format!("__sys_sidebar_{:x}", now);
 
     let _ = page.execute(AddBindingParams::new(&rpc_binding_name)).await; // 바인딩명 변경
-    let default_tab = load_default_tab();
+    
+    let app_config = load_app_config();
+    let default_tab = app_config.default_tab.unwrap_or_else(|| "DRAFT".to_string()).to_uppercase();
+    let default_language = app_config.language.unwrap_or_else(|| "English".to_string());
     
     // OVERLAY_SCRIPT 내의 예측 가능한 전역 변수(window.rpc 등)를 랜덤 생성한 이름으로 동적 치환
     let overlay_script_replaced = OVERLAY_SCRIPT
         .replace("window.rpc", &format!("window.{}", rpc_binding_name))
         .replace("window.geminiSidebarLoaded", &format!("window.{}", sidebar_var_name));
 
-    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\n{}", is_authenticated, default_tab, overlay_script_replaced);
+    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\nwindow.default_language = \"{}\";\n{}", is_authenticated, default_tab, default_language, overlay_script_replaced);
     // 페이지가 새로고침되거나 다른 페이지로 이동하더라도 스크립트가 유지되도록 등록합니다.
     let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(&full_script)).await;
     let _ = page.evaluate(full_script).await;
@@ -1486,6 +1668,20 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         json!({"type": "push_progress", "payload": progress}).to_string()
                     } else {
                         json!({"type": "push_idle"}).to_string()
+                    }
+                } else if payload == "reset_all_data" {
+                    if let Ok(_) = db::reset_all_records().await {
+                        json!({"type": "reset_success", "message": "모든 데이터가 성공적으로 초기화되었습니다."}).to_string()
+                    } else {
+                        json!({"type": "error", "message": "데이터 초기화에 실패했습니다."}).to_string()
+                    }
+                } else if payload.starts_with("save_config:") {
+                    let config_data = &payload["save_config:".len()..];
+                    let _ = std::fs::create_dir_all("data");
+                    if let Ok(_) = std::fs::write("data/app_config.json", config_data) {
+                        json!({"type": "config_saved"}).to_string()
+                    } else {
+                        json!({"type": "error", "message": "설정 저장 실패"}).to_string()
                     }
                 } else { "Unknown command".to_string() };
 

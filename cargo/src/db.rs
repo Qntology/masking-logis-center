@@ -238,3 +238,9 @@ fn extract_from_batch(batch: &RecordBatch, results: &mut Vec<CommerceRecord>) ->
     }
     Ok(())
 }
+
+pub async fn reset_all_records() -> Result<(), lancedb::Error> {
+    let db = connect("data/db").execute().await?;
+    let _ = db.drop_table("terminal").await;
+    Ok(())
+}
