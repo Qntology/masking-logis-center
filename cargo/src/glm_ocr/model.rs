@@ -848,12 +848,17 @@ impl GlmOcrVisionModel {
         let hidden_states = self.post_layernorm.forward(&hidden_states)?;
         let sms = self.config.spatial_merge_size;
         let hidden_dim = hidden_states.dim(hidden_states.dims().len() - 1)?;
-        let total_patches = hidden_states.dim(0)?; 
-        let merged_patches = total_patches / (sms * sms); 
-        let hidden_states = hidden_states.reshape((merged_patches, sms, sms, hidden_dim))?.permute((0, 3, 1, 2))?;
         
-        // 🚀 downsample을 거치지 않고 패치를 flatten하여 4096 차원으로 만든 뒤 merger로 바로 넘깁니다.
+        let (t, h, w) = grid_thw_parsed[0];
+        let merged_h = h / sms;
+        let merged_w = w / sms;
+        let merged_patches = t * merged_h * merged_w;
+        
+        let hidden_states = hidden_states.reshape((t, h, w, hidden_dim))?;
+        let hidden_states = hidden_states.reshape((t, merged_h, sms, merged_w, sms, hidden_dim))?;
+        let hidden_states = hidden_states.permute((0, 1, 3, 5, 2, 4))?;
         let hidden_states = hidden_states.reshape((merged_patches, hidden_dim * sms * sms))?; 
+        
         Ok(self.merger.forward(&hidden_states)?.unsqueeze(0)?)
     }
 }

@@ -12,12 +12,26 @@ pub struct DefaultHarness;
 impl DefaultHarness {
     /// 🚀 모든 태그와 속성을 제거하고 중첩을 평탄화하여 순수 텍스트만 추출합니다.
     pub fn clean_html(&self, html: &str) -> String {
+        // 🚀 만약 입력값이 이미 태그가 없는 순수 텍스트라면 파싱 과정을 건너뛰고 그대로 반환합니다.
+        if !html.contains('<') || !html.contains('>') {
+            return html.trim().to_string();
+        }
+
         let document = Html::parse_document(html);
         let mut cleaned_text = String::new();
 
         // 루트 요소부터 재귀적으로 텍스트만 수집합니다.
         self.process_node_as_pug(document.root_element().clone(), &mut cleaned_text);
         
+        // 결과가 비어있을 경우 원본에서 태그만 강제로 제거한 값을 반환하는 폴백 로직을 적용합니다.
+        if cleaned_text.trim().is_empty() {
+            return html.split('<')
+                .filter_map(|s| s.split_once('>').map(|(_, t)| t.trim()))
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+
         // 연속된 줄바꿈이나 공백을 정리하여 결과물을 깔끔하게 만듭니다.
         cleaned_text.lines()
             .map(|line| line.trim())

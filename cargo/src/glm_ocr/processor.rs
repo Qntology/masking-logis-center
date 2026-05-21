@@ -168,29 +168,33 @@ impl GlmOcrProcessor {
         let merged_w = grid_w / spatial_merge_size;
         let num_image_tokens = merged_h * merged_w;
 
-        // 🚀 모델 버전에 맞는 특수 토큰을 토크나이저에서 동적으로 가져옵니다. 
-        // (GLM-4 기반인 경우 1513xx 대역 사용, 구형 ChatGLM3의 592xx 사용 시 모델 붕괴 발생)
+        // 🚀 하드코딩된 구형 토큰 ID 대신, 토크나이저에서 현재 GLM-4 모델의 토큰 ID를 동적으로 조회합니다.
+        // 특정 토큰이 없을 경우 가장 안전한 기본값(1513xx 대역)을 사용하여 모델 붕괴를 방지합니다.
         let gmask_id = tokenizer.token_to_id("[gMASK]").unwrap_or(151331);
-        let sop_id = tokenizer.token_to_id("<sop>").unwrap_or(151329);
+        let sop_id = tokenizer.token_to_id("<sop>").unwrap_or(151333); // 올바른 GLM-4 <sop> 토큰 ID
         let user_id = tokenizer.token_to_id("<|user|>").unwrap_or(151336);
         let assistant_id = tokenizer.token_to_id("<|assistant|>").unwrap_or(151337);
+        
+        // 줄바꿈 토큰을 정확하게 인코딩하여 컨텍스트 분리를 명확히 합니다.
         let nl_id = tokenizer.text_encode_vec("\n".to_string(), false).unwrap_or(vec![198]).into_iter().last().unwrap_or(198);
 
-        // Header: [gMASK] <sop> <|user|> \n Image tokens: <|begin_of_image|> <|image|>*N <|end_of_image|>
+        // Header 구성을 GLM-OCR 표준 규격으로 재조합합니다.
         let mut input_ids_vec = vec![gmask_id, sop_id, user_id, nl_id, image_start_token_id];
 
         for _ in 0..num_image_tokens {
             input_ids_vec.push(image_token_id); // <|image|>
         }
+
         input_ids_vec.push(image_end_token_id); // <|end_of_image|>
+        input_ids_vec.push(nl_id); // 이미지 토큰 직후 줄바꿈 추가 (표준 규격)
 
         // Text prompt (without special tokens - they're already added)
         let text_ids = tokenizer.text_encode_vec(prompt.to_string(), false)?;
         input_ids_vec.extend(text_ids);
 
-        // Generation prompt: <|assistant|> \n
+        // Generation prompt: <|assistant|>
         input_ids_vec.push(assistant_id); // <|assistant|>
-        input_ids_vec.push(nl_id); // newline
+        // <|assistant|> 뒤의 줄바꿈 제거 (생성 방해 요인 제거)
 
         println!("[System] 최종 컨텍스트 사이즈 (총 토큰 수): {}", input_ids_vec.len());
 

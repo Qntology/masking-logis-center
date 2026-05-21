@@ -64,7 +64,7 @@ impl GlmOcrGenerateModel {
         let processor = GlmOcrProcessor::new(path, &device, dtype)?;
 
         let gguf_model_path = format!("{}/GLM-OCR-Q8_0.gguf", path);
-        let gguf_mmproj_path = format!("{}/GLM-OCR.mmproj-f16.gguf", path);
+        let gguf_mmproj_path = format!("{}/mmproj-GLM-OCR-Q8_0.gguf", path);
 
         let model = if std::path::Path::new(&gguf_model_path).exists() && std::path::Path::new(&gguf_mmproj_path).exists() {
             println!("[GlmOcr] Loading from GGUF...");

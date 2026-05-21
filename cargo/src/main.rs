@@ -814,8 +814,9 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 }],
                                                 model: "glm-ocr".to_string(),
                                                 max_tokens: Some(1024),
-                                                temperature: Some(0.0),
-                                                top_p: None, top_k: None, repeat_penalty: None, repeat_last_n: None, seed: None,
+                                                temperature: Some(0.2),
+                                                top_p: Some(0.95),
+                                                top_k: None, repeat_penalty: None, repeat_last_n: None, seed: Some(42),
                                             };
                                             model.generate(params).map(|res| res.choices[0].message.content.clone()).unwrap_or_default()
                                         } else { "OCR Model Load Error".to_string() };
@@ -824,13 +825,24 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         *model_guard = None;
                                         res
                                     };
-                                    record.context = format!("{}\n---\n[OCR]\n{}", record.context, ocr_result);
-                                } // 🚀 if let Some(base64_part) 블록을 닫습니다.
-                            } // 🚀 [Fix] if record.url.starts_with("file://") 블록을 닫아 괄호 쌍을 맞춥니다.
+                                    // 🚀 OCR 결과물에서도 마크다운 껍데기를 제거하여 가독성을 높입니다.
+                                    let display_ocr = ocr_result.replace("```markdown", "").replace("```", "").trim().to_string();
+                                    record.context = format!("{}\n---\n[OCR 결과]\n{}", record.context, display_ocr);
+                                } 
+                            }
+                            // 🚀 [Fix] 동기화 시점에 로그를 남겨 어떤 아이템이 들어오는지 명확히 합니다.
+                            println!("[System] 동기화 수신: {} (ID: {})", record.title, record.id);
 
-                            // 🚀 텍스트 아이템이든 OCR 결과든 최종적으로 태그를 걷어냅니다.
-                            let cleaned_context = harness.clean_html(&record.context);
-                            record.context = cleaned_context;
+                            // 🚀 [Fix] 텍스트가 비어있지 않고 실제 HTML 태그를 포함한 경우에만 평탄화를 수행하여 데이터 증발을 원천 차단합니다.
+                            let is_image = record.context.contains("data:image/") || record.url.starts_with("file://");
+                            
+                            if !is_image && record.context.contains('<') && record.context.contains('>') {
+                                let cleaned_context = harness.clean_html(&record.context);
+                                record.context = cleaned_context;
+                                println!("[System] 동기화: 웹페이지 태그 평탄화 수행됨.");
+                            } else if !is_image {
+                                println!("[System] 동기화: 순수 텍스트 감지 (평탄화 건너뜀).");
+                            }
 
                             let updated = record.clone();
                             db::save_records(vec![record], None).await.map(|_| json!({"type":"sync_success","payload":updated}).to_string()).unwrap_or_else(|e| e.to_string())
@@ -868,68 +880,87 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                                 // ★ Phase 0: OCR 일괄 처리 및 VRAM 해제
                                 let needs_ocr = target_records.iter().any(|r| r.context.starts_with("data:image/") || r.context.starts_with("data:application/pdf"));
-                                if needs_ocr {
-                                    let mut model_guard = OCR_MODEL.lock().unwrap();
-                                    if model_guard.is_none() {
-                                        let model_path = "..\\models\\glm_ocr";
-                                        // 🚀 동일하게 외부에서 선언된 CUDA device를 활용하여 SSD 오프로딩으로 로드합니다.
-                                        match GlmOcrGenerateModel::init(model_path, Some(&device), None) {
-                                            Ok(model) => *model_guard = Some(model),
-                                            Err(e) => {
-                                                let err_msg = format!("OCR Init Error: {:?}", e);
-                                                println!("[Error] {}", err_msg);
-                                                has_error = Some(err_msg);
-                                            }
-                                        }
-                                    }
-                                    // 🚀 [Fix] 미사용 트레이트 Harness 임포트를 제거하고 DefaultHarness 구조체만 사용합니다.
-                                    use gemini_gui_lib::harness::DefaultHarness;
-                                    let harness = DefaultHarness;
-
-                                    for record in &mut target_records {
-                                        if record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf") {
-                                            if let Some(model) = model_guard.as_mut() {
-                                                let params = ChatCompletionParameters {
-                                                    messages: vec![Message {
-                                                        role: "user".to_string(),
-                                                        parts: vec![Part { text: "Extract text".to_string(), image_url: Some(record.context.clone()) }],
-                                                    }],
-                                                    model: "glm-ocr".to_string(),
-                                                    max_tokens: Some(1024),
-                                                    temperature: Some(0.0),
-                                                    top_p: None, top_k: None, repeat_penalty: None, repeat_last_n: None, seed: None,
-                                                };
-                                                match model.generate(params) {
-                                                    Ok(res) => {
-                                                        // 🚀 OCR 결과 텍스트에서 태그 및 중첩 구조 제거
-                                                        let raw_ocr = res.choices[0].message.content.clone();
-                                                        record.context = harness.clean_html(&raw_ocr);
-                                                    },
-                                                    Err(e) => {
-                                                        let err_msg = format!("OCR Error: {}", e);
-                                                        println!("[Error] 일괄 OCR 처리 중 예외 발생: {:?}", e);
-                                                        has_error = Some(err_msg);
-                                                    }
-                                                }
-                                            } else {
-                                                let err_msg = "OCR 모델 로드에 실패했습니다.".to_string();
-                                                println!("[Error] {}", err_msg);
-                                                has_error = Some(err_msg);
-                                            }
-                                        } else {
-                                            // 🚀 [Fix] 텍스트 아이템도 마스킹 전 HTML 태그를 완전히 걷어내고 평탄화합니다.
-                                            let raw_content = record.context.clone();
+                                // 🚀 [Phase 0-1] 웹페이지 텍스트 정제 (데이터 증발 방지 로직 적용)
+                                use gemini_gui_lib::harness::DefaultHarness;
+                                let harness = DefaultHarness;
+                                for record in &mut target_records {
+                                    let is_image = record.context.starts_with("data:image/") || record.url.starts_with("file://");
+                                    if !is_image {
+                                        let raw_content = record.context.clone();
+                                        // 🚀 이미 깨끗한 텍스트일 경우(태그가 없을 경우) harness 연산을 건너뛰어 0바이트 증발을 막습니다.
+                                        if raw_content.contains('<') && raw_content.contains('>') {
                                             record.context = harness.clean_html(&raw_content);
-                                            println!("[System] 텍스트 아이템 태그 제거 및 평탄화 완료. (Record ID: {})", record.id);
+                                            println!("[System] 웹페이지 HTML 태그 평탄화 완료. (ID: {})", record.id);
+                                        } else {
+                                            println!("[System] 웹페이지 순수 텍스트 유지됨. (ID: {})", record.id);
                                         }
                                     }
-                                    *model_guard = None; // VRAM 완전 해제
-                                    force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
-                                    
-                                    // 🚀 명확한 진행 상황 확인을 위해 OCR 단계 종료 및 VRAM 해제 로그를 추가합니다.
-                                    println!("[System] === Phase 0: GLM OCR 처리 종료 (VRAM 해제됨) ===\n");
                                 }
 
+                                // 🚀 [Phase 0-2] 이미지/PDF 전용 OCR 처리 (진짜 이미지가 있을 때만 모델 로드)
+                                if needs_ocr {
+                                    {
+                                        let mut model_guard = OCR_MODEL.lock().unwrap();
+                                        if model_guard.is_none() {
+                                            let model_path = "..\\models\\glm_ocr";
+                                            match GlmOcrGenerateModel::init(model_path, Some(&device), None) {
+                                                Ok(model) => *model_guard = Some(model),
+                                                Err(e) => {
+                                                    let err_msg = format!("OCR Init Error: {:?}", e);
+                                                    println!("[Error] {}", err_msg);
+                                                    has_error = Some(err_msg);
+                                                }
+                                            }
+                                        }
+
+                                        for record in &mut target_records {
+                                            if record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf") {
+                                                if let Some(model) = model_guard.as_mut() {
+                                                    let params = ChatCompletionParameters {
+                                                        messages: vec![Message {
+                                                            role: "user".to_string(),
+                                                            parts: vec![Part { text: "Extract text from image".to_string(), image_url: Some(record.context.clone()) }],
+                                                        }],
+                                                        model: "glm-ocr".to_string(),
+                                                        max_tokens: Some(1024),
+                                                        temperature: Some(0.2),
+                                                        top_p: Some(0.95),
+                                                        top_k: None,
+                                                        repeat_penalty: None,
+                                                        repeat_last_n: None,
+                                                        seed: Some(42),
+                                                    };
+                                                    match model.generate(params) {
+                                                        Ok(res) => {
+                                                            // 🚀 [Fix] GLM-OCR이 뱉는 ```markdown ... ``` 같은 코드 블록 껍데기를 제거하고 알맹이만 추출합니다.
+                                                            let raw_ocr = res.choices[0].message.content.clone();
+                                                            let cleaned_ocr = raw_ocr
+                                                                .replace("```markdown", "")
+                                                                .replace("```", "")
+                                                                .trim()
+                                                                .to_string();
+                                                            
+                                                            record.context = cleaned_ocr.clone();
+                                                            println!("[System] 이미지 OCR 완료 및 마크다운 태그 정제됨. (ID: {})", record.id);
+                                                            println!("[GlmOcr] 배치 작업 생성된 텍스트 결과:\n{}", cleaned_ocr);
+                                                        },
+
+                                                        Err(e) => {
+                                                            let err_msg = format!("OCR Error: {}", e);
+                                                            println!("[Error] 이미지 OCR 중 예외 발생: {:?}", e);
+                                                            has_error = Some(err_msg);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        *model_guard = None; // VRAM 완전 해제
+                                    } // 뮤텍스 락 스코프 종료로 인한 자동 해제
+                                    
+                                    force_memory_cleanup();
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await; // 확실한 VRAM 해제 텀 부여
+                                    println!("[System] === Phase 0: 이미지 전용 OCR 처리 종료 (VRAM 해제됨) ===\n");
+                                }
                                 // ★ Phase 1: Privacy Filter 일괄 마스킹 및 VRAM 해제
                                 if has_error.is_none() {
                                     println!("\n[System] === Phase 1: Privacy Filter 마스킹 시작 ===");
@@ -1013,47 +1044,55 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                     // 1. OCR Extract
                     {
-                        let mut model_guard = OCR_MODEL.lock().unwrap();
-                        if model_guard.is_none() {
-                            let model_path = "..\\models\\glm_ocr";
-                            // 🚀 수동 파일 업로드 시에도 CUDA VRAM 기반 SSD 오프로딩을 적극 적용합니다.
-                            let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-                            match GlmOcrGenerateModel::init(model_path, Some(&ocr_device), None) {
-                                Ok(model) => *model_guard = Some(model),
-                                Err(e) => {
-                                    let err_msg = format!("OCR Init Error: {:?}", e);
-                                    println!("[Error] {}", err_msg);
-                                    has_error = Some(err_msg);
+                        {
+                            let mut model_guard = OCR_MODEL.lock().unwrap();
+                            if model_guard.is_none() {
+                                let model_path = "..\\models\\glm_ocr";
+                                // 🚀 수동 파일 업로드 시에도 CUDA VRAM 기반 SSD 오프로딩을 적극 적용합니다.
+                                let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+                                match GlmOcrGenerateModel::init(model_path, Some(&ocr_device), None) {
+                                    Ok(model) => *model_guard = Some(model),
+                                    Err(e) => {
+                                        let err_msg = format!("OCR Init Error: {:?}", e);
+                                        println!("[Error] {}", err_msg);
+                                        has_error = Some(err_msg);
+                                    }
                                 }
                             }
-                        }
-                        if let Some(model) = model_guard.as_mut() {
-                            let params = ChatCompletionParameters {
-                                messages: vec![Message {
-                                    role: "user".to_string(),
-                                    parts: vec![Part { text: "Extract text".to_string(), image_url: Some(full_data_url.to_string()) }],
-                                }],
-                                model: "glm-ocr".to_string(),
-                                max_tokens: Some(1024),
-                                temperature: Some(0.0),
-                                top_p: None, top_k: None, repeat_penalty: None, repeat_last_n: None, seed: None,
-                            };
-                            match model.generate(params) {
-                                Ok(res) => ocr_result = res.choices[0].message.content.clone(),
-                                Err(e) => {
-                                    let err_msg = format!("OCR Error: {}", e);
-                                    println!("[Error] 단일 파일 OCR 처리 중 예외 발생: {:?}", e); // 🌟 Rust 로그 추가
-                                    has_error = Some(err_msg);
+                            if let Some(model) = model_guard.as_mut() {
+                                let params = ChatCompletionParameters {
+                                    messages: vec![Message {
+                                        role: "user".to_string(),
+                                        parts: vec![Part { text: "Extract text".to_string(), image_url: Some(full_data_url.to_string()) }],
+                                    }],
+                                    model: "glm-ocr".to_string(),
+                                    max_tokens: Some(1024),
+                                    temperature: Some(0.2),
+                                    top_p: Some(0.95),
+                                    top_k: None, repeat_penalty: None, repeat_last_n: None, seed: Some(42),
+                                };
+                                match model.generate(params) {
+                                    Ok(res) => {
+                                        ocr_result = res.choices[0].message.content.clone();
+                                        println!("[GlmOcr] 단일 파일 생성된 텍스트 결과:\n{}", ocr_result);
+                                    },
+                                    Err(e) => {
+                                        let err_msg = format!("OCR Error: {}", e);
+                                        println!("[Error] 단일 파일 OCR 처리 중 예외 발생: {:?}", e); // 🌟 Rust 로그 추가
+                                        has_error = Some(err_msg);
+                                    }
                                 }
+                            } else {
+                                let err_msg = "OCR 모델 로드에 실패했습니다.".to_string();
+                                println!("[Error] {}", err_msg); // 🌟 Rust 로그 추가
+                                has_error = Some(err_msg);
                             }
-                        } else {
-                            let err_msg = "OCR 모델 로드에 실패했습니다.".to_string();
-                            println!("[Error] {}", err_msg); // 🌟 Rust 로그 추가
-                            has_error = Some(err_msg);
-                        }
-                        // ★ VRAM 해제
-                        *model_guard = None;
+                            // ★ VRAM 해제
+                            *model_guard = None;
+                        } // 뮤텍스 락 스코프 종료로 인한 자동 해제
+                        
                         force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
+                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await; // 확실한 VRAM 해제 텀 부여
                         
                         // 🚀 단일 파일 처리 시에도 VRAM 해제 여부를 즉각 확인할 수 있도록 로그를 추가합니다.
                         println!("[System] === 단일 파일 GLM OCR 처리 종료 (VRAM 해제됨) ===\n");

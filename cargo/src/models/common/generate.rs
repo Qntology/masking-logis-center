@@ -6,6 +6,7 @@ use crate::params::chat::{ChatCompletionResponse, ChatCompletionChunkResponse, C
 use candle_core::IndexOp; // IndexOp 추가
 use futures::stream::Stream;
 use std::pin::Pin;
+use candle_transformers::generation::LogitsProcessor; // 샘플링을 위한 LogitsProcessor 추가
 
 pub struct GenerationContext {
     pub temperature: Option<f64>,
@@ -53,16 +54,27 @@ pub fn generate_generic(
     ctx: &mut GenerationContext,
     _model_name: &str,
 ) -> Result<ChatCompletionResponse> {
-    // Simple implementation for now
+    // [Fix] 매 생성 시작 시 반드시 이전 상태(KV Cache)를 초기화하여 아이템 간 간섭(병합 현상)을 방지합니다.
+    model.clear_cache();
+    
     let mut tokens = Vec::new();
     let mut current_input_ids = input_ids;
     let mut seqlen_offset = 0;
 
+    // 전달된 Temperature와 Top-P 파라미터를 기반으로 LogitsProcessor 초기화
+    let temp = if let Some(t) = ctx.temperature {
+        if t < 1e-7 { None } else { Some(t) }
+    } else {
+        None
+    };
+    let mut logits_processor = LogitsProcessor::new(ctx.seed, temp, ctx.top_p);
+
     let logits = model.forward_initial(&current_input_ids, seqlen_offset, data)?;
     seqlen_offset += current_input_ids.dim(1)?;
     
-    // Greedy search for simplicity
-    let mut next_token = logits.i((0, logits.dim(1)? - 1))?.argmax(0)?.to_scalar::<u32>()?;
+    // LogitsProcessor를 통한 샘플링 수행
+    let last_logits = logits.i((0, logits.dim(1)? - 1))?;
+    let mut next_token = logits_processor.sample(&last_logits)?;
     tokens.push(next_token);
 
     for _ in 1..ctx.max_tokens {
@@ -72,7 +84,9 @@ pub fn generate_generic(
         current_input_ids = Tensor::new(&[next_token], &ctx.device)?.unsqueeze(0)?;
         let logits = model.forward_step(&current_input_ids, seqlen_offset)?;
         seqlen_offset += 1;
-        next_token = logits.i((0, 0))?.argmax(0)?.to_scalar::<u32>()?;
+        
+        let next_logits = logits.i((0, 0))?;
+        next_token = logits_processor.sample(&next_logits)?;
         tokens.push(next_token);
     }
 
@@ -95,7 +109,7 @@ pub fn generate_generic(
 }
 
 pub fn generate_stream_generic(
-    _model: &mut dyn InferenceModel,
+    model: &mut dyn InferenceModel,
     _tokenizer: &TokenizerModel,
     _input_ids: Tensor,
     _data: MultiModalData,
@@ -110,6 +124,8 @@ pub fn generate_stream_generic(
     _device: &Device,
     _model_name: &str,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatCompletionChunkResponse>> + Send>>> {
+    // [Fix] 스트리밍 생성 시에도 캐시 초기화를 보장합니다.
+    model.clear_cache();
     // Stub for now
     Err(anyhow::anyhow!("Streaming not implemented yet"))
 }

@@ -146,10 +146,21 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
 
     table.add(vec![batch]).execute().await?;
     
-    println!("[LanceDB] 성공적으로 저장되었습니다! 저장된 데이터 수: {}", records.len());
+    // 🚀 [Fix] OCR 처리가 끝난 후 context에서 data:image/가 사라지는 점을 고려하여,
+    // URL의 파일 경로 여부나 제목의 [File] 표식을 통해 이미지/PDF를 정확히 식별합니다.
+    let image_count = records.iter().filter(|r| {
+        r.url.starts_with("file://") || 
+        r.url.to_lowercase().ends_with(".png") || 
+        r.url.to_lowercase().ends_with(".jpg") || 
+        r.title.contains("[File]")
+    }).count();
+    let web_count = records.len() - image_count;
+    
+    println!("[LanceDB] 저장 완료! [전체: {}건] (웹페이지: {}건, 이미지/PDF: {}건)", records.len(), web_count, image_count);
     
     Ok(())
 }
+
 
 pub async fn fetch_drafts() -> Result<Vec<CommerceRecord>, lancedb::Error> {
     let table = get_or_create_table().await?;
