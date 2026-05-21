@@ -74,6 +74,7 @@ pub fn load_glm_ocr_gguf<P: AsRef<Path>>(
         vb, 
         config.clone(), 
         config.text_config.eos_token_id.clone(),
+        _device,
         Some(text_file),
         Some(text_content.clone()), // .clone() 추가
         Some(vision_file),

@@ -3,8 +3,8 @@
 use anyhow::Result;
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{
-    Activation, Embedding, LayerNorm, Linear, Module, RmsNorm, VarBuilder,
-    embedding, layer_norm, linear, linear_no_bias, rms_norm,
+    Activation, Embedding, LayerNorm, Linear, Module, VarBuilder,
+    embedding, layer_norm, linear, linear_no_bias,
 };
 
 use crate::{
@@ -14,15 +14,28 @@ use crate::{
     utils::tensor_utils::{prepare_causal_attention_mask, repeat_kv},
 };
 
-pub struct GlmOcrRMSNorm(RmsNorm);
+// 🚀 BF16/F16 환경에서 분산(Variance) 계산 시 오버플로우로 인한 NaN 발생을 원천 차단하기 위해
+// candle_nn::RmsNorm 래퍼 대신 가중치를 직접 보유하고 F32로 안전하게 캐스팅하여 연산하는 구조로 변경합니다.
+pub struct GlmOcrRMSNorm {
+    weight: Tensor,
+    eps: f64,
+}
 
 impl GlmOcrRMSNorm {
     pub fn new(vb: VarBuilder, hidden_size: usize, eps: f64) -> Result<Self> {
-        let rms = rms_norm(hidden_size, eps, vb)?;
-        Ok(Self(rms))
+        let weight = vb.get(hidden_size, "weight")?;
+        Ok(Self { weight, eps })
+    }
+    pub fn new_on_device(vb: VarBuilder, hidden_size: usize, eps: f64, device: &Device) -> Result<Self> {
+        let weight = vb.get(hidden_size, "weight")?.to_device(device)?;
+        Ok(Self { weight, eps })
     }
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        Ok(self.0.forward(xs)?)
+        let x_dtype = xs.dtype();
+        let x_f32 = xs.to_dtype(DType::F32)?;
+        let variance = x_f32.powf(2.0)?.mean_keepdim(candle_core::D::Minus1)?;
+        let x_normed = x_f32.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
+        Ok(x_normed.to_dtype(x_dtype)?.broadcast_mul(&self.weight)?)
     }
     pub fn extra_repr(&self) -> String {
         "GlmOcrRMSNorm".to_string()
@@ -416,10 +429,10 @@ impl GlmOcrTextDecoderLayer {
             down_proj: Linear::new(dummy.clone(), None),
             act_fn: config.hidden_act,
         };
-        let input_layernorm = GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps));
-        let post_attention_layernorm = GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps));
-        let post_self_attn_layernorm = GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps));
-        let post_mlp_layernorm = GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps));
+        let input_layernorm = GlmOcrRMSNorm { weight: dummy_1d.clone(), eps: config.rms_norm_eps };
+        let post_attention_layernorm = GlmOcrRMSNorm { weight: dummy_1d.clone(), eps: config.rms_norm_eps };
+        let post_self_attn_layernorm = GlmOcrRMSNorm { weight: dummy_1d.clone(), eps: config.rms_norm_eps };
+        let post_mlp_layernorm = GlmOcrRMSNorm { weight: dummy_1d.clone(), eps: config.rms_norm_eps };
         Ok(Self { self_attn, mlp, input_layernorm, post_attention_layernorm, post_self_attn_layernorm, post_mlp_layernorm })
     }
 
@@ -432,10 +445,10 @@ impl GlmOcrTextDecoderLayer {
         self.self_attn.o_proj = Linear::new(dummy.clone(), None);
         self.mlp.gate_up_proj = Linear::new(dummy.clone(), None);
         self.mlp.down_proj = Linear::new(dummy.clone(), None);
-        self.input_layernorm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
-        self.post_attention_layernorm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
-        self.post_self_attn_layernorm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
-        self.post_mlp_layernorm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+        self.input_layernorm.weight = dummy_1d.clone();
+        self.post_attention_layernorm.weight = dummy_1d.clone();
+        self.post_self_attn_layernorm.weight = dummy_1d.clone();
+        self.post_mlp_layernorm.weight = dummy_1d.clone();
     }
 
     pub fn is_cleared(&self) -> bool {
@@ -453,7 +466,7 @@ impl GlmOcrTextDecoderLayer {
         let load_norm = |r: &mut R, name: &str| -> Result<GlmOcrRMSNorm> {
             let w = ct.tensor(r, &format!("{}.weight", name), device)?;
             let w = w.dequantize_f16(device).or_else(|_| w.dequantize(device))?.to_dtype(dtype)?;
-            Ok(GlmOcrRMSNorm(RmsNorm::new(w, 1e-5)))
+            Ok(GlmOcrRMSNorm { weight: w, eps: 1e-5 })
         };
 
         self.self_attn.q_proj = load_lin(reader, &format!("{}attn_q", prefix))?;
@@ -574,13 +587,13 @@ impl GlmOcrVisionBlock {
         let attn = GlmOcrVisionAttention {
             num_heads: config.num_heads, head_dim, scaling,
             qkv: Linear::new(dummy.clone(), None), proj: Linear::new(dummy.clone(), None),
-            q_norm: GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps)),
-            k_norm: GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps)),
+            q_norm: GlmOcrRMSNorm { weight: dummy_1d.clone(), eps: config.rms_norm_eps },
+            k_norm: GlmOcrRMSNorm { weight: dummy_1d.clone(), eps: config.rms_norm_eps },
         };
         let mlp = GlmOcrVisionMlp(GateUpDownMLP::new_dummy(device)); 
         Ok(Self {
-            norm1: GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps)),
-            norm2: GlmOcrRMSNorm(RmsNorm::new(dummy_1d.clone(), config.rms_norm_eps)),
+            norm1: GlmOcrRMSNorm { weight: dummy_1d.clone(), eps: config.rms_norm_eps },
+            norm2: GlmOcrRMSNorm { weight: dummy_1d.clone(), eps: config.rms_norm_eps },
             attn, mlp,
         })
     }
@@ -590,11 +603,11 @@ impl GlmOcrVisionBlock {
         let dummy_1d = Tensor::zeros((1,), DType::F32, &Device::Cpu).unwrap();
         self.attn.qkv = Linear::new(dummy.clone(), None);
         self.attn.proj = Linear::new(dummy.clone(), None);
-        self.attn.q_norm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
-        self.attn.k_norm.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+        self.attn.q_norm.weight = dummy_1d.clone();
+        self.attn.k_norm.weight = dummy_1d.clone();
         self.mlp.0.clear_weights();
-        self.norm1.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
-        self.norm2.0 = RmsNorm::new(dummy_1d.clone(), 1e-5);
+        self.norm1.weight = dummy_1d.clone();
+        self.norm2.weight = dummy_1d.clone();
     }
 
     pub fn is_cleared(&self) -> bool { self.attn.qkv.weight().elem_count() <= 1 }
@@ -613,7 +626,7 @@ impl GlmOcrVisionBlock {
         let load_norm = |r: &mut R, name: &str| -> Result<GlmOcrRMSNorm> {
             let w_t = ct.tensor(r, &format!("{}.weight", name), device)?;
             let w = w_t.dequantize_f16(device).or_else(|_| w_t.dequantize(device))?.to_dtype(dtype)?;
-            Ok(GlmOcrRMSNorm(RmsNorm::new(w, 1e-5)))
+            Ok(GlmOcrRMSNorm { weight: w, eps: 1e-5 })
         };
 
         self.attn.qkv = load_lin_b(reader, &format!("{}attn_qkv", prefix))?;
@@ -848,10 +861,11 @@ impl GlmOcrVisionModel {
 
             hidden_states = block.forward(&hidden_states, &cu_seqlens, Some(&rotary_pos_emb_gpu), Some(position_embeddings_gpu))?;
 
-            // 🚀 가중치를 VRAM에 계속 유지하기 위해 해제 로직을 비활성화합니다.
-            // if self.file.is_some() {
-            //     block.clear_weights(); // 연산 종료 즉시 VRAM 해제
-            // }
+            // 🚀 비전 인코더는 단 1회만 실행되므로, 연산이 끝난 블록은 즉시 VRAM에서 해제하여 
+            // 텍스트 생성 단계(KV Cache 등)를 위한 GPU 메모리를 최대한 확보합니다.
+            if self.file.is_some() {
+                block.clear_weights(); 
+            }
         }
 
         // === RAM 회수 (후처리) ===
@@ -956,6 +970,7 @@ impl GlmOcrTextModel {
         vb: VarBuilder,
         config: GlmOcrTextConfig,
         spatial_merge_size: usize,
+        device: &Device,
         file: Option<std::fs::File>,
         ct: Option<std::sync::Arc<candle_core::quantized::gguf_file::Content>>,
     ) -> Result<Self> {
@@ -973,10 +988,11 @@ impl GlmOcrTextModel {
             layers.push(layer);
         }
 
-        let norm = GlmOcrRMSNorm::new(vb.pp("norm"), config.hidden_size, config.rms_norm_eps)?;
+        // 🚀 [VRAM 상주 최적화] norm과 lm_head를 CPU가 아닌 GPU로 강제 업로드하여 VRAM에 상주하게 만듭니다.
+        let norm = GlmOcrRMSNorm::new_on_device(vb.pp("norm"), config.hidden_size, config.rms_norm_eps, device)?;
         
-        // 🚀 [고속 추론 최적화] 매 토큰마다 F32로 변환하는 끔찍한 병목을 막기 위해 초기화 시점에 미리 F32로 캐싱해 둡니다.
-        let w_lm = vb.root().pp("lm_head").get((config.vocab_size, config.hidden_size), "weight")?.to_dtype(DType::F32)?;
+        // 🚀 원본 DType(BF16) 그대로 GPU에 완전히 캐싱되므로 전송 병목이 0(Zero)가 되며 연산 속도가 극대화됩니다.
+        let w_lm = vb.root().pp("lm_head").get((config.vocab_size, config.hidden_size), "weight")?.to_device(device)?;
         let lm_head = Linear::new(w_lm, None);
         
         let rotary_emb = GlmOcrTextRotaryEmbedding::new(&config, vb.device(), vb.dtype())?;
@@ -1112,16 +1128,16 @@ impl GlmOcrTextModel {
             // }
         }
 
-        // 🚀 [Fix] 트랜스포머 레이어 연산이 끝난 후, CPU에 상주하는 전역 Norm 및 lm_head 가중치와 연산하기 위해 텐서를 CPU로 내립니다.
-        hidden_states = hidden_states.to_device(&Device::Cpu)?;
-
-        hidden_states = self.norm.forward(&hidden_states)?;
-        let last = hidden_states.narrow(1, seq_len - 1, 1)?;
+        // 🚀 [고속 추론 최적화] 전체 시퀀스를 CPU로 내리면 PCIe 대역폭 병목이 극심하게 발생합니다.
+        // 다음 토큰 예측에 필요한 '마지막 토큰'만 GPU에서 선제적으로 추출한 뒤 CPU로 전송하여 속도를 극대화합니다.
+        // 🚀 [VRAM 상주 최적화] norm과 lm_head가 GPU에 상주하므로 CPU 통신 없이 마지막 토큰만 잘라서 100% GPU 연산을 수행합니다.
+        let last_hidden = hidden_states.narrow(1, seq_len - 1, 1)?;
+        let last_normed = self.norm.forward(&last_hidden)?;
         
-        // 🚀 [고속 추론 최적화] 캐싱된 F32 가중치를 사용하여 실시간 형변환 병목 없이 즉시 연산합니다.
-        let logits_cpu = self.lm_head.forward(&last.to_dtype(DType::F32)?)?.to_dtype(self.dtype)?;
+        // 🚀 GPU(VRAM) 안에서 네이티브 DType으로 즉시 MatMul 처리되므로 속도가 수십 배 상승합니다.
+        let logits = self.lm_head.forward(&last_normed)?;
         
-        Ok(logits_cpu.to_device(input_ids.device())?) // 최종 결과만 원본 입력 장치(GPU)로 반환
+        Ok(logits)
     }
 
     pub fn clear_kv_cache(&mut self) {
@@ -1140,6 +1156,7 @@ impl GlmOcrModel {
         vb: VarBuilder, 
         config: GlmOcrConfig, 
         eos_ids: Vec<u32>,
+        device: &Device,
         file_text: Option<std::fs::File>,
         ct_text: Option<std::sync::Arc<candle_core::quantized::gguf_file::Content>>,
         file_vision: Option<std::fs::File>,
@@ -1155,6 +1172,7 @@ impl GlmOcrModel {
             vb.pp("model").pp("language_model"),
             config.text_config,
             config.vision_config.spatial_merge_size,
+            device,
             file_text,
             ct_text
         )?;

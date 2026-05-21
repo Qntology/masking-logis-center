@@ -88,7 +88,7 @@ impl GlmOcrGenerateModel {
             let generation_config_path = format!("{}/generation_config.json", path);
             let generation_config: crate::glm_ocr::config::GlmOcrGenerationConfig =
                 serde_json::from_slice(&std::fs::read(generation_config_path)?)?;
-            GlmOcrModel::new_with_file(vb, cfg.clone(), generation_config.eos_token_id.clone(), None, None, None, None)?
+            GlmOcrModel::new_with_file(vb, cfg.clone(), generation_config.eos_token_id.clone(), &device, None, None, None, None)?
         };
 
         let model_name = std::path::Path::new(path)

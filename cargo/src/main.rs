@@ -173,6 +173,7 @@ const OVERLAY_SCRIPT: &str = r#"
         // 🚀 UI 락을 위한 상태 변수들
         let isProcessing = false;
         let processingIds = []; // 현재 처리(Push) 중인 아이템 ID 목록
+        let pushStartTime = 0; // 🚀 Race Condition 방지를 위한 Push 시작 시간 기록
 
         // 전체 선택 체크박스
         const selectAllCheck = document.createElement('input');
@@ -180,7 +181,15 @@ const OVERLAY_SCRIPT: &str = r#"
         selectAllCheck.title = 'Select All';
         selectAllCheck.onclick = (e) => {
             const checkboxes = log.querySelectorAll('.item-checkbox');
-            checkboxes.forEach(cb => cb.checked = e.target.checked);
+            checkboxes.forEach(cb => {
+                cb.checked = e.target.checked;
+                // 🚀 화면 갱신 시 상태를 잃지 않도록 메모리에도 동기화합니다.
+                if (e.target.checked) {
+                    checkedSessionIds.add(cb.dataset.id);
+                } else {
+                    checkedSessionIds.delete(cb.dataset.id);
+                }
+            });
             updatePushBtnState();
         };
 
@@ -208,6 +217,13 @@ const OVERLAY_SCRIPT: &str = r#"
             if (isProcessing) return;
             const checkedBoxes = log.querySelectorAll('.item-checkbox:checked');
             const selectedIds = Array.from(checkedBoxes).map(cb => cb.dataset.id);
+            
+            // 🚀 로컬 상태에 삭제된 ID를 기록하여 focus 이벤트로 인한 좀비 복구를 원천 차단합니다.
+            selectedIds.forEach(id => {
+                deletedSessionIds.add(id);
+                checkedSessionIds.delete(id); // 🚀 삭제된 아이템은 체크 유지 목록에서도 제거합니다.
+            });
+            
             if (window.rpc) {
                 window.rpc("delete_drafts:" + JSON.stringify(selectedIds));
             }
@@ -221,6 +237,10 @@ const OVERLAY_SCRIPT: &str = r#"
         draftBtn.onclick = async () => {
             if (isProcessing) return;
             const pageId = await generatePageId(window.location.href);
+            
+            // 🚀 사용자가 수동으로 다시 등록 버튼을 눌렀으므로, 차단(삭제) 목록에서 즉시 해제합니다.
+            deletedSessionIds.delete(pageId);
+            
             const extractedText = extractVisibleText();
             const item = { 
                 id: pageId, 
@@ -303,6 +323,7 @@ const OVERLAY_SCRIPT: &str = r#"
             if (draftIds.length === 0) return;
             
             isProcessing = true;
+            pushStartTime = Date.now(); // 🚀 Push 작업이 로컬에서 시작된 시간을 기록합니다.
             processingIds = draftIds; // 🚀 현재 탭에서 누른 즉시 진행 상태 배열에 로컬로 담습니다.
             renderStagedList();       // 🚀 즉시 흐리게(Opacity) 화면을 다시 그립니다.
             startPushSpinner(); 
@@ -332,6 +353,8 @@ const OVERLAY_SCRIPT: &str = r#"
         let currentTabFilter = defaultTab;
         
         let stagedItems = []; 
+        let deletedSessionIds = new Set(); // 🚀 삭제된 ID를 세션 동안 기억하여 백엔드 처리 지연에 따른 자동 복구를 방지합니다.
+        let checkedSessionIds = new Set(); // 🚀 탭 이동이나 리렌더링 시 체크박스 상태를 유지하기 위한 세션 변수입니다.
 
         function updateGnbUI() {
             gnbMenu.replaceChildren();
@@ -597,8 +620,18 @@ const OVERLAY_SCRIPT: &str = r#"
                     cb.type = 'checkbox';
                     cb.className = 'item-checkbox';
                     cb.dataset.id = item.id;
+                    
+                    // 🚀 화면 리렌더링 시, 메모리에 기록된 상태를 읽어와서 체크박스 상태를 복구합니다.
+                    cb.checked = checkedSessionIds.has(item.id);
+                    
                     cb.onclick = (e) => {
                         e.stopPropagation();
+                        // 🚀 개별 체크박스 클릭 시 메모리 상태를 즉각 업데이트합니다.
+                        if (e.target.checked) {
+                            checkedSessionIds.add(item.id);
+                        } else {
+                            checkedSessionIds.delete(item.id);
+                        }
                         updatePushBtnState();
                     };
 
@@ -666,6 +699,12 @@ const OVERLAY_SCRIPT: &str = r#"
         async function autoExtract() {
             setTimeout(async () => {
                 const pageId = await generatePageId(window.location.href);
+                
+                // 🚀 이미 삭제했던 페이지거나 현재 대기열에 이미 존재하는 페이지라면 자동 추출을 중단합니다.
+                if (deletedSessionIds.has(pageId) || stagedItems.some(i => i.id === pageId)) {
+                    return;
+                }
+                
                 const extractedText = extractVisibleText();
                 const item = { 
                     id: pageId, 
@@ -705,12 +744,16 @@ const OVERLAY_SCRIPT: &str = r#"
                 const data = typeof e.detail === 'string' ? JSON.parse(e.detail) : e.detail;
                 
                 if (data.type === 'drafts_loaded') {
-                    stagedItems = data.payload;
+                    // 🚀 삭제 처리가 완료되지 않은 상태에서 서버 데이터를 가져오더라도, 로컬에서 삭제한 ID는 화면에 렌더링하지 않습니다.
+                    stagedItems = data.payload.filter(i => !deletedSessionIds.has(i.id));
                     updateGnbUI(); 
                     renderStagedList();
                     return;
                 } 
                 else if (data.type === 'sync_success') {
+                    // 🚀 수동으로 Draft를 등록하거나 파일이 추가되어 성공한 경우, 삭제 세션 기록에서 명시적으로 해제하여 자동 삭제(필터링)되는 부작용을 방지합니다.
+                    deletedSessionIds.delete(data.payload.id);
+                    
                     stagedItems = stagedItems.filter(i => i.id !== data.payload.id);
                     stagedItems.push(data.payload);
                     updateGnbUI();
@@ -737,6 +780,11 @@ const OVERLAY_SCRIPT: &str = r#"
                     return;
                 }
                 else if (data.type === 'push_idle') {
+                    // 🚀 로컬에서 Push를 누른 직후, 과거에 큐잉되었던 check_progress의 응답이 
+                    // 뒤늦게 도착하여 진행 상태를 강제로 원복시키는 Race Condition을 방지합니다.
+                    if (isProcessing && (Date.now() - pushStartTime < 3000)) {
+                        return;
+                    }
                     if (isProcessing) {
                         isProcessing = false;
                         processingIds = []; // 🚀 작업이 끝난 경우 진행 상태 배열 비움
@@ -745,6 +793,10 @@ const OVERLAY_SCRIPT: &str = r#"
                         renderStagedList();
                     }
                     return;
+                }
+                else if (data.type === 'delete_success') {
+                    // 🚀 삭제 성공 시 화면 하단에 'System: delete_success' 노티가 출력되는 현상을 차단합니다.
+                    return; 
                 }
                 else if (data.type === 'push_success') {
                     isProcessing = false; 
@@ -1404,8 +1456,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => println!("\nShutting down..."),
-        _ = rx.recv() => println!("\nBrowser closed."),
+        _ = tokio::signal::ctrl_c() => {
+            println!("\n[System] 앱 종료 신호(Ctrl+C) 감지. 크롬 브라우저 프로세스를 함께 종료합니다...");
+            // 🚀 앱이 종료될 때 OS 레벨에서 강제 종료를 호출하여 자식 프로세스인 Chromium도 완벽하게 정리되도록 합니다.
+            std::process::exit(0);
+        },
+        _ = rx.recv() => {
+            // 🚀 크롬 브라우저의 'X' 버튼을 눌러 모든 창이 닫히면 채널 핸들러가 이를 감지하여 이곳이 실행됩니다.
+            println!("\n[System] 크롬 브라우저가 종료되었습니다. 앱을 안전하게 종료합니다...");
+            std::process::exit(0);
+        },
     }
-    Ok(())
 }

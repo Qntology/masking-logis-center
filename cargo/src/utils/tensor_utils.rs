@@ -20,7 +20,7 @@ pub fn prepare_causal_attention_mask(
         .flat_map(|i| {
             (0..seq_len + seqlen_offset).map(move |j| {
                 if j > i + seqlen_offset {
-                    f32::NEG_INFINITY
+                    -1e9f32 // 🚀 f32::NEG_INFINITY는 BF16 변환 시 NaN을 유발하여 무한 반복(Hallucination)에 빠지는 핵심 원인이 되므로 안전한 최소값으로 대체합니다.
                 } else {
                     0f32
                 }
