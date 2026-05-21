@@ -281,31 +281,41 @@ const OVERLAY_SCRIPT: &str = r#"
             }
         }
 
+        // 🚀 스피너 구동 로직을 독립적인 함수로 분리하여 어떤 탭에서든 즉시 실행되게 만듭니다.
         let spinnerInterval = null;
-
-        pushBtn.onclick = async () => {
-            // 🚀 중복 실행을 막기 위한 락 설정
-            if (isProcessing) return;
-            
-            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
-            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
-            // Push는 아직 처리되지 않은 항목만 추려서 백엔드로 전송
-            const draftIds = stagedItems.filter(i => selectedIds.includes(i.id) && i.status !== 'PUSHED').map(i => i.id);
-            
-            if (draftIds.length === 0) return;
-            
-            isProcessing = true; // 락 활성화
+        
+        function startPushSpinner() {
+            if (spinnerInterval) return; // 이미 동작 중이면 무시
             pushBtn.disabled = true;
             deleteBtn.disabled = true;
             draftBtn.disabled = true;
             
             let spinnerIdx = 0;
             const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            
             spinnerInterval = setInterval(() => {
-                pushBtn.textContent = `${spinnerFrames[spinnerIdx]} Pushing...`; // 원래대로 복원
+                pushBtn.textContent = `${spinnerFrames[spinnerIdx]} Pushing...`;
                 spinnerIdx = (spinnerIdx + 1) % spinnerFrames.length;
             }, 100);
+        }
+
+        function stopPushSpinner() {
+            if (spinnerInterval) {
+                clearInterval(spinnerInterval);
+                spinnerInterval = null;
+            }
+        }
+
+        pushBtn.onclick = async () => {
+            if (isProcessing) return;
+            
+            const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
+            const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
+            const draftIds = stagedItems.filter(i => selectedIds.includes(i.id) && i.status !== 'PUSHED').map(i => i.id);
+            
+            if (draftIds.length === 0) return;
+            
+            isProcessing = true;
+            startPushSpinner(); // 스피너 강제 기동
             
             if (window.rpc) {
                 window.rpc("mask_and_push_batch:" + JSON.stringify({ 
@@ -690,6 +700,14 @@ const OVERLAY_SCRIPT: &str = r#"
             if (e.key === 'Escape') agentContainer.classList.toggle('open');
         });
 
+        // 🚀 유저가 다른 탭에 있다가 화면으로 돌아올 때 즉시 최신 진행 상태를 물어보고 동기화합니다.
+        window.addEventListener('focus', () => {
+            if (window.rpc) {
+                window.rpc("fetch_drafts");
+                window.rpc("check_progress");
+            }
+        });
+
         window.addEventListener('rpc_response', (e) => {
             try {
                 // 백엔드에서 넘겨준 문자열 JSON을 파싱
@@ -713,15 +731,19 @@ const OVERLAY_SCRIPT: &str = r#"
                 }
                 // 🚀 진행 상황 (퍼센트) 실시간 업데이트 응답인 경우
                 else if (data.type === 'push_progress') {
-                    isProcessing = true; // 강제 락 활성화
+                    if (!isProcessing) {
+                        isProcessing = true; // 강제 락 활성화
+                        startPushSpinner(); // 다른 탭에서도 즉시 스피너 가동
+                    }
                     draftBtn.textContent = `Draft (${data.payload.item_display}/${data.payload.total_items}) ${data.payload.percent}%...`;
                     updatePushBtnState(); // 버튼 비활성화 갱신
                     return;
                 }
-                // 🚀 새로고침 시 백엔드가 작업 중이지 않음을 확인한 경우
+                // 🚀 새로고침/포커스 시 백엔드가 작업 중이지 않음을 확인한 경우
                 else if (data.type === 'push_idle') {
                     if (isProcessing) {
                         isProcessing = false;
+                        stopPushSpinner();
                         updatePushBtnState();
                         renderStagedList();
                     }
@@ -730,7 +752,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 // 마스킹 및 Push 대기열 작업 완료 응답인 경우
                 else if (data.type === 'push_success') {
                     isProcessing = false; // 작업 완료 시 락 해제
-                    if (spinnerInterval) clearInterval(spinnerInterval);
+                    stopPushSpinner();
                     deleteBtn.disabled = false;
                     draftBtn.disabled = false;
                     
@@ -780,7 +802,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 // 프로세스 중 에러가 발생한 경우
                 else if (data.type === 'error') {
                     isProcessing = false; // 에러 시 락 해제
-                    if (spinnerInterval) clearInterval(spinnerInterval);
+                    stopPushSpinner();
                     if (fileSpinnerInterval) {
                         clearInterval(fileSpinnerInterval);
                         fileSpinner.style.display = 'none';
