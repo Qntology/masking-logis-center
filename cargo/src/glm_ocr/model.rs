@@ -1122,10 +1122,12 @@ impl GlmOcrTextModel {
 
             hidden_states = layer.forward(&hidden_states, (&cos, &sin), attention_mask.as_ref())?;
 
-            // 🚀 가중치를 VRAM에 계속 유지하기 위해 해제 로직을 비활성화합니다.
-            // if self.file.is_some() {
-            //     layer.clear_weights(); // 연산 종료 즉시 VRAM 해제
-            // }
+            // 🚀 [VRAM 최적화] 입력 토큰이 매우 긴 최초 프롬프트 및 이미지 연산 단계(Prefill, seqlen_offset == 0)에서는
+            // 거대한 활성화(Activation) 메모리가 발생하여 VRAM이 폭발할 수 있으므로 연산 직후 가중치를 즉시 비워줍니다.
+            // 반면 텍스트를 생성하는 디코딩 단계(Decode, seqlen_offset > 0)에서는 속도 유지를 위해 캐싱을 유지합니다.
+            if self.file.is_some() && seqlen_offset == 0 {
+                layer.clear_weights();
+            }
         }
 
         // 🚀 [고속 추론 최적화] 전체 시퀀스를 CPU로 내리면 PCIe 대역폭 병목이 극심하게 발생합니다.

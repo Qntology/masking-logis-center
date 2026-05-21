@@ -131,10 +131,13 @@ impl SparseMoE {
     fn new(cfg: &ModelConfig, vb: VarBuilder) -> Result<Self> {
         let router_weight = vb.get((cfg.num_local_experts, cfg.hidden_size), "router.weight")?.transpose(0, 1)?.contiguous()?;
         let router_bias = vb.get(cfg.num_local_experts, "router.bias")?;
-        let gate_up_proj = vb.get((cfg.num_local_experts, cfg.hidden_size, 2 * cfg.intermediate_size), "experts.gate_up_proj")?;
-        let gate_up_proj_bias = vb.get((cfg.num_local_experts, 2 * cfg.intermediate_size), "experts.gate_up_proj_bias")?;
-        let down_proj = vb.get((cfg.num_local_experts, cfg.intermediate_size, cfg.hidden_size), "experts.down_proj")?;
-        let down_proj_bias = vb.get((cfg.num_local_experts, cfg.hidden_size), "experts.down_proj_bias")?;
+        
+        // 🚀 [VRAM 최적화] 전체 VRAM의 상당 부분을 차지하는 MoE Expert 가중치들을 CPU RAM으로 오프로딩합니다.
+        let vb_cpu = vb.set_device(Device::Cpu);
+        let gate_up_proj = vb_cpu.get((cfg.num_local_experts, cfg.hidden_size, 2 * cfg.intermediate_size), "experts.gate_up_proj")?;
+        let gate_up_proj_bias = vb_cpu.get((cfg.num_local_experts, 2 * cfg.intermediate_size), "experts.gate_up_proj_bias")?;
+        let down_proj = vb_cpu.get((cfg.num_local_experts, cfg.intermediate_size, cfg.hidden_size), "experts.down_proj")?;
+        let down_proj_bias = vb_cpu.get((cfg.num_local_experts, cfg.hidden_size), "experts.down_proj_bias")?;
 
         Ok(Self {
             router_weight, router_bias, gate_up_proj, gate_up_proj_bias, down_proj, down_proj_bias,
@@ -171,8 +174,9 @@ impl SparseMoE {
             let expert_input = x_flat.index_select(&token_indices, 0)?;
             let expert_weights = weights_flat.index_select(&pos_indices_tensor, 0)?.to_dtype(x.dtype())?.unsqueeze(1)?;
 
-            let gu_w = self.gate_up_proj.get(eidx)?.contiguous()?;
-            let gu_b = self.gate_up_proj_bias.get(eidx)?;
+            // 🚀 [VRAM 최적화] 라우팅을 통해 선택된 특정 Expert의 가중치만 연산 직전에 동적으로 VRAM에 로드합니다.
+            let gu_w = self.gate_up_proj.get(eidx)?.to_device(x.device())?.contiguous()?;
+            let gu_b = self.gate_up_proj_bias.get(eidx)?.to_device(x.device())?;
             let gate_up = (expert_input.contiguous()?.matmul(&gu_w)?.broadcast_add(&gu_b))?;
             
             let gate = gate_up.narrow(candle_core::D::Minus1, 0, self.intermediate_size)?.minimum(LIMIT as f64)?;
@@ -180,8 +184,9 @@ impl SparseMoE {
             let glu = (gate.clone() * candle_nn::ops::sigmoid(&(gate * ALPHA as f64)?)?)?;
             let expert_out_mid = (up.affine(1.0, 1.0)?.mul(&glu))?;
             
-            let dp_w = self.down_proj.get(eidx)?.contiguous()?;
-            let dp_b = self.down_proj_bias.get(eidx)?;
+            // 🚀 다운 프로젝션 역시 선택된 Expert만 VRAM으로 올립니다.
+            let dp_w = self.down_proj.get(eidx)?.to_device(x.device())?.contiguous()?;
+            let dp_b = self.down_proj_bias.get(eidx)?.to_device(x.device())?;
             let expert_output = (expert_out_mid.contiguous()?.matmul(&dp_w)?.broadcast_add(&dp_b))?;
 
             let weighted_output = expert_output.broadcast_mul(&expert_weights)?;
@@ -364,8 +369,16 @@ impl PrivacyFilterModel {
             return Ok(vec![]);
         }
 
-        let logits = self.forward(input_ids).map_err(anyhow::Error::msg)?;
-        let logits_data = logits.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>().map_err(anyhow::Error::msg)?;
+        // 🚀 [VRAM 최적화] 긴 텍스트 입력 시 Attention 연산(`s * s`)으로 인한 기하급수적인 VRAM 폭발을 방지하기 위해 
+        // 토큰을 최대 2048개 단위의 청크(Chunk)로 나누어 순차 처리한 뒤 결과를 이어 붙입니다.
+        let chunk_size = 2048;
+        let mut all_logits_data = Vec::with_capacity(s * self.config.num_labels());
+
+        for chunk in input_ids.chunks(chunk_size) {
+            let logits = self.forward(chunk).map_err(anyhow::Error::msg)?;
+            let chunk_logits_data = logits.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>().map_err(anyhow::Error::msg)?;
+            all_logits_data.extend_from_slice(&chunk_logits_data);
+        }
         
         let num_labels = self.config.num_labels();
         let label_list = self.config.id2label.as_ref().map(|m| {
@@ -374,6 +387,6 @@ impl PrivacyFilterModel {
             l
         }).unwrap_or_else(crate::privacy_filter::config::build_label_list);
 
-        Ok(viterbi::extract_spans(&viterbi::viterbi_decode(&logits_data, s, num_labels, &self.viterbi_config), &logits_data, num_labels, &label_list, &tokens.get_tokens().iter().map(|s| s.to_string()).collect::<Vec<_>>(), tokens.get_offsets(), text))
+        Ok(viterbi::extract_spans(&viterbi::viterbi_decode(&all_logits_data, s, num_labels, &self.viterbi_config), &all_logits_data, num_labels, &label_list, &tokens.get_tokens().iter().map(|s| s.to_string()).collect::<Vec<_>>(), tokens.get_offsets(), text))
     }
 }

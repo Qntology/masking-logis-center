@@ -74,6 +74,8 @@ struct AppConfig {
     custom_tabs: Option<Vec<String>>,
     #[serde(default)]
     auto_extract: Option<bool>,
+    #[serde(default)]
+    enable_masking: Option<bool>,
 }
 
 fn load_app_config() -> AppConfig {
@@ -329,6 +331,11 @@ const OVERLAY_SCRIPT: &str = r#"
             const selectedIds = Array.from(checkedSessionIds);
             const checkedCount = selectedIds.length;
 
+            // 🚀 체크박스가 1개 이상 선택되었을 때만 Footer(입력창 및 Submit 영역)를 노출합니다.
+            if (currentTabFilter !== 'CONFIG' && currentTabFilter !== 'PROMPT') {
+                footer.style.display = (checkedCount > 0) ? 'flex' : 'none';
+            }
+
             // 🚀 작업 중일 때 Push 버튼을 Cancel 버튼으로 전환합니다.
             if (isProcessing) {
                 pushBtn.disabled = false;
@@ -341,9 +348,19 @@ const OVERLAY_SCRIPT: &str = r#"
 
             const draftCount = stagedItems.filter(i => selectedIds.includes(i.id) && i.status !== 'PUSHED').length;
             
-            pushBtn.style.background = '#007bff'; // 기본색(파란색)
-            pushBtn.disabled = (draftCount === 0);
-            pushBtn.textContent = `Push (${draftCount})`;
+            // 🚀 필수 모델 설치 여부를 검증합니다. (임베딩은 무조건 필수, 마스킹은 켜져 있을 때만 필수)
+            const hasEmbedding = window.model_status && window.model_status['Embedding'];
+            const hasPrivacyFilter = window.model_status && window.model_status['Privacy-Filter'];
+            const isModelReady = hasEmbedding && (!window.enable_masking || hasPrivacyFilter);
+
+            pushBtn.style.background = isModelReady ? '#007bff' : '#dc3545'; // 모델 미비 시 빨간색
+            pushBtn.disabled = (draftCount === 0) || !isModelReady;
+            
+            if (!isModelReady && draftCount > 0) {
+                pushBtn.textContent = 'Model Required';
+            } else {
+                pushBtn.textContent = `Push (${draftCount})`;
+            }
 
             // 🚀 Delete 버튼에 선택된 아이템 개수를 표기합니다.
             deleteBtn.textContent = `Delete (${checkedCount})`;
@@ -819,6 +836,16 @@ const OVERLAY_SCRIPT: &str = r#"
             const file = e.target.files[0];
             if (!file) return;
 
+            // 🚀 이미지 파일인데 GLM-OCR이 없다면 차단 및 CONFIG 이동
+            if (file.type.startsWith('image/') && !(window.model_status && window.model_status['GLM-OCR'])) {
+                alert("GLM-OCR 모델이 설치되지 않았습니다. CONFIG 메뉴에서 모델을 다운로드해 주세요.");
+                fileInput.value = '';
+                currentTabFilter = 'CONFIG';
+                updateGnbUI();
+                renderStagedList();
+                return;
+            }
+
             if (file.name.toLowerCase().endsWith('.csv') || file.type === 'text/csv') {
                 const reader = new FileReader();
                 reader.onload = async (ev) => {
@@ -946,6 +973,16 @@ const OVERLAY_SCRIPT: &str = r#"
             const files = e.dataTransfer.files;
             if (files.length > 0) {
                 const file = files[0];
+
+                // 🚀 이미지 드랍 시 GLM-OCR 확인 및 차단
+                if (file.type.startsWith('image/') && !(window.model_status && window.model_status['GLM-OCR'])) {
+                    alert("GLM-OCR 모델이 설치되지 않았습니다. CONFIG 메뉴에서 모델을 다운로드해 주세요.");
+                    currentTabFilter = 'CONFIG';
+                    updateGnbUI();
+                    renderStagedList();
+                    return;
+                }
+
                 const reader = new FileReader();
                 reader.onload = async (ev) => {
                     const content = ev.target.result;
@@ -1122,6 +1159,42 @@ const OVERLAY_SCRIPT: &str = r#"
                     const isAuto = e.target.value === 'true';
                     window.auto_extract = isAuto;
                     if (window.rpc) window.rpc("save_config:" + JSON.stringify({ auto_extract: isAuto }));
+                };
+                
+                // 🚀 마스킹 기능 On/Off UI 추가
+                const maskingTitle = document.createElement('h3');
+                maskingTitle.textContent = getText('masking_title') || 'Privacy Masking';
+                maskingTitle.style.fontSize = '14px';
+
+                const maskingDesc = document.createElement('p');
+                maskingDesc.textContent = getText('masking_desc') || 'Automatically masks sensitive data.';
+                maskingDesc.style.fontSize = '12px';
+                maskingDesc.style.color = '#666';
+                maskingDesc.style.marginBottom = '15px';
+
+                const maskingSelect = document.createElement('select');
+                maskingSelect.style.padding = '8px';
+                maskingSelect.style.width = '100%';
+                maskingSelect.style.marginBottom = '30px';
+                maskingSelect.style.fontSize = '13px';
+                
+                const maskOptOn = document.createElement('option');
+                maskOptOn.value = 'true';
+                maskOptOn.textContent = 'ON';
+                const maskOptOff = document.createElement('option');
+                maskOptOff.value = 'false';
+                maskOptOff.textContent = 'OFF';
+                
+                maskingSelect.appendChild(maskOptOn);
+                maskingSelect.appendChild(maskOptOff);
+                
+                maskingSelect.value = window.enable_masking !== false ? 'true' : 'false';
+                
+                maskingSelect.onchange = (e) => {
+                    const isMasking = e.target.value === 'true';
+                    window.enable_masking = isMasking;
+                    if (window.rpc) window.rpc("save_config:" + JSON.stringify({ enable_masking: isMasking }));
+                    updatePushBtnState(); // 상태 변경 시 Push 버튼 검증 재실행
                 };
                 
                 // 🚀 모델 다운로드 UI 추가
@@ -1316,6 +1389,8 @@ const OVERLAY_SCRIPT: &str = r#"
                     langDesc.textContent = updateText('lang_desc');
                     autoExtractTitle.textContent = updateText('auto_extract_title');
                     autoExtractDesc.textContent = updateText('auto_extract_desc');
+                    maskingTitle.textContent = updateText('masking_title') || 'Privacy Masking';
+                    maskingDesc.textContent = updateText('masking_desc') || 'Automatically masks sensitive data.';
                     
                     modelTitle.textContent = updateText('model_title');
                     modelDesc.textContent = updateText('model_desc');
@@ -1355,6 +1430,9 @@ const OVERLAY_SCRIPT: &str = r#"
                 configWrapper.appendChild(autoExtractTitle);
                 configWrapper.appendChild(autoExtractDesc);
                 configWrapper.appendChild(autoExtractSelect);
+                configWrapper.appendChild(maskingTitle);
+                configWrapper.appendChild(maskingDesc);
+                configWrapper.appendChild(maskingSelect);
                 configWrapper.appendChild(modelTitle);
                 configWrapper.appendChild(modelDesc);
                 configWrapper.appendChild(downloadAllBtn); // 🚀 덧붙이기
@@ -1369,7 +1447,7 @@ const OVERLAY_SCRIPT: &str = r#"
 
             // 일반 탭 복구
             listHeader.style.display = 'flex'; // 🚀 기능 버튼과 체크박스가 묶인 헤더 전체 노출
-            footer.style.display = 'flex';
+            // 🚀 footer 노출 여부는 updatePushBtnState() 에서 동적으로 제어되므로 여기서 고정하지 않습니다.
 
             // 🚀 선택된 도메인 탭 검사 및 검색어 필터링 동시 적용
             const query = window.searchQuery || '';
@@ -1826,15 +1904,16 @@ const OVERLAY_SCRIPT: &str = r#"
                             pc.style.display = 'block';
                         }
                         
-                        if (btn && btn.textContent !== getText('model_downloading')) {
-                            btn.textContent = getText('model_downloading');
+                        // 🚀 버튼 텍스트에 진행률(%)을 직접 표기합니다.
+                        if (btn) {
+                            btn.textContent = `${getText('model_downloading')} (${data.percent}%)`;
                             btn.disabled = true;
                             btn.style.background = '#6c757d';
                         }
 
                         if (pb) {
                             pb.style.width = `${data.percent}%`;
-                            pb.textContent = `${getText('model_downloading')} ${data.percent}%`;
+                            pb.textContent = `${data.percent}%`;
                         }
                     }
                     return;
@@ -1876,14 +1955,18 @@ const OVERLAY_SCRIPT: &str = r#"
             } catch (err) {
             }
             
-            const div = document.createElement('div');
-            div.className = 'system';
-            div.style.padding = '10px';
-            div.style.background = '#f0f4ff';
-            div.style.borderRadius = '4px';
-            div.textContent = 'System: ' + (typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail));
-            log.appendChild(div);
-            div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            // 🚀 시스템 메시지가 JSON 객체 문자열이거나 처리되지 않은 내부 RPC 응답일 경우, 화면에 코드 덩어리(HTML 파일처럼)로 노출되는 현상을 원천 차단합니다.
+            const detailStr = typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail);
+            if (!detailStr.trim().startsWith('{') && !detailStr.trim().startsWith('[')) {
+                const div = document.createElement('div');
+                div.className = 'system';
+                div.style.padding = '10px';
+                div.style.background = '#f0f4ff';
+                div.style.borderRadius = '4px';
+                div.textContent = 'System: ' + detailStr;
+                log.appendChild(div);
+                div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            }
         });
 
         autoExtract();
@@ -1913,6 +1996,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let default_language = app_config.language.unwrap_or_else(|| "English".to_string());
     let custom_tabs_str = app_config.custom_tabs.map(|tabs| serde_json::to_string(&tabs).unwrap_or_else(|_| "null".to_string())).unwrap_or_else(|| "null".to_string());
     let auto_extract = app_config.auto_extract.unwrap_or(true); // 🚀 기본값은 활성화(true)
+    let enable_masking = app_config.enable_masking.unwrap_or(true); // 🚀 마스킹 기능도 기본값 활성화(true)
     
     let app_dir = gemini_gui_lib::utils::get_app_dir();
 
@@ -1988,7 +2072,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
         .replace("window.rpc", &format!("window.{}", rpc_binding_name))
         .replace("window.geminiSidebarLoaded", &format!("window.{}", sidebar_var_name));
 
-    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\nwindow.default_language = \"{}\";\nwindow.custom_tabs = {};\nwindow.auto_extract = {};\nwindow.model_status = {};\nwindow.lang_dict = {};\n{}", is_authenticated, default_tab, default_language, custom_tabs_str, auto_extract, model_status_str, lang_dict_str, overlay_script_replaced);
+    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\nwindow.default_language = \"{}\";\nwindow.custom_tabs = {};\nwindow.auto_extract = {};\nwindow.enable_masking = {};\nwindow.model_status = {};\nwindow.lang_dict = {};\n{}", is_authenticated, default_tab, default_language, custom_tabs_str, auto_extract, enable_masking, model_status_str, lang_dict_str, overlay_script_replaced);
     // 페이지가 새로고침되거나 다른 페이지로 이동하더라도 스크립트가 유지되도록 등록합니다.
     let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(&full_script)).await;
     let _ = page.evaluate(full_script).await;
@@ -2225,64 +2309,74 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 }
 
                                 // ★ Phase 1: Privacy Filter 일괄 마스킹 및 VRAM 해제
+                                let enable_masking = load_app_config().enable_masking.unwrap_or(true);
                                 if has_error.is_none() {
-                                    println!("\n[System] === Phase 1: Privacy Filter 마스킹 시작 ===");
-                                    {
-                                        let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                        if pm_guard.is_none() {
-                                            let pm_path = app_dir.join("models/privacy-filter");
-                                            let pm_path_str = pm_path.to_string_lossy().to_string();
-                                            println!("[System] PrivacyManager 모델을 GPU 메모리에 로드 중...");
-                                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
-                                        }
-                                    }
-                                    
-                                    for (idx, record) in target_records.iter_mut().enumerate() {
-                                        // 🚀 사용자가 Cancel 버튼을 눌렀다면 루프를 즉시 중단합니다.
-                                        if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
-                                            has_error = Some("Push operation cancelled by user.".to_string());
-                                            break;
-                                        }
-
-                                        let mut masked_success = false;
-                                        let mut masked_text = String::new();
+                                    if enable_masking {
+                                        println!("\n[System] === Phase 1: Privacy Filter 마스킹 시작 ===");
                                         {
-                                            let pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                            if let Some(pm) = pm_guard.as_ref() {
-                                                println!("[System] 마스킹 진행 중 (Record ID: {})", record.id);
-                                                masked_text = pm.mask_text(&record.context).unwrap_or_else(|e| {
-                                                    let err_str = format!("Masking failed: {}", e);
-                                                    println!("[Error] Rust Backend Error Caught: {}", err_str);
-                                                    has_error = Some(err_str);
-                                                    record.context.clone()
-                                                });
-                                                masked_success = true;
-                                            } else {
-                                                let err_str = "Privacy Filter 모델 로드에 실패했습니다.".to_string();
-                                                println!("[Error] {}", err_str);
-                                                has_error = Some(err_str);
+                                            let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                            if pm_guard.is_none() {
+                                                let pm_path = app_dir.join("models/privacy-filter");
+                                                let pm_path_str = pm_path.to_string_lossy().to_string();
+                                                println!("[System] PrivacyManager 모델을 GPU 메모리에 로드 중...");
+                                                *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
                                             }
                                         }
-                                        if masked_success {
-                                            record.masking = masked_text;
-                                            println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
-                                        }
+                                        
+                                        for (idx, record) in target_records.iter_mut().enumerate() {
+                                            // 🚀 사용자가 Cancel 버튼을 눌렀다면 루프를 즉시 중단합니다.
+                                            if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                                has_error = Some("Push operation cancelled by user.".to_string());
+                                                break;
+                                            }
 
-                                        // 🚀 실시간 퍼센트 전송 및 브로드캐스트
-                                        current_step += 1;
-                                        let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
-                                        *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
-                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
-                                        let _ = page_clone.evaluate(script).await;
+                                            let mut masked_success = false;
+                                            let mut masked_text = String::new();
+                                            {
+                                                let pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                                if let Some(pm) = pm_guard.as_ref() {
+                                                    println!("[System] 마스킹 진행 중 (Record ID: {})", record.id);
+                                                    masked_text = pm.mask_text(&record.context).unwrap_or_else(|e| {
+                                                        let err_str = format!("Masking failed: {}", e);
+                                                        println!("[Error] Rust Backend Error Caught: {}", err_str);
+                                                        has_error = Some(err_str);
+                                                        record.context.clone()
+                                                    });
+                                                    masked_success = true;
+                                                } else {
+                                                    let err_str = "Privacy Filter 모델 로드에 실패했습니다.".to_string();
+                                                    println!("[Error] {}", err_str);
+                                                    has_error = Some(err_str);
+                                                }
+                                            }
+                                            if masked_success {
+                                                record.masking = masked_text;
+                                                println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
+                                            }
+
+                                            // 🚀 실시간 퍼센트 전송 및 브로드캐스트
+                                            current_step += 1;
+                                            let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                            let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
+                                            *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                            let _ = page_clone.evaluate(script).await;
+                                        }
+                                        
+                                        {
+                                            let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                            *pm_guard = None; // VRAM 완전 해제
+                                        }
+                                        force_memory_cleanup();
+                                        println!("[System] === Phase 1: Privacy Filter 마스킹 종료 (VRAM 해제됨) ===\n");
+                                    } else {
+                                        println!("\n[System] === Phase 1: Privacy Filter 마스킹 건너뜐 (사용자 설정 OFF) ===");
+                                        for record in target_records.iter_mut() {
+                                            // 설정이 꺼진 경우, 임베딩 모델(Phase 2)에 정상적으로 텍스트를 넘겨주기 위해 원본 컨텍스트를 마스킹 필드에 덮어씌웁니다.
+                                            record.masking = record.context.clone();
+                                        }
+                                        current_step += total_items; // UI 퍼센트 보정을 위해 건너뛴 스텝만큼 더합니다.
                                     }
-                                    
-                                    {
-                                        let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                        *pm_guard = None; // VRAM 완전 해제
-                                    }
-                                    force_memory_cleanup();
-                                    println!("[System] === Phase 1: Privacy Filter 마스킹 종료 (VRAM 해제됨) ===\n");
                                 } else {
                                     current_step += total_items;
                                 }
@@ -2797,7 +2891,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                 } else { "Unknown command".to_string() };
 
                 let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(response));
-                let _ = page_clone.evaluate(script).await;
+                
+                // 🚀 특정 탭(page_clone)에만 응답을 보내던 것을, 현재 열려있는 모든 브라우저 탭에 브로드캐스트하여 실시간 동기화 문제를 원천 해결합니다.
+                if let Ok(pages) = _browser_clone.pages().await {
+                    for p in pages {
+                        let _ = p.evaluate(script.clone()).await;
+                    }
+                }
             }
         }
     });
