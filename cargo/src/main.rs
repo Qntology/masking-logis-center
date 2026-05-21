@@ -257,7 +257,6 @@ const OVERLAY_SCRIPT: &str = r#"
             };
             if (window.rpc) {
                 window.rpc("sync_data:" + JSON.stringify(item));
-                alert("Draft saved for " + currentTabFilter);
             }
         };
 
@@ -481,7 +480,6 @@ const OVERLAY_SCRIPT: &str = r#"
                     };
                     if (window.rpc) {
                         window.rpc("sync_data:" + JSON.stringify(item));
-                        alert(file.name + " 파일이 " + currentTabFilter + " 대기열에 추가되었습니다.");
                     }
                 };
                 reader.readAsText(file);
