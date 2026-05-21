@@ -7,25 +7,33 @@ use crate::privacy_filter::PrivacyFilterModel;
 
 lazy_static! {
     static ref ADJECTIVES: Vec<String> = {
-        if let Ok(content) = fs::read_to_string("adjectives.txt") {
-            // 🚀 EFF 단어장처럼 "숫자 + 탭 + 단어" 형태일 경우, 공백 단위로 쪼개어 맨 끝의 순수 영단어만 추출합니다.
-            let words: Vec<String> = content.lines()
-                .map(|s| s.split_whitespace().last().unwrap_or("").to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !words.is_empty() { return words; }
+        // 🚀 파일이 없으면 서버 실행 시 즉각 에러를 발생시킵니다.
+        let content = fs::read_to_string("adjectives.txt").expect("[에러] adjectives.txt 파일이 실행 경로에 없습니다!");
+        
+        let words: Vec<String> = content.lines()
+            .map(|s| s.split_whitespace().last().unwrap_or("").to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+            
+        if words.is_empty() {
+            panic!("[에러] adjectives.txt 파일이 비어있습니다!");
         }
+        words
     };
     
     static ref NOUNS: Vec<String> = {
-        if let Ok(content) = fs::read_to_string("nouns.txt") {
-            // 🚀 EFF 단어장처럼 "숫자 + 탭 + 단어" 형태일 경우, 공백 단위로 쪼개어 맨 끝의 순수 영단어만 추출합니다.
-            let words: Vec<String> = content.lines()
-                .map(|s| s.split_whitespace().last().unwrap_or("").to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !words.is_empty() { return words; }
+        // 🚀 파일이 없으면 서버 실행 시 즉각 에러를 발생시킵니다.
+        let content = fs::read_to_string("nouns.txt").expect("[에러] nouns.txt 파일이 실행 경로에 없습니다!");
+        
+        let words: Vec<String> = content.lines()
+            .map(|s| s.split_whitespace().last().unwrap_or("").to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+            
+        if words.is_empty() {
+            panic!("[에러] nouns.txt 파일이 비어있습니다!");
         }
+        words
     };
 }
 

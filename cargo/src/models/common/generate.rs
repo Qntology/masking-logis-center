@@ -98,7 +98,18 @@ pub fn generate_generic(
         let logits = model.forward_step(&current_input_ids, seqlen_offset)?;
         seqlen_offset += 1;
         
-        let next_logits = logits.i((0, 0))?;
+        let mut next_logits = logits.i((0, 0))?;
+        
+        // 🚀 [고속 추론 최적화] 동일 단어 무한 반복(Hallucination) 현상을 차단하기 위해 반복 페널티를 적용합니다.
+        if ctx.repeat_penalty > 1.0 && !tokens.is_empty() {
+            let start_at = tokens.len().saturating_sub(ctx.repeat_last_n);
+            next_logits = candle_transformers::utils::apply_repeat_penalty(
+                &next_logits,
+                ctx.repeat_penalty,
+                &tokens[start_at..],
+            )?;
+        }
+        
         next_token = logits_processor.sample(&next_logits)?;
         
         // 🌟 루프마다 어떤 토큰 ID가 뽑히는지 실시간으로 추적합니다.

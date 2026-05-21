@@ -690,6 +690,11 @@ const OVERLAY_SCRIPT: &str = r#"
                     renderStagedList();
                     return;
                 }
+                // 🚀 진행 상황 (퍼센트) 실시간 업데이트 응답인 경우
+                else if (data.type === 'push_progress') {
+                    draftBtn.textContent = `Draft (${data.payload.item_display}/${data.payload.total_items}) ${data.payload.percent}%...`;
+                    return;
+                }
                 // 마스킹 및 Push 대기열 작업 완료 응답인 경우
                 else if (data.type === 'push_success') {
                     if (spinnerInterval) clearInterval(spinnerInterval);
@@ -750,6 +755,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     deleteBtn.disabled = false;
                     draftBtn.disabled = false;
                     updatePushBtnState(); // 버튼 텍스트와 상태를 원래대로 원복
+                    renderStagedList(); // 🚀 퍼센트 텍스트로 변한 버튼을 다시 "Draft (N)" 형태로 롤백합니다.
                     
                     const div = document.createElement('div');
                     div.className = 'system';
@@ -841,13 +847,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             let params = ChatCompletionParameters {
                                                 messages: vec![Message {
                                                     role: "user".to_string(),
-                                                    parts: vec![Part { text: "Extract text".to_string(), image_url: Some(full_data_url) }],
+                                                    parts: vec![Part { text: "Extract text".to_string(), image_url: Some(full_data_url.to_string()) }],
                                                 }],
                                                 model: "glm-ocr".to_string(),
-                                                max_tokens: Some(1024),
+                                                max_tokens: Some(2048),
                                                 temperature: Some(0.2),
                                                 top_p: Some(0.95),
-                                                top_k: None, repeat_penalty: None, repeat_last_n: None, seed: Some(42),
+                                                top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
                                             };
                                             model.generate(params).map(|res| res.choices[0].message.content.clone()).unwrap_or_default()
                                         } else { "OCR Model Load Error".to_string() };
@@ -909,8 +915,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 // 현재 가용한 최적의 장치(CUDA 0번 우선)를 할당합니다.
                                 let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
 
+                                // ★ 전체 처리율 계산을 위한 단계 설정 (Phase 0, 1, 2)
+                                let total_items = target_records.len();
+                                let total_steps = total_items * 3;
+                                let mut current_step = 0;
+
                                 // ★ Phase 0: OCR 일괄 처리 및 VRAM 해제
                                 let needs_ocr = target_records.iter().any(|r| r.context.starts_with("data:image/") || r.context.starts_with("data:application/pdf"));
+                                
                                 // 🚀 [Phase 0-1] 웹페이지 텍스트 정제 (데이터 증발 방지 로직 적용)
                                 use gemini_gui_lib::harness::DefaultHarness;
                                 let harness = DefaultHarness;
@@ -918,7 +930,6 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     let is_image = record.context.starts_with("data:image/") || record.url.starts_with("file://");
                                     if !is_image {
                                         let raw_content = record.context.clone();
-                                        // 🚀 이미 깨끗한 텍스트일 경우(태그가 없을 경우) harness 연산을 건너뛰어 0바이트 증발을 막습니다.
                                         if raw_content.contains('<') && raw_content.contains('>') {
                                             record.context = harness.clean_html(&raw_content);
                                             println!("[System] 웹페이지 HTML 태그 평탄화 완료. (ID: {})", record.id);
@@ -926,14 +937,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             println!("[System] 웹페이지 순수 텍스트 유지됨. (ID: {})", record.id);
                                         }
                                         
-                                        // 🌟 전처리 완료된 순수 텍스트의 앞부분 100글자를 안전하게 추출하여 로그로 남깁니다.
                                         let text_len = record.context.len();
                                         let preview_text: String = record.context.chars().take(100).collect();
                                         println!("[Debug:Phase0-1] 웹페이지 텍스트 미리보기 (총 {}바이트) :\n{}", text_len, preview_text);
                                     }
                                 }
 
-                                // 🚀 [Phase 0-2] 이미지/PDF 전용 OCR 처리 (진짜 이미지가 있을 때만 모델 로드)
+                                // 🚀 [Phase 0-2] 이미지/PDF 전용 OCR 처리
                                 if needs_ocr {
                                     {
                                         let mut model_guard = OCR_MODEL.lock().unwrap();
@@ -948,13 +958,18 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 }
                                             }
                                         }
+                                    }
 
-                                        for (idx, record) in target_records.iter_mut().enumerate() {
-                                            let is_image = record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf");
-                                            let item_type = if is_image { "이미지" } else { "텍스트" };
-                                            println!("[System] Phase 0 - [{}]순서-{} 처리 시작 (ID: {})", idx, item_type, record.id);
-                                            
-                                            if is_image {
+                                    for (idx, record) in target_records.iter_mut().enumerate() {
+                                        let is_image = record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf");
+                                        let item_type = if is_image { "이미지" } else { "텍스트" };
+                                        println!("[System] Phase 0 - [{}]순서-{} 처리 시작 (ID: {})", idx, item_type, record.id);
+                                        
+                                        if is_image && has_error.is_none() {
+                                            let mut ocr_success = false;
+                                            let mut cleaned_ocr = String::new();
+                                            {
+                                                let mut model_guard = OCR_MODEL.lock().unwrap();
                                                 if let Some(model) = model_guard.as_mut() {
                                                     let params = ChatCompletionParameters {
                                                         messages: vec![Message {
@@ -962,29 +977,17 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                             parts: vec![Part { text: "Extract text from image".to_string(), image_url: Some(record.context.clone()) }],
                                                         }],
                                                         model: "glm-ocr".to_string(),
-                                                        max_tokens: Some(1024),
+                                                        max_tokens: Some(2048),
                                                         temperature: Some(0.2),
                                                         top_p: Some(0.95),
-                                                        top_k: None,
-                                                        repeat_penalty: None,
-                                                        repeat_last_n: None,
-                                                        seed: Some(42),
+                                                        top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
                                                     };
                                                     match model.generate(params) {
                                                         Ok(res) => {
-                                                            // 🚀 [Fix] GLM-OCR이 뱉는 ```markdown ... ``` 같은 코드 블록 껍데기를 제거하고 알맹이만 추출합니다.
                                                             let raw_ocr = res.choices[0].message.content.clone();
-                                                            let cleaned_ocr = raw_ocr
-                                                                .replace("```markdown", "")
-                                                                .replace("```", "")
-                                                                .trim()
-                                                                .to_string();
-                                                            
-                                                            record.context = cleaned_ocr.clone();
-                                                            println!("[System] 이미지 OCR 완료 및 마크다운 태그 정제됨. (ID: {})", record.id);
-                                                            println!("[GlmOcr] 배치 작업 생성된 텍스트 결과:\n{}", cleaned_ocr);
+                                                            cleaned_ocr = raw_ocr.replace("```markdown", "").replace("```", "").trim().to_string();
+                                                            ocr_success = true;
                                                         },
-
                                                         Err(e) => {
                                                             let err_msg = format!("OCR Error: {}", e);
                                                             println!("[Error] 이미지 OCR 중 예외 발생: {:?}", e);
@@ -993,79 +996,134 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     }
                                                 }
                                             }
+                                            if ocr_success {
+                                                record.context = cleaned_ocr.clone();
+                                                println!("[System] 이미지 OCR 완료 및 마크다운 태그 정제됨. (ID: {})", record.id);
+                                                println!("[GlmOcr] 배치 작업 생성된 텍스트 결과:\n{}", cleaned_ocr);
+                                            }
                                         }
+                                        
+                                        // 🚀 실시간 퍼센트 전송 (await를 위해 락 스코프 밖에서 실행)
+                                        current_step += 1;
+                                        let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": {"item_display": idx + 1, "total_items": total_items, "percent": percent}})));
+                                        let _ = page_clone.evaluate(script).await;
+                                    }
+
+                                    {
+                                        let mut model_guard = OCR_MODEL.lock().unwrap();
                                         *model_guard = None; // VRAM 완전 해제
-                                    } // 뮤텍스 락 스코프 종료로 인한 자동 해제
-                                    
+                                    }
                                     force_memory_cleanup();
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await; // 확실한 VRAM 해제 텀 부여
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                                     println!("[System] === Phase 0: 이미지 전용 OCR 처리 종료 (VRAM 해제됨) ===\n");
+                                } else {
+                                    current_step += total_items; // OCR 패스 시 퍼센트 점프
                                 }
+
                                 // ★ Phase 1: Privacy Filter 일괄 마스킹 및 VRAM 해제
                                 if has_error.is_none() {
                                     println!("\n[System] === Phase 1: Privacy Filter 마스킹 시작 ===");
-                                    let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                    if pm_guard.is_none() {
-                                        println!("[System] PrivacyManager 모델을 GPU 메모리에 로드 중...");
-                                        *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new("..\\models\\privacy-filter", &device).ok();
-                                    }
-                                    for record in &mut target_records {
-                                        if let Some(pm) = pm_guard.as_ref() {
-                                            println!("[System] 마스킹 진행 중 (Record ID: {})", record.id);
-                                            record.masking = pm.mask_text(&record.context).unwrap_or_else(|e| {
-                                                let err_str = format!("Masking failed: {}", e);
-                                                println!("[Error] Rust Backend Error Caught: {}", err_str);
-                                                has_error = Some(err_str);
-                                                record.context.clone()
-                                            });
-                                            // 🚀 LLM 전처리 완료 후 최종 텍스트 결과를 콘솔에 출력합니다.
-                                            println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
-                                        } else {
-                                            let err_str = "Privacy Filter 모델 로드에 실패했습니다.".to_string();
-                                            println!("[Error] {}", err_str);
-                                            has_error = Some(err_str);
+                                    {
+                                        let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                        if pm_guard.is_none() {
+                                            println!("[System] PrivacyManager 모델을 GPU 메모리에 로드 중...");
+                                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new("..\\models\\privacy-filter", &device).ok();
                                         }
                                     }
-                                    *pm_guard = None; // VRAM 완전 해제
-                                    force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
+                                    
+                                    for (idx, record) in target_records.iter_mut().enumerate() {
+                                        let mut masked_success = false;
+                                        let mut masked_text = String::new();
+                                        {
+                                            let pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                            if let Some(pm) = pm_guard.as_ref() {
+                                                println!("[System] 마스킹 진행 중 (Record ID: {})", record.id);
+                                                masked_text = pm.mask_text(&record.context).unwrap_or_else(|e| {
+                                                    let err_str = format!("Masking failed: {}", e);
+                                                    println!("[Error] Rust Backend Error Caught: {}", err_str);
+                                                    has_error = Some(err_str);
+                                                    record.context.clone()
+                                                });
+                                                masked_success = true;
+                                            } else {
+                                                let err_str = "Privacy Filter 모델 로드에 실패했습니다.".to_string();
+                                                println!("[Error] {}", err_str);
+                                                has_error = Some(err_str);
+                                            }
+                                        }
+                                        if masked_success {
+                                            record.masking = masked_text;
+                                            println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
+                                        }
+
+                                        // 🚀 실시간 퍼센트 전송
+                                        current_step += 1;
+                                        let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": {"item_display": idx + 1, "total_items": total_items, "percent": percent}})));
+                                        let _ = page_clone.evaluate(script).await;
+                                    }
+                                    
+                                    {
+                                        let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                        *pm_guard = None; // VRAM 완전 해제
+                                    }
+                                    force_memory_cleanup();
                                     println!("[System] === Phase 1: Privacy Filter 마스킹 종료 (VRAM 해제됨) ===\n");
+                                } else {
+                                    current_step += total_items;
                                 }
 
                                 // ★ Phase 2: Embedding 일괄 벡터화 및 VRAM 해제
                                 if has_error.is_none() {
-                                    // 🚀 [Fix] 회원님 요청사항 반영: 모든 아이템의 텍스트를 trim하여 실제로 임베딩할 유효한 문자가 있는지 선제 검사합니다.
                                     let needs_embedding = target_records.iter().any(|r| !r.masking.trim().is_empty());
                                     
                                     if needs_embedding {
-                                        let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
-                                        if em_guard.is_none() {
-                                            *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device("..\\models\\embeddings", &device).ok();
+                                        {
+                                            let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
+                                            if em_guard.is_none() {
+                                                *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device("..\\models\\embeddings", &device).ok();
+                                            }
                                         }
                                         for (idx, record) in target_records.iter_mut().enumerate() {
                                             let text_to_embed = record.masking.trim();
                                             if text_to_embed.is_empty() {
                                                 println!("[System] Phase 2 - [{}]순서 임베딩 건너뜐 (빈 텍스트)", idx);
                                                 record.vector = vec![0.0; 768];
-                                                continue;
-                                            }
-                                            println!("[System] Phase 2 - [{}]순서 임베딩 진행 중...", idx);
-                                            if let Some(em) = em_guard.as_ref() {
-                                                record.vector = em.embed(text_to_embed).unwrap_or_else(|e| {
-                                                    has_error = Some(format!("Embedding failed: {}", e));
-                                                    vec![0.0; 768]
-                                                });
                                             } else {
-                                                has_error = Some("Embedding 모델 로드에 실패했습니다.".to_string());
+                                                println!("[System] Phase 2 - [{}]순서 임베딩 진행 중...", idx);
+                                                let em_guard = EMBEDDING_MODEL.lock().unwrap();
+                                                if let Some(em) = em_guard.as_ref() {
+                                                    record.vector = em.embed(text_to_embed).unwrap_or_else(|e| {
+                                                        has_error = Some(format!("Embedding failed: {}", e));
+                                                        vec![0.0; 768]
+                                                    });
+                                                } else {
+                                                    has_error = Some("Embedding 모델 로드에 실패했습니다.".to_string());
+                                                }
                                             }
+                                            
+                                            // 🚀 실시간 퍼센트 전송
+                                            current_step += 1;
+                                            let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": {"item_display": idx + 1, "total_items": total_items, "percent": percent}})));
+                                            let _ = page_clone.evaluate(script).await;
                                         }
-                                        *em_guard = None; // VRAM 완전 해제
-                                        force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
+                                        
+                                        {
+                                            let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
+                                            *em_guard = None; // VRAM 완전 해제
+                                        }
+                                        force_memory_cleanup();
                                     } else {
                                         println!("[System] === Phase 2: 임베딩 대상 텍스트가 모두 비어있어 모델 로드를 완전히 건너뜁니다. ===");
-                                        // 에러가 나지 않도록 빈 레코드에 기본 영벡터를 삽입해 줍니다.
                                         for record in &mut target_records {
                                             record.vector = vec![0.0; 768];
                                         }
+                                        current_step += total_items;
+                                        let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": {"item_display": total_items, "total_items": total_items, "percent": percent}})));
+                                        let _ = page_clone.evaluate(script).await;
                                     }
                                 }
 
@@ -1124,10 +1182,10 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         parts: vec![Part { text: "Extract text".to_string(), image_url: Some(full_data_url.to_string()) }],
                                     }],
                                     model: "glm-ocr".to_string(),
-                                    max_tokens: Some(1024),
+                                    max_tokens: Some(2048),
                                     temperature: Some(0.2),
                                     top_p: Some(0.95),
-                                    top_k: None, repeat_penalty: None, repeat_last_n: None, seed: Some(42),
+                                    top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
                                 };
                                 match model.generate(params) {
                                     Ok(res) => {
