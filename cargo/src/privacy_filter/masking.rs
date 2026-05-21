@@ -1,7 +1,33 @@
 use anyhow::Result;
 use std::path::Path;
 use std::collections::HashMap;
+use std::fs;
+use lazy_static::lazy_static;
 use crate::privacy_filter::PrivacyFilterModel;
+
+lazy_static! {
+    static ref ADJECTIVES: Vec<String> = {
+        if let Ok(content) = fs::read_to_string("adjectives.txt") {
+            // 🚀 EFF 단어장처럼 "숫자 + 탭 + 단어" 형태일 경우, 공백 단위로 쪼개어 맨 끝의 순수 영단어만 추출합니다.
+            let words: Vec<String> = content.lines()
+                .map(|s| s.split_whitespace().last().unwrap_or("").to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !words.is_empty() { return words; }
+        }
+    };
+    
+    static ref NOUNS: Vec<String> = {
+        if let Ok(content) = fs::read_to_string("nouns.txt") {
+            // 🚀 EFF 단어장처럼 "숫자 + 탭 + 단어" 형태일 경우, 공백 단위로 쪼개어 맨 끝의 순수 영단어만 추출합니다.
+            let words: Vec<String> = content.lines()
+                .map(|s| s.split_whitespace().last().unwrap_or("").to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !words.is_empty() { return words; }
+        }
+    };
+}
 
 pub struct PrivacyManager {
     pub model: PrivacyFilterModel,
@@ -33,8 +59,16 @@ impl PrivacySession {
             placeholder.clone()
         } else {
             let count = self.counter_map.entry(clean_label.to_string()).or_insert(0);
+            let current_idx = *count;
             *count += 1;
-            let placeholder = format!("[RECORD_{}][{}_{}]", record_idx, clean_label, count);
+            
+            // 🚀 대용량 외부 파일에서 캐싱된 벡터를 참조하여 초고속으로 단어를 할당합니다.
+            let adj = &ADJECTIVES[current_idx % ADJECTIVES.len()];
+            let noun = &NOUNS[(current_idx / ADJECTIVES.len()) % NOUNS.len()];
+            
+            // 🚀 문서 출처 추적을 위한 레코드 인덱스와 니모닉 고유 식별자를 함께 결합합니다.
+            let placeholder = format!("[RECORD_{}][{}:{}-{}]", record_idx, clean_label.to_lowercase(), adj, noun);
+            
             self.entity_map.insert(text.to_string(), placeholder.clone());
             self.reverse_map.insert(placeholder.clone(), text.to_string());
             placeholder
