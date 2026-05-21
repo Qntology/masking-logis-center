@@ -72,6 +72,8 @@ struct AppConfig {
     language: Option<String>,
     #[serde(default)]
     custom_tabs: Option<Vec<String>>,
+    #[serde(default)]
+    auto_extract: Option<bool>,
 }
 
 fn load_app_config() -> AppConfig {
@@ -544,6 +546,32 @@ const OVERLAY_SCRIPT: &str = r#"
                     item.style.alignItems = 'center';
                     item.style.gap = '5px';
                     item.style.padding = '5px 10px';
+                    
+                    // 🚀 드래그 앤 드랍 순서 변경 로직 추가
+                    item.draggable = true;
+                    item.ondragstart = (e) => {
+                        e.dataTransfer.setData('text/plain', index);
+                        e.dataTransfer.effectAllowed = 'move';
+                        item.style.opacity = '0.5';
+                    };
+                    item.ondragend = () => {
+                        item.style.opacity = '1';
+                    };
+                    item.ondragover = (e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                    };
+                    item.ondrop = (e) => {
+                        e.preventDefault();
+                        const fromIndex = parseInt(e.dataTransfer.getData('text/plain'), 10);
+                        const toIndex = index;
+                        if (fromIndex !== toIndex && !isNaN(fromIndex)) {
+                            // 배열 요소 순서 변경
+                            const movedItem = tempDynamicTabs.splice(fromIndex, 1)[0];
+                            tempDynamicTabs.splice(toIndex, 0, movedItem);
+                            updateGnbUI();
+                        }
+                    };
 
                     const dragHandle = document.createElement('span');
                     dragHandle.textContent = '≡';
@@ -948,8 +976,13 @@ const OVERLAY_SCRIPT: &str = r#"
                 const promptWrapper = document.createElement('div');
                 promptWrapper.style.padding = '20px';
 
+                // 글로벌 딕셔너리가 없으면 빈 객체로 폴백
+                const dict = window.lang_dict || {};
+                const currentLang = window.default_language || 'English';
+                const getText = (key) => dict[currentLang] ? dict[currentLang][key] : (dict['English'] ? dict['English'][key] : key);
+
                 const promptTitle = document.createElement('h3');
-                promptTitle.textContent = '저장된 프롬프트 관리';
+                promptTitle.textContent = getText('prompt_title');
                 promptTitle.style.marginTop = '0';
                 promptTitle.style.fontSize = '14px';
                 promptWrapper.appendChild(promptTitle);
@@ -959,7 +992,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     emptyMsg.style.color = '#999';
                     emptyMsg.style.fontSize = '12px';
                     emptyMsg.style.marginTop = '20px';
-                    emptyMsg.textContent = '저장된 프롬프트가 없습니다.';
+                    emptyMsg.textContent = getText('prompt_empty');
                     promptWrapper.appendChild(emptyMsg);
                 } else {
                     savedPrompts.forEach(p => {
@@ -977,7 +1010,7 @@ const OVERLAY_SCRIPT: &str = r#"
                         textSpan.style.flex = '1';
 
                         const delBtn = document.createElement('button');
-                        delBtn.textContent = '삭제';
+                        delBtn.textContent = getText('prompt_delete');
                         delBtn.style.background = '#dc3545';
                         delBtn.style.color = 'white';
                         delBtn.style.border = 'none';
@@ -990,7 +1023,7 @@ const OVERLAY_SCRIPT: &str = r#"
                         delBtn.onmouseout = () => delBtn.style.background = '#dc3545';
                         
                         delBtn.onclick = () => {
-                            if (confirm('이 프롬프트를 삭제하시겠습니까?')) {
+                            if (confirm(getText('prompt_delete_confirm'))) {
                                 if (window.rpc) window.rpc("delete_prompt:" + p);
                             }
                         };
@@ -1040,6 +1073,185 @@ const OVERLAY_SCRIPT: &str = r#"
                 langDesc.style.background = '#f9f9f9';
                 langDesc.style.borderLeft = '3px solid #007bff';
                 
+                const autoExtractTitle = document.createElement('h3');
+                autoExtractTitle.textContent = getText('auto_extract_title') || '자동 수집 (Auto Collect)';
+                autoExtractTitle.style.fontSize = '14px';
+
+                const autoExtractDesc = document.createElement('p');
+                autoExtractDesc.textContent = getText('auto_extract_desc') || '방문하는 페이지의 콘텐츠를 자동으로 수집합니다.';
+                autoExtractDesc.style.fontSize = '12px';
+                autoExtractDesc.style.color = '#666';
+                autoExtractDesc.style.marginBottom = '15px';
+
+                const autoExtractSelect = document.createElement('select');
+                autoExtractSelect.style.padding = '8px';
+                autoExtractSelect.style.width = '100%';
+                autoExtractSelect.style.marginBottom = '30px';
+                autoExtractSelect.style.fontSize = '13px';
+                
+                const optOn = document.createElement('option');
+                optOn.value = 'true';
+                optOn.textContent = 'ON';
+                const optOff = document.createElement('option');
+                optOff.value = 'false';
+                optOff.textContent = 'OFF';
+                
+                autoExtractSelect.appendChild(optOn);
+                autoExtractSelect.appendChild(optOff);
+                
+                // 글로벌 설정값 연동
+                autoExtractSelect.value = window.auto_extract !== false ? 'true' : 'false';
+                
+                autoExtractSelect.onchange = (e) => {
+                    const isAuto = e.target.value === 'true';
+                    window.auto_extract = isAuto;
+                    if (window.rpc) window.rpc("save_config:" + JSON.stringify({ auto_extract: isAuto }));
+                };
+                
+                // 🚀 모델 다운로드 UI 추가
+                const modelTitle = document.createElement('h3');
+                modelTitle.textContent = getText('model_title');
+                modelTitle.style.fontSize = '14px';
+
+                const modelDesc = document.createElement('p');
+                modelDesc.textContent = getText('model_desc');
+                modelDesc.style.fontSize = '12px';
+                modelDesc.style.color = '#666';
+                modelDesc.style.marginBottom = '15px';
+
+                // 🚀 전체 다운로드 버튼 추가
+                const downloadAllBtn = document.createElement('button');
+                downloadAllBtn.textContent = getText('model_download_all');
+                downloadAllBtn.style.background = '#17a2b8';
+                downloadAllBtn.style.color = 'white';
+                downloadAllBtn.style.padding = '8px 15px';
+                downloadAllBtn.style.border = 'none';
+                downloadAllBtn.style.borderRadius = '4px';
+                downloadAllBtn.style.cursor = 'pointer';
+                downloadAllBtn.style.fontWeight = 'bold';
+                downloadAllBtn.style.marginBottom = '15px';
+                downloadAllBtn.style.width = '100%';
+
+                const modelListContainer = document.createElement('div');
+                modelListContainer.style.display = 'flex';
+                modelListContainer.style.flexDirection = 'column';
+                modelListContainer.style.gap = '10px';
+                modelListContainer.style.marginBottom = '30px';
+
+                const models = ['GLM-OCR', 'Privacy-Filter', 'Embedding'];
+                
+                // 다운로드 공통 로직 분리
+                const triggerDownload = (m, btn, progressContainer, progressBar) => {
+                    btn.disabled = true;
+                    btn.style.background = '#6c757d';
+                    btn.style.cursor = 'not-allowed';
+                    btn.textContent = getText('model_downloading');
+                    progressContainer.style.display = 'block';
+                    progressBar.style.width = '0%';
+                    progressBar.textContent = '0%';
+                    if (window.rpc) {
+                        window.rpc("download_model:" + m);
+                    }
+                };
+
+                downloadAllBtn.onclick = () => {
+                    const toDownload = models.filter(m => !(window.model_status && window.model_status[m]));
+                    if (toDownload.length === 0) {
+                        alert(getText('model_all_downloaded'));
+                        return;
+                    }
+                    if (confirm(getText('model_download_all_confirm'))) {
+                        downloadAllBtn.disabled = true;
+                        downloadAllBtn.style.background = '#6c757d';
+                        toDownload.forEach(m => {
+                            const safeId = m.replace(/[\s\(\)]+/g, '-');
+                            const btn = document.getElementById('btn-download-' + safeId);
+                            const pc = document.getElementById('progress-container-' + safeId);
+                            const pb = document.getElementById('progress-bar-' + safeId);
+                            if (btn && pc && pb && !btn.disabled) {
+                                triggerDownload(m, btn, pc, pb);
+                            }
+                        });
+                    }
+                };
+                
+                models.forEach(m => {
+                    // 서버에서 주입된 설치 상태를 기반으로 완료 여부 체크
+                    const isDownloaded = window.model_status && window.model_status[m];
+                    const safeId = m.replace(/[\s\(\)]+/g, '-'); // ID 규격에 맞게 변환
+
+                    const row = document.createElement('div');
+                    row.style.border = '1px solid #ddd';
+                    row.style.borderRadius = '4px';
+                    row.style.padding = '10px';
+                    row.style.background = '#fff';
+
+                    const topRow = document.createElement('div');
+                    topRow.style.display = 'flex';
+                    topRow.style.justifyContent = 'space-between';
+                    topRow.style.alignItems = 'center';
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.textContent = m;
+                    nameSpan.style.fontSize = '13px';
+                    nameSpan.style.fontWeight = 'bold';
+
+                    const btn = document.createElement('button');
+                    btn.id = 'btn-download-' + safeId;
+                    btn.textContent = isDownloaded ? getText('model_downloaded') : getText('model_download');
+                    btn.style.padding = '5px 10px';
+                    btn.style.fontSize = '12px';
+                    btn.style.borderRadius = '3px';
+                    btn.style.border = 'none';
+                    btn.style.fontWeight = 'bold';
+                    
+                    if (isDownloaded) {
+                        btn.style.background = '#6c757d';
+                        btn.style.color = '#fff';
+                        btn.disabled = true;
+                        btn.style.cursor = 'not-allowed';
+                    } else {
+                        btn.style.background = '#28a745';
+                        btn.style.color = '#fff';
+                        btn.style.cursor = 'pointer';
+                    }
+
+                    topRow.appendChild(nameSpan);
+                    topRow.appendChild(btn);
+
+                    const progressContainer = document.createElement('div');
+                    progressContainer.id = 'progress-container-' + safeId;
+                    progressContainer.style.width = '100%';
+                    progressContainer.style.background = '#e9ecef';
+                    progressContainer.style.borderRadius = '4px';
+                    progressContainer.style.overflow = 'hidden';
+                    progressContainer.style.display = 'none';
+                    progressContainer.style.marginTop = '10px';
+
+                    const progressBar = document.createElement('div');
+                    progressBar.id = 'progress-bar-' + safeId;
+                    progressBar.style.width = '0%';
+                    progressBar.style.height = '15px';
+                    progressBar.style.background = '#007bff';
+                    progressBar.style.transition = 'width 0.2s';
+                    progressBar.style.textAlign = 'center';
+                    progressBar.style.color = 'white';
+                    progressBar.style.fontSize = '10px';
+                    progressBar.style.lineHeight = '15px';
+                    
+                    progressContainer.appendChild(progressBar);
+
+                    btn.onclick = () => {
+                        if (confirm(getText('model_download_confirm'))) {
+                            triggerDownload(m, btn, progressContainer, progressBar);
+                        }
+                    };
+
+                    row.appendChild(topRow);
+                    row.appendChild(progressContainer);
+                    modelListContainer.appendChild(row);
+                });
+
                 const resetTitle = document.createElement('h3');
                 resetTitle.textContent = getText('reset_title');
                 resetTitle.style.fontSize = '14px';
@@ -1080,6 +1292,23 @@ const OVERLAY_SCRIPT: &str = r#"
                     const updateText = (key) => dict[selectedLang] ? dict[selectedLang][key] : (dict['English'] ? dict['English'][key] : key);
                     langTitle.textContent = updateText('lang_title');
                     langDesc.textContent = updateText('lang_desc');
+                    autoExtractTitle.textContent = updateText('auto_extract_title');
+                    autoExtractDesc.textContent = updateText('auto_extract_desc');
+                    
+                    modelTitle.textContent = updateText('model_title');
+                    modelDesc.textContent = updateText('model_desc');
+                    downloadAllBtn.textContent = updateText('model_download_all');
+                    
+                    models.forEach(m => {
+                        const safeId = m.replace(/[\s\(\)]+/g, '-');
+                        const btn = document.getElementById('btn-download-' + safeId);
+                        const isDownloaded = window.model_status && window.model_status[m];
+                        // 현재 다운로드 중(progress/퍼센트가 표시 중)이 아니라면 텍스트를 즉시 전환합니다.
+                        if (btn && !btn.disabled && !btn.textContent.includes('%') && !btn.textContent.includes('...')) {
+                            btn.textContent = isDownloaded ? updateText('model_downloaded') : updateText('model_download');
+                        }
+                    });
+
                     resetTitle.textContent = updateText('reset_title');
                     resetDesc.textContent = updateText('reset_desc');
                     resetBtn.textContent = updateText('reset_btn');
@@ -1101,6 +1330,13 @@ const OVERLAY_SCRIPT: &str = r#"
                 configWrapper.appendChild(langTitle);
                 configWrapper.appendChild(langSelect);
                 configWrapper.appendChild(langDesc);
+                configWrapper.appendChild(autoExtractTitle);
+                configWrapper.appendChild(autoExtractDesc);
+                configWrapper.appendChild(autoExtractSelect);
+                configWrapper.appendChild(modelTitle);
+                configWrapper.appendChild(modelDesc);
+                configWrapper.appendChild(downloadAllBtn); // 🚀 덧붙이기
+                configWrapper.appendChild(modelListContainer);
                 configWrapper.appendChild(resetTitle);
                 configWrapper.appendChild(resetDesc);
                 configWrapper.appendChild(resetBtn);
@@ -1221,12 +1457,12 @@ const OVERLAY_SCRIPT: &str = r#"
                     
                     // 🚀 현재 접속한 페이지 UI 텍스트 꾸미기
                     if (item.url === currentUrl) {
-                        titleSpan.textContent = `📌 [현재 페이지] ${processingBadge}${statusBadge}[${item.domain}] ${mainTitle}`;
+                        titleSpan.textContent = `📌 [현재 페이지] ${processingBadge}${statusBadge}${mainTitle}`;
                         titleSpan.style.fontSize = '14px';
                         titleSpan.style.fontWeight = '900';
                         titleSpan.style.textDecoration = 'underline';
                     } else {
-                        titleSpan.textContent = `${processingBadge}${statusBadge}[${item.domain}] ${mainTitle}`;
+                        titleSpan.textContent = `${processingBadge}${statusBadge}${mainTitle}`;
                         titleSpan.style.fontSize = '13px';
                         titleSpan.style.fontWeight = 'bold';
                         titleSpan.style.textDecoration = 'none';
@@ -1295,6 +1531,9 @@ const OVERLAY_SCRIPT: &str = r#"
 
         async function autoExtract() {
             setTimeout(async () => {
+                // 🚀 자동 수집 기능이 꺼져있으면 실행을 중단합니다.
+                if (window.auto_extract === false) return;
+
                 const pageId = await generatePageId(window.location.href);
                 
                 // 🚀 이미 삭제했던 페이지거나 현재 대기열에 이미 존재하는 페이지라면 자동 추출을 중단합니다.
@@ -1303,12 +1542,16 @@ const OVERLAY_SCRIPT: &str = r#"
                 }
                 
                 const extractedText = extractVisibleText();
+                
+                // 🚀 현재 활성화된 탭(currentTabFilter)을 기준으로 도메인을 설정하되, 설정(CONFIG)이나 프롬프트(PROMPT) 탭을 보고 있을 때는 첫 번째 기본 도메인 메뉴로 할당합니다.
+                const targetDomain = (currentTabFilter === 'CONFIG' || currentTabFilter === 'PROMPT') ? dynamicTabs[0] : currentTabFilter;
+                
                 const item = { 
                     id: pageId, 
                     host: window.location.host,
                     url: window.location.href,
                     title: getPageMeta(), 
-                    domain: 'COMMERCE', 
+                    domain: targetDomain, 
                     context: extractedText, 
                     status: 'DRAFT',
                     track: '',
@@ -1532,6 +1775,51 @@ const OVERLAY_SCRIPT: &str = r#"
                     }
                     return;
                 }
+                else if (data.type === 'download_progress') {
+                    if (currentTabFilter === 'CONFIG') {
+                        const safeId = data.model.replace(/[\s\(\)]+/g, '-');
+                        const pb = document.getElementById('progress-bar-' + safeId);
+                        if (pb) {
+                            pb.style.width = `${data.percent}%`;
+                            pb.textContent = `${data.percent}%`;
+                        }
+                    }
+                    return;
+                }
+                else if (data.type === 'download_complete') {
+                    // 메모리 상태 동기화 (재진입 시 렌더링 유지)
+                    if (!window.model_status) window.model_status = {};
+                    window.model_status[data.model] = true;
+
+                    if (currentTabFilter === 'CONFIG') {
+                        const safeId = data.model.replace(/[\s\(\)]+/g, '-');
+                        const pb = document.getElementById('progress-bar-' + safeId);
+                        const pc = document.getElementById('progress-container-' + safeId);
+                        const btn = document.getElementById('btn-download-' + safeId);
+                        
+                        const dict = window.lang_dict || {};
+                        const currentLang = window.default_language || 'English';
+                        const getText = (key) => dict[currentLang] ? dict[currentLang][key] : (dict['English'] ? dict['English'][key] : key);
+
+                        if (pb && btn && pc) {
+                            pb.style.width = `100%`;
+                            pb.textContent = `완료!`;
+                            setTimeout(() => {
+                                pc.style.display = 'none';
+                                btn.textContent = getText('model_downloaded');
+                            }, 800);
+                        }
+                    }
+                    const div = document.createElement('div');
+                    div.className = 'system';
+                    div.style.padding = '10px';
+                    div.style.background = '#e6fffa';
+                    div.style.borderRadius = '4px';
+                    div.textContent = `System: ${data.model} 모델 다운로드가 완료되었습니다.`;
+                    log.appendChild(div);
+                    div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                    return;
+                }
             } catch (err) {
             }
             
@@ -1571,6 +1859,17 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let default_tab = app_config.default_tab.unwrap_or_else(|| "DRAFT".to_string()).to_uppercase();
     let default_language = app_config.language.unwrap_or_else(|| "English".to_string());
     let custom_tabs_str = app_config.custom_tabs.map(|tabs| serde_json::to_string(&tabs).unwrap_or_else(|_| "null".to_string())).unwrap_or_else(|| "null".to_string());
+    let auto_extract = app_config.auto_extract.unwrap_or(true); // 🚀 기본값은 활성화(true)
+    
+    // 🚀 각 모델 디렉토리에 핵심 설정 파일이나 모델 파일이 존재하는지 검사하여 다운로드 상태를 판별합니다.
+    let glm_exists = std::path::Path::new("../models/glm_ocr/config.json").exists() || std::path::Path::new("../models/glm_ocr/GLM-OCR-Q8_0.gguf").exists();
+    let privacy_exists = std::path::Path::new("../models/privacy-filter/config.json").exists();
+    let embed_exists = std::path::Path::new("../models/embeddings/config.json").exists() || std::path::Path::new("../models/embeddings/embeddinggemma-300m-Q4_0.gguf").exists();
+    let model_status_str = json!({
+        "GLM-OCR": glm_exists,
+        "Privacy-Filter": privacy_exists,
+        "Embedding": embed_exists
+    }).to_string();
     
     // 🚀 language.json 파일을 읽어서 프론트엔드로 전달합니다. 파일이 없거나 오류 시 빈 객체 전달
     let lang_dict_str = std::fs::read_to_string("src/language.json").unwrap_or_else(|_| "{}".to_string());
@@ -1580,7 +1879,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
         .replace("window.rpc", &format!("window.{}", rpc_binding_name))
         .replace("window.geminiSidebarLoaded", &format!("window.{}", sidebar_var_name));
 
-    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\nwindow.default_language = \"{}\";\nwindow.custom_tabs = {};\nwindow.lang_dict = {};\n{}", is_authenticated, default_tab, default_language, custom_tabs_str, lang_dict_str, overlay_script_replaced);
+    let full_script = format!("window.is_authenticated = {};\nwindow.default_tab = \"{}\";\nwindow.default_language = \"{}\";\nwindow.custom_tabs = {};\nwindow.auto_extract = {};\nwindow.model_status = {};\nwindow.lang_dict = {};\n{}", is_authenticated, default_tab, default_language, custom_tabs_str, auto_extract, model_status_str, lang_dict_str, overlay_script_replaced);
     // 페이지가 새로고침되거나 다른 페이지로 이동하더라도 스크립트가 유지되도록 등록합니다.
     let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(&full_script)).await;
     let _ = page.evaluate(full_script).await;
@@ -1698,7 +1997,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     let initial_payload = json!({"item_display": 1, "total_items": total_items, "percent": 0, "processing_ids": id_strings.clone()});
                                     *GLOBAL_PROGRESS.lock().unwrap() = Some(initial_payload.clone());
                                     let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": initial_payload})));
-                                    if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
+                                    let _ = page_clone.evaluate(script).await;
                                 }
 
                                 // ★ Phase 0: OCR 일괄 처리 및 VRAM 해제
@@ -1790,7 +2089,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
                                         *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                         let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
-                                        if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
+                                        let _ = page_clone.evaluate(script).await;
                                     }
 
                                     {
@@ -1846,7 +2145,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
                                         *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                         let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
-                                        if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
+                                        let _ = page_clone.evaluate(script).await;
                                     }
                                     
                                     {
@@ -1912,7 +2211,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         let payload = json!({"item_display": total_items, "total_items": total_items, "percent": percent, "processing_ids": id_strings.clone()});
                                         *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                         let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
-                                        if let Ok(pages) = _browser_clone.pages().await { for p in pages { let _ = p.evaluate(script.clone()).await; } }
+                                        let _ = page_clone.evaluate(script).await;
                                     }
                                 }
 
@@ -2170,12 +2469,89 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         .and_then(|s| serde_json::from_str(&s).ok())
                         .unwrap_or_default();
                     json!({"type": "prompts_loaded", "payload": prompts}).to_string()
+                } else if payload.starts_with("download_model:") {
+                    let model_name = payload["download_model:".len()..].to_string();
+                    let page_c = page_clone.clone();
+                    
+                    // 🚀 비동기 다운로드 태스크 스폰
+                    tokio::task::spawn(async move {
+                        let folder_name = match model_name.as_str() {
+                            "GLM-OCR" => "glm_ocr",
+                            "Privacy-Filter" => "privacy-filter",
+                            "Embedding" => "embeddings",
+                            _ => "unknown"
+                        };
+
+                        let dir_path = format!("../models/{}", folder_name);
+                        let _ = std::fs::create_dir_all(&dir_path);
+
+                        // 🚀 실제 Hugging Face 다운로드 URL 리스트 매핑
+                        // 여기에 다운로드 받을 파일들의 실제 Hugging Face Direct URL을 입력합니다.
+                        // (형식: https://huggingface.co/{유저}/{리포지토리}/resolve/main/{파일명})
+                        let files_to_download = match model_name.as_str() {
+                            "GLM-OCR" => vec![
+                                // 🚀 GLM-OCR은 토크나이저와 전처리 설정 파일이 추가로 필요합니다. (GGUF는 기존 위치 유지)
+                                ("https://huggingface.co/zai-org/GLM-OCR/resolve/main/config.json", "config.json"),
+                                ("https://huggingface.co/zai-org/GLM-OCR/resolve/main/tokenizer.json", "tokenizer.json"),
+                                ("https://huggingface.co/zai-org/GLM-OCR/resolve/main/preprocessor_config.json", "preprocessor_config.json"),
+                                ("https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/GLM-OCR-Q8_0.gguf", "GLM-OCR-Q8_0.gguf"),
+                                ("https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/mmproj-GLM-OCR-Q8_0.gguf", "mmproj-GLM-OCR-Q8_0.gguf"),
+                            ],
+                            "Privacy-Filter" => vec![
+                                // 🚀 제공해주신 OpenMed/privacy-filter-multilingual 리포지토리 매핑
+                                ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/config.json", "config.json"),
+                                ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/tokenizer.json", "tokenizer.json"),
+                                ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/viterbi_calibration.json", "viterbi_calibration.json"),
+                                ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/model.safetensors", "model.safetensors"),
+                            ],
+                            "Embedding" => vec![
+                                // 🚀 제공해주신 unsloth/embeddinggemma-300m-GGUF 리포지토리 매핑
+                                ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/config.json", "config.json"),
+                                ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/tokenizer.json", "tokenizer.json"),
+                                ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300m-Q4_0.gguf", "embeddinggemma-300m-Q4_0.gguf"),
+                            ],
+                            _ => vec![]
+                        };
+
+                        let total_files = files_to_download.len();
+                        let client = reqwest::Client::new();
+
+                        for (file_idx, (url, filename)) in files_to_download.iter().enumerate() {
+                            if let Ok(res) = client.get(*url).send().await {
+                                let total_size = res.content_length().unwrap_or(0) as f64;
+                                let mut downloaded = 0.0;
+                                
+                                let file_path = format!("{}/{}", dir_path, filename);
+                                use tokio::io::AsyncWriteExt;
+                                if let Ok(mut file) = tokio::fs::File::create(&file_path).await {
+                                    let mut stream = res.bytes_stream();
+                                    
+                                    while let Some(chunk_result) = stream.next().await {
+                                        if let Ok(chunk) = chunk_result {
+                                            let _ = file.write_all(&chunk).await;
+                                            downloaded += chunk.len() as f64;
+                                            
+                                            // 전체 파일 개수 대비 현재 파일의 다운로드 퍼센트 계산
+                                            let file_progress = if total_size > 0.0 { downloaded / total_size } else { 0.0 };
+                                            let percent = (((file_idx as f64 + file_progress) / total_files as f64) * 100.0) as u32;
+                                            
+                                            let progress_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "download_progress", "model": model_name, "percent": percent})));
+                                            let _ = page_c.evaluate(progress_script).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        let complete_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "download_complete", "model": model_name})));
+                        let _ = page_c.evaluate(complete_script).await;
+                    });
+                    
+                    json!({"type": "download_started"}).to_string()
                 } else { "Unknown command".to_string() };
 
                 let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(response));
-                if let Ok(pages) = _browser_clone.pages().await {
-                    for p in pages { let _ = p.evaluate(script.clone()).await; }
-                }
+                let _ = page_clone.evaluate(script).await;
             }
         }
     });
