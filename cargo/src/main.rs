@@ -1258,7 +1258,13 @@ const OVERLAY_SCRIPT: &str = r#"
                     progressContainer.appendChild(progressBar);
 
                     btn.onclick = () => {
+                        const dict = window.lang_dict || {};
+                        const currentLang = window.default_language || 'English';
+                        const getText = (key) => dict[currentLang] ? dict[currentLang][key] : (dict['English'] ? dict['English'][key] : key);
+
                         if (confirm(getText('model_download_confirm'))) {
+                            // 🚀 버튼 텍스트를 즉시 '다운로드 중...' 상태로 변경하여 사용자에게 알림
+                            btn.textContent = getText('model_downloading');
                             triggerDownload(m, btn, progressContainer, progressBar);
                         }
                     };
@@ -1781,6 +1787,12 @@ const OVERLAY_SCRIPT: &str = r#"
                     div.textContent = 'Error: ' + data.message;
                     log.appendChild(div);
                     div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                    
+                    // 🚀 에러 메시지가 권한, 폴더, 네트워크 등 치명적 오류인 경우 사용자에게 즉각 알림을 띄웁니다.
+                    const msgLower = data.message.toLowerCase();
+                    if (msgLower.includes('permission') || msgLower.includes('access') || msgLower.includes('권한') || msgLower.includes('denied') || msgLower.includes('실패')) {
+                        alert("시스템 또는 네트워크 오류가 발생했습니다.\n관리자 권한으로 실행하거나 디스크 여유 공간 및 인터넷 연결을 확인해 주세요.\n\n상세 원인: " + data.message);
+                    }
                     return;
                 }
                 else if (data.type === 'prompts_loaded') {
@@ -1803,9 +1815,26 @@ const OVERLAY_SCRIPT: &str = r#"
                     if (currentTabFilter === 'CONFIG') {
                         const safeId = data.model.replace(/[\s\(\)]+/g, '-');
                         const pb = document.getElementById('progress-bar-' + safeId);
+                        const pc = document.getElementById('progress-container-' + safeId);
+                        const btn = document.getElementById('btn-download-' + safeId);
+
+                        const dict = window.lang_dict || {};
+                        const currentLang = window.default_language || 'English';
+                        const getText = (key) => dict[currentLang] ? dict[currentLang][key] : (dict['English'] ? dict['English'][key] : key);
+
+                        if (pc && pc.style.display === 'none') {
+                            pc.style.display = 'block';
+                        }
+                        
+                        if (btn && btn.textContent !== getText('model_downloading')) {
+                            btn.textContent = getText('model_downloading');
+                            btn.disabled = true;
+                            btn.style.background = '#6c757d';
+                        }
+
                         if (pb) {
                             pb.style.width = `${data.percent}%`;
-                            pb.textContent = `${data.percent}%`;
+                            pb.textContent = `${getText('model_downloading')} ${data.percent}%`;
                         }
                     }
                     return;
@@ -2565,15 +2594,19 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             _ => "unknown"
                         };
 
-                        let dir_path = app_dir_clone.join("models").join(folder_name); // 🚀 복제된 app_dir_clone 사용
-                        let _ = std::fs::create_dir_all(&dir_path);
+                        let dir_path = app_dir_clone.join("models").join(folder_name);
+                        
+                        // 🚀 디렉토리 생성 중 권한 오류 발생 시 에러 반환 및 사용자 알림 연동
+                        if let Err(e) = std::fs::create_dir_all(&dir_path) {
+                            println!("[Error] 디렉토리 생성 실패 (권한 문제일 수 있습니다): {:?}", e);
+                            let err_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "error", "message": format!("폴더 생성 권한이 없습니다. ({}): {}", dir_path.display(), e)})));
+                            let _ = page_c.evaluate(err_script).await;
+                            return;
+                        }
 
                         // 🚀 실제 Hugging Face 다운로드 URL 리스트 매핑
-                        // 여기에 다운로드 받을 파일들의 실제 Hugging Face Direct URL을 입력합니다.
-                        // (형식: https://huggingface.co/{유저}/{리포지토리}/resolve/main/{파일명})
                         let files_to_download = match model_name.as_str() {
                             "GLM-OCR" => vec![
-                                // 🚀 GLM-OCR은 토크나이저와 전처리 설정 파일이 추가로 필요합니다. (GGUF는 기존 위치 유지)
                                 ("https://huggingface.co/zai-org/GLM-OCR/resolve/main/config.json", "config.json"),
                                 ("https://huggingface.co/zai-org/GLM-OCR/resolve/main/tokenizer.json", "tokenizer.json"),
                                 ("https://huggingface.co/zai-org/GLM-OCR/resolve/main/preprocessor_config.json", "preprocessor_config.json"),
@@ -2581,53 +2614,107 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 ("https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/mmproj-GLM-OCR-Q8_0.gguf", "mmproj-GLM-OCR-Q8_0.gguf"),
                             ],
                             "Privacy-Filter" => vec![
-                                // 🚀 제공해주신 OpenMed/privacy-filter-multilingual 리포지토리 매핑
                                 ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/config.json", "config.json"),
                                 ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/tokenizer.json", "tokenizer.json"),
-                                ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/viterbi_calibration.json", "viterbi_calibration.json"),
+                                ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/tokenizer_config.json", "tokenizer_config.json"),
                                 ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/model.safetensors", "model.safetensors"),
                             ],
                             "Embedding" => vec![
-                                // 🚀 제공해주신 unsloth/embeddinggemma-300m-GGUF 리포지토리 매핑
-                                ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/config.json", "config.json"),
-                                ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/tokenizer.json", "tokenizer.json"),
+                                ("https://huggingface.co/google/embeddinggemma-300m/resolve/main/config.json", "config.json"),
+                                ("https://huggingface.co/google/embeddinggemma-300m/resolve/main/tokenizer.json", "tokenizer.json"),
                                 ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300m-Q4_0.gguf", "embeddinggemma-300m-Q4_0.gguf"),
                             ],
                             _ => vec![]
                         };
 
+                        if files_to_download.is_empty() {
+                            let err_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "error", "message": format!("다운로드할 파일 목록이 없습니다: {}", model_name)})));
+                            let _ = page_c.evaluate(err_script).await;
+                            return;
+                        }
+
                         let total_files = files_to_download.len();
                         let client = reqwest::Client::new();
+                        let mut has_error = false;
 
                         for (file_idx, (url, filename)) in files_to_download.iter().enumerate() {
-                            if let Ok(res) = client.get(*url).send().await {
-                                let total_size = res.content_length().unwrap_or(0) as f64;
-                                let mut downloaded = 0.0;
-                                
-                                let file_path = dir_path.join(filename);
-                                use tokio::io::AsyncWriteExt;
-                                if let Ok(mut file) = tokio::fs::File::create(&file_path).await {
-                                    let mut stream = res.bytes_stream();
+                            match client.get(*url).send().await {
+                                Ok(res) => {
+                                    if !res.status().is_success() {
+                                        let err_msg = format!("파일 다운로드 실패 (HTTP {}): {}", res.status(), url);
+                                        println!("[Error] {}", err_msg);
+                                        let err_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "error", "message": err_msg})));
+                                        let _ = page_c.evaluate(err_script).await;
+                                        has_error = true;
+                                        break;
+                                    }
                                     
-                                    while let Some(chunk_result) = stream.next().await {
-                                        if let Ok(chunk) = chunk_result {
-                                            let _ = file.write_all(&chunk).await;
-                                            downloaded += chunk.len() as f64;
+                                    let total_size = res.content_length().unwrap_or(0) as f64;
+                                    let mut downloaded = 0.0;
+                                    
+                                    let file_path = dir_path.join(filename);
+                                    match tokio::fs::File::create(&file_path).await {
+                                        Ok(mut file) => {
+                                            use tokio::io::AsyncWriteExt;
+                                            let mut stream = res.bytes_stream();
                                             
-                                            // 전체 파일 개수 대비 현재 파일의 다운로드 퍼센트 계산
-                                            let file_progress = if total_size > 0.0 { downloaded / total_size } else { 0.0 };
-                                            let percent = (((file_idx as f64 + file_progress) / total_files as f64) * 100.0) as u32;
-                                            
-                                            let progress_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "download_progress", "model": model_name, "percent": percent})));
-                                            let _ = page_c.evaluate(progress_script).await;
+                                            while let Some(chunk_result) = stream.next().await {
+                                                match chunk_result {
+                                                    Ok(chunk) => {
+                                                        if let Err(e) = file.write_all(&chunk).await {
+                                                            let err_msg = format!("파일 쓰기 실패 (디스크 용량 부족 또는 권한 문제): {:?}", e);
+                                                            println!("[Error] {}", err_msg);
+                                                            let err_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "error", "message": err_msg})));
+                                                            let _ = page_c.evaluate(err_script).await;
+                                                            has_error = true;
+                                                            break;
+                                                        }
+                                                        downloaded += chunk.len() as f64;
+                                                        
+                                                        // 전체 파일 개수 대비 현재 파일의 다운로드 퍼센트 계산
+                                                        let file_progress = if total_size > 0.0 { downloaded / total_size } else { 0.0 };
+                                                        let percent = (((file_idx as f64 + file_progress) / total_files as f64) * 100.0) as u32;
+                                                        
+                                                        let progress_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "download_progress", "model": model_name, "percent": percent})));
+                                                        let _ = page_c.evaluate(progress_script).await;
+                                                    },
+                                                    Err(e) => {
+                                                        let err_msg = format!("네트워크 스트림 읽기 실패: {:?}", e);
+                                                        println!("[Error] {}", err_msg);
+                                                        let err_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "error", "message": err_msg})));
+                                                        let _ = page_c.evaluate(err_script).await;
+                                                        has_error = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            let err_msg = format!("파일 생성 실패 ({} 권한을 확인해주세요): {:?}", file_path.display(), e);
+                                            println!("[Error] {}", err_msg);
+                                            let err_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "error", "message": err_msg})));
+                                            let _ = page_c.evaluate(err_script).await;
+                                            has_error = true;
+                                            break;
                                         }
                                     }
+                                },
+                                Err(e) => {
+                                    let err_msg = format!("네트워크 연결 실패 (인터넷 확인 필요): {:?}", e);
+                                    println!("[Error] {}", err_msg);
+                                    let err_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "error", "message": err_msg})));
+                                    let _ = page_c.evaluate(err_script).await;
+                                    has_error = true;
+                                    break;
                                 }
                             }
+                            if has_error { break; }
                         }
                         
-                        let complete_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "download_complete", "model": model_name})));
-                        let _ = page_c.evaluate(complete_script).await;
+                        if !has_error {
+                            let complete_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "download_complete", "model": model_name})));
+                            let _ = page_c.evaluate(complete_script).await;
+                        }
                     });
                     
                     json!({"type": "download_started"}).to_string()
