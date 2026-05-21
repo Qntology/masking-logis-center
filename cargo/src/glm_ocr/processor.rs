@@ -196,8 +196,6 @@ impl GlmOcrProcessor {
         input_ids_vec.push(assistant_id); // <|assistant|>
         // <|assistant|> 뒤의 줄바꿈 제거 (생성 방해 요인 제거)
 
-        println!("[System] 최종 컨텍스트 사이즈 (총 토큰 수): {}", input_ids_vec.len());
-
         let input_ids = Tensor::from_vec(
             input_ids_vec.clone(),
             (1, input_ids_vec.len()),

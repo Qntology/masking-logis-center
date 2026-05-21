@@ -441,13 +441,16 @@ const OVERLAY_SCRIPT: &str = r#"
             const pushedCount = stagedItems.filter(i => selectedIds.includes(i.id) && i.status === 'PUSHED').length;
             
             if (pushedCount > 0) {
-                submitBtn.textContent = `Drag (${pushedCount})`;
+                submitBtn.textContent = `Drag Content (${pushedCount})`;
+                submitBtn.disabled = false;
                 submitBtn.draggable = true;
             } else if (processedFileContent !== '' || textInput.value.trim() !== '') {
-                submitBtn.textContent = 'Drag';
+                submitBtn.textContent = 'Drag Content';
+                submitBtn.disabled = false;
                 submitBtn.draggable = true;
             } else {
                 submitBtn.textContent = 'Submit';
+                submitBtn.disabled = true;
                 submitBtn.draggable = false;
             }
         }
@@ -503,15 +506,27 @@ const OVERLAY_SCRIPT: &str = r#"
             reader.readAsDataURL(file);
         };
 
+        // 🚀 버튼을 드래그할 때 웹 브라우저 네이티브 파일 드래그앤드랍(바탕화면 드랍)을 지원함과 동시에
+        // Rust 백엔드에도 동일한 내용의 물리 파일을 백업 저장하도록 요청합니다.
         submitBtn.ondragstart = (e) => {
-            if (!submitBtn.textContent.startsWith('Drag')) {
+            if (!submitBtn.textContent.startsWith('Drag') || submitBtn.disabled) {
                 e.preventDefault();
                 return;
             }
+            
             const checkedBoxes = Array.from(log.querySelectorAll('.item-checkbox:checked'));
             const selectedIds = checkedBoxes.map(cb => cb.dataset.id);
-            const selectedItems = stagedItems.filter(i => selectedIds.includes(i.id) && i.status === 'PUSHED');
+            
+            const payload = {
+                prompt: textInput.value || 'N/A',
+                processed_file: processedFileContent || '',
+                ids: selectedIds
+            };
+            if (window.rpc) {
+                window.rpc("export_to_file:" + JSON.stringify(payload));
+            }
 
+            const selectedItems = stagedItems.filter(i => selectedIds.includes(i.id) && i.status === 'PUSHED');
             let exportContent = `[Prompt]\n${textInput.value || 'N/A'}\n\n`;
             if (processedFileContent) {
                 exportContent += `[File Masked Text]\n${processedFileContent}\n\n`;
@@ -522,17 +537,21 @@ const OVERLAY_SCRIPT: &str = r#"
                 exportContent += `\n--- ID: ${item.id} ---\n[Domain]: ${item.domain}\n[Title]: ${item.title}\n[Content]:\n${item.masking || item.context}\n`;
             });
 
-            const file = new File([exportContent], "export.txt", { type: "text/plain" });
-            e.dataTransfer.items.add(file);
-            e.dataTransfer.setData('text/plain', exportContent);
-
             const utf8Bytes = new TextEncoder().encode(exportContent);
             let binary = '';
             for (let i = 0; i < utf8Bytes.length; i++) {
                 binary += String.fromCharCode(utf8Bytes[i]);
             }
             const base64Str = btoa(binary);
-            e.dataTransfer.setData('DownloadURL', `text/plain:export.txt:data:text/plain;base64,${base64Str}`);
+
+            // 🚀 텍스트가 아닌 파일 다운로드로 인식시키기 위해 application/octet-stream 사용 및 파일명 drag.context 고정
+            const fileName = "drag.context";
+            const mimeType = "application/octet-stream";
+            
+            const file = new File([utf8Bytes], fileName, { type: mimeType });
+            e.dataTransfer.items.add(file);
+            // 🚀 데이터 전송 시 DownloadURL 포맷을 맞춰 브라우저 외부로 드랍 시 파일이 생성되도록 유도
+            e.dataTransfer.setData('DownloadURL', `${mimeType}:${fileName}:data:${mimeType};base64,${base64Str}`);
         };
 
         footer.appendChild(fileInputWrapper);
@@ -841,6 +860,18 @@ const OVERLAY_SCRIPT: &str = r#"
                     div.style.background = '#e6fffa';
                     div.style.borderRadius = '4px';
                     div.textContent = `System: File OCR & Masking completed. Ready to export.`;
+                    log.appendChild(div);
+                    div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                    return;
+                }
+                else if (data.type === 'export_success') {
+                    // 🚀 Rust에서 실제 파일 저장이 완료되면 시스템 로그에 저장 경로를 표시합니다.
+                    const div = document.createElement('div');
+                    div.className = 'system';
+                    div.style.padding = '10px';
+                    div.style.background = '#e6fffa';
+                    div.style.borderRadius = '4px';
+                    div.textContent = `System: 파일이 성공적으로 디스크에 저장되었습니다. 경로: ${data.payload}`;
                     log.appendChild(div);
                     div.scrollIntoView({ behavior: 'smooth', block: 'end' });
                     return;
@@ -1360,6 +1391,52 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         println!("[System] [단일 파일 처리] 최종 전처리 결과:\n{}", masked_result);
                         json!({"type": "file_processed", "payload": {"ocr": ocr_result, "masked": masked_result}}).to_string()
                     }
+                } else if payload.starts_with("export_to_file:") {
+                    // 🚀 웹 브라우저의 드래그앤드랍 제약을 해결하기 위해 Rust 백엔드에서 물리적 파일 생성을 담당합니다.
+                    let data = &payload["export_to_file:".len()..];
+                    let response_json = if let Ok(req) = serde_json::from_str::<serde_json::Value>(data) {
+                        let prompt = req.get("prompt").and_then(|v| v.as_str()).unwrap_or("N/A");
+                        let processed_file = req.get("processed_file").and_then(|v| v.as_str()).unwrap_or("");
+                        let ids: Vec<String> = req.get("ids")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|i| i.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+                            
+                        let mut export_content = format!("[Prompt]\n{}\n\n", prompt);
+                        if !processed_file.is_empty() {
+                            export_content.push_str(&format!("[File Masked Text]\n{}\n\n", processed_file));
+                        }
+                        
+                        let mut selected_items = Vec::new();
+                        if let Ok(drafts) = db::fetch_drafts().await {
+                            selected_items = drafts.into_iter()
+                                .filter(|r| ids.contains(&r.id) && r.status == "PUSHED")
+                                .collect();
+                        }
+                        
+                        export_content.push_str(&format!("[Selected Items ({})]\n", selected_items.len()));
+                        
+                        for item in selected_items {
+                            let content = if !item.masking.is_empty() { &item.masking } else { &item.context };
+                            export_content.push_str(&format!("\n--- ID: {} ---\n[Domain]: {}\n[Title]: {}\n[Content]:\n{}\n", 
+                                item.id, item.domain, item.title, content));
+                        }
+                        
+                        // 🚀 파일명을 고정하여 매번 새로운 파일이 생기지 않고 덮어씌워지도록 수정
+                        let _ = std::fs::create_dir_all("data/exports");
+                        let file_path = "data/exports/drag.context".to_string();
+                        
+                        match std::fs::write(&file_path, export_content) {
+                            Ok(_) => {
+                                println!("[System] 성공적으로 파일이 업데이트되었습니다: {}", file_path);
+                                json!({"type": "export_success", "payload": file_path}).to_string()
+                            },
+                            Err(e) => json!({"type": "error", "message": format!("File Write Error: {}", e)}).to_string(),
+                        }
+                    } else {
+                        json!({"type": "error", "message": "Invalid export payload format."}).to_string()
+                    };
+                    response_json
                 } else if payload.starts_with("gemini_chat:") {
                     "[System] Gemini 서비스 비활성화됨".to_string()
                 } else if payload == "check_progress" {
