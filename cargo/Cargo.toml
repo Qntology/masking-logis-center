@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "terminal_logis_center"
+name = "terminal_logis_center_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]

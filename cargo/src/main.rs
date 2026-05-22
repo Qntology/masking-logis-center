@@ -1,4 +1,4 @@
-use terminal_logis_center::{db, privacy_filter, glm_ocr, params}; // embedding 제거
+use terminal_logis_center_lib::{db, privacy_filter, glm_ocr, params}; // embedding 제거
 use privacy_filter::viterbi::PrivacySpan; // PrivacyFilterModel 제거
 use candle_core::Device;
 use glm_ocr::generate::{GlmOcrGenerateModel, GenerateModel};
@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 lazy_static! {
     static ref OCR_MODEL: Mutex<Option<GlmOcrGenerateModel>> = Mutex::new(None);
-    static ref PRIVACY_MANAGER: Mutex<Option<terminal_logis_center::privacy_filter::masking::PrivacyManager>> = Mutex::new(None);
-    static ref EMBEDDING_MODEL: Mutex<Option<terminal_logis_center::embedding::EmbeddingModel>> = Mutex::new(None);
+    static ref PRIVACY_MANAGER: Mutex<Option<terminal_logis_center_lib::privacy_filter::masking::PrivacyManager>> = Mutex::new(None);
+    static ref EMBEDDING_MODEL: Mutex<Option<terminal_logis_center_lib::embedding::EmbeddingModel>> = Mutex::new(None);
     static ref GLOBAL_PROGRESS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
     // 🚀 Push 작업을 실시간으로 중단하기 위한 전역 플래그입니다.
     static ref PUSH_CANCEL_SIGNAL: AtomicBool = AtomicBool::new(false);
@@ -86,7 +86,7 @@ struct AppConfig {
 }
 
 fn load_app_config() -> AppConfig {
-    let app_dir = terminal_logis_center::utils::get_app_dir();
+    let app_dir = terminal_logis_center_lib::utils::get_app_dir();
     // 사용자가 설정을 저장할 때 사용하는 app_config.json을 우선적으로 읽습니다.
     let config_path = app_dir.join("app_config.json");
     if let Ok(content) = std::fs::read_to_string(&config_path) {
@@ -187,7 +187,7 @@ const OVERLAY_SCRIPT: &str = r#"
             #log { display: flex !important; flex-direction: column !important; gap: 10px; width: 100%; }
             #log .system { align-self: flex-start !important; text-align: left !important; color: blue !important; max-width: 85%; white-space: pre-wrap; }
             #log .user { align-self: flex-end !important; text-align: right !important; color: green !important; max-width: 85%; white-space: pre-wrap; }
-            footer { padding: 10px 15px; background: #f8f9fa !important; border-top: 1px solid #eee; display: flex !important; gap: 8px; flex-shrink: 0; align-items: center; }
+            footer { padding: 10px 15px; background: #f8f9fa !important; border-top: 1px solid #eee; display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
             footer input[type="file"] { width: 140px; font-size: 12px; cursor: pointer; }
             footer input[type="text"] { flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
             footer button { padding: 8px 15px; background: #333 !important; color: #fff !important; border: none; border-radius: 4px; font-size: 13px; font-weight: bold; cursor: pointer; }
@@ -2064,13 +2064,15 @@ const OVERLAY_SCRIPT: &str = r#"
 
         autoExtract();
         
-        setTimeout(() => {
+        // 🚀 [Fix] window.rpc 바인딩이 완료될 때까지 안전하게 대기한 후 초기 데이터를 요청합니다. (새 탭 동기화 누락 원천 차단)
+        const initInterval = setInterval(() => {
             if (window.rpc) {
+                clearInterval(initInterval);
                 window.rpc("fetch_drafts");
                 window.rpc("check_progress");
-                window.rpc("fetch_prompts"); // 🚀 초기 구동 시 프롬프트 목록 불러오기
+                window.rpc("fetch_prompts");
             }
-        }, 300);
+        }, 100);
     }
     initUI();
 })();
@@ -2091,7 +2093,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let auto_extract = app_config.auto_extract.unwrap_or(true); // 🚀 기본값은 활성화(true)
     let enable_masking = app_config.enable_masking.unwrap_or(true); // 🚀 마스킹 기능도 기본값 활성화(true)
     
-    let app_dir = terminal_logis_center::utils::get_app_dir();
+    let app_dir = terminal_logis_center_lib::utils::get_app_dir();
 
     // 🚀 마스킹 단어 사전 파일(adjectives.txt, nouns.txt)을 바이너리에 내장하고 AppData 폴더로 무조건 복사합니다.
     let _ = std::fs::write(app_dir.join("adjectives.txt"), include_str!("../adjectives.txt"));
@@ -2146,47 +2148,6 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     // 🚀 컴파일 시 빌드에 language.json 파일을 아예 내장(Embed)시켜버려, 배포 후에도 경로 문제 없이 다국어를 100% 보장합니다.
     let lang_dict_str = include_str!("language.json").to_string();
 
-    // 🚀 [시스템 파일 자동 연결] 모델 구동에 필요한 JSON 설정 파일들을 바이너리에 내장합니다.
-    // 사용자가 무거운 모델 파일(.gguf)만 받아도 즉시 연동되도록 하기 위함입니다.
-    let glm_config = include_str!("../models/glm_ocr/config.json");
-    let glm_tokenizer_config = include_str!("../models/glm_ocr/tokenizer_config.json");
-    let glm_tokenizer = include_str!("../models/glm_ocr/tokenizer.json"); // 🚀 추가
-    let glm_preprocessor = include_str!("../models/glm_ocr/preprocessor_config.json"); // 🚀 추가
-    let privacy_config = include_str!("../models/privacy-filter/config.json");
-    let privacy_tokenizer_config = include_str!("../models/privacy-filter/tokenizer_config.json");
-    let privacy_tokenizer = include_str!("../models/privacy-filter/tokenizer.json"); // 🚀 추가
-    let embed_config = include_str!("../models/embeddings/config.json");
-    let embed_tokenizer = include_str!("../models/embeddings/tokenizer.json"); // 🚀 추가
-
-    // 헬퍼 클로저: 특정 모델 폴더에 내장된 JSON 파일들을 자동으로 생성/복원합니다.
-    let ensure_model_configs = |app_dir: &std::path::Path, model_type: &str| {
-        let base = app_dir.join("models").join(match model_type {
-            "GLM-OCR" => "glm_ocr",
-            "Privacy-Filter" => "privacy-filter",
-            "Embedding" => "embeddings",
-            _ => return,
-        });
-        let _ = std::fs::create_dir_all(&base);
-        match model_type {
-            "GLM-OCR" => {
-                let _ = std::fs::write(base.join("config.json"), glm_config);
-                let _ = std::fs::write(base.join("tokenizer_config.json"), glm_tokenizer_config);
-                let _ = std::fs::write(base.join("tokenizer.json"), glm_tokenizer); // 🚀 추가
-                let _ = std::fs::write(base.join("preprocessor_config.json"), glm_preprocessor); // 🚀 추가
-            },
-            "Privacy-Filter" => {
-                let _ = std::fs::write(base.join("config.json"), privacy_config);
-                let _ = std::fs::write(base.join("tokenizer_config.json"), privacy_tokenizer_config);
-                let _ = std::fs::write(base.join("tokenizer.json"), privacy_tokenizer); // 🚀 추가
-            },
-            "Embedding" => {
-                let _ = std::fs::write(base.join("config.json"), embed_config);
-                let _ = std::fs::write(base.join("tokenizer.json"), embed_tokenizer); // 🚀 추가
-            },
-            _ => (),
-        }
-    };
-    
     // OVERLAY_SCRIPT 내의 예측 가능한 전역 변수(window.rpc 등)를 랜덤 생성한 이름으로 동적 치환
     let overlay_script_replaced = OVERLAY_SCRIPT
         .replace("window.rpc", &format!("window.{}", rpc_binding_name))
@@ -2201,7 +2162,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let _browser_clone = browser.clone();
     
     tokio::task::spawn(async move {
-        let app_dir = terminal_logis_center::utils::get_app_dir();
+        let app_dir = terminal_logis_center_lib::utils::get_app_dir();
         while let Some(event) = bindings.next().await {
             if event.name == rpc_binding_name { // 이벤트 수신명 변경
                 let payload = event.payload.trim_matches('"').to_string();
@@ -2214,7 +2175,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     tokio::task::spawn(async move {
                         let result_str = match serde_json::from_str::<db::CommerceRecord>(&data) {
                             Ok(mut record) => {
-                                use terminal_logis_center::harness::DefaultHarness;
+                                // 🚀 [Fix] 미사용 트레이트 Harness 임포트를 제거하고 DefaultHarness 구조체만 사용합니다.
+                                use terminal_logis_center_lib::harness::DefaultHarness;
                                 let harness = DefaultHarness;
                                 
                                 if record.url.starts_with("file://") && record.context.contains("data:image/") {
@@ -2283,7 +2245,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     // 🚀 [Fix] DB 조회 작업도 백그라운드 태스크로 분리하여 탭 프리징과 블로킹을 방지합니다.
                     let browser_c = _browser_clone.clone();
                     tokio::task::spawn(async move {
-                        let res_str = db::fetch_drafts().await.map(|d| json!({"type":"drafts_loaded","payload":d}).to_string()).unwrap_or_else(|e| e.to_string());
+                        let res_str = db::fetch_drafts().await.map(|d| json!({"type":"drafts_loaded","payload":d}).to_string()).unwrap_or_else(|e| json!({"type": "error", "message": format!("DB Error: {}", e)}).to_string());
                         let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(res_str));
                         if let Ok(pages) = browser_c.pages().await {
                             for p in pages { let _ = p.evaluate(script.clone()).await; }
@@ -2341,7 +2303,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                                     let needs_ocr = target_records.iter().any(|r| r.context.starts_with("data:image/") || r.context.starts_with("data:application/pdf"));
                                     
-                                    use terminal_logis_center::harness::DefaultHarness;
+                                    use terminal_logis_center_lib::harness::DefaultHarness;
                                     let harness = DefaultHarness;
                                     for record in &mut target_records {
                                         let is_image = record.context.starts_with("data:image/") || record.url.starts_with("file://");
@@ -2411,6 +2373,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     }
                                                 }
                                                 if ocr_success {
+                                                    println!("[System] 이미지 OCR 완료 및 마크다운 태그 정제됨. (ID: {})", record.id);
+                                                    println!("[GlmOcr] 배치 작업 생성된 텍스트 결과:\n{}", cleaned_ocr);
                                                     record.context = cleaned_ocr.clone();
                                                 }
                                             }
@@ -2446,11 +2410,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 if pm_guard.is_none() {
                                                     let pm_path = app_dir_c.join("models").join("privacy-filter");
                                                     let pm_path_str = pm_path.to_string_lossy().to_string();
-                                                    *pm_guard = terminal_logis_center::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
+                                                    *pm_guard = terminal_logis_center_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
                                                 }
                                             }
                                             
-                                            let mut privacy_session = terminal_logis_center::privacy_filter::masking::PrivacySession::new();
+                                            let mut privacy_session = terminal_logis_center_lib::privacy_filter::masking::PrivacySession::new();
 
                                             for (idx, record) in target_records.iter_mut().enumerate() {
                                                 if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
@@ -2474,6 +2438,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 }
                                                 if masked_success {
                                                     record.masking = masked_text;
+                                                    println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
                                                 }
 
                                                 current_step += 1;
@@ -2513,7 +2478,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 if em_guard.is_none() {
                                                     let em_path = app_dir_c.join("models").join("embeddings");
                                                     let em_path_str = em_path.to_string_lossy().to_string();
-                                                    *em_guard = terminal_logis_center::embedding::EmbeddingModel::new_with_device(&em_path_str, &device).ok();
+                                                    *em_guard = terminal_logis_center_lib::embedding::EmbeddingModel::new_with_device(&em_path_str, &device).ok();
                                                 }
                                             }
                                             for (idx, record) in target_records.iter_mut().enumerate() {
@@ -2703,7 +2668,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             if pm_guard.is_none() {
                                 let pm_path = app_dir_c.join("models").join("privacy-filter");
                                 let pm_path_str = pm_path.to_string_lossy().to_string();
-                                *pm_guard = terminal_logis_center::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
+                                *pm_guard = terminal_logis_center_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
                             }
                             if let Some(pm) = pm_guard.as_ref() {
                                 masked_result = pm.mask_text(&ocr_result).unwrap_or_else(|e| {
