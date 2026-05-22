@@ -7060,6 +7060,7 @@ dependencies = [
  "memmap2",
  "nvml-wrapper",
  "once_cell",
+ "rand 0.8.6",
  "rayon",
  "reqwest 0.13.3",
  "safetensors 0.4.5",
