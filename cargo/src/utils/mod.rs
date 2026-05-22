@@ -59,27 +59,6 @@ pub fn get_app_dir() -> std::path::PathBuf {
     }
 }
 
-pub fn string_to_static_str(s: String) -> &'static str {
-    Box::leak(s.into_boxed_str())
-}
-
-pub fn extract_metadata_value<T>(
-    metadata: &Option<std::collections::HashMap<String, String>>,
-    key: &str,
-) -> Option<T>
-where
-    T: std::str::FromStr + Clone + PartialEq,
-{
-    if let Some(map) = metadata {
-        if let Some(value_str) = map.get(key) {
-            if let Ok(value) = value_str.parse::<T>() {
-                return Some(value);
-            }
-        }
-    }
-    None
-}
-
 // 🚀 OS 커널 레벨에서 가비지 컬렉터를 강제 호출하여 RAM/VRAM 캐시를 즉시 반환하는 헬퍼 함수
 pub fn force_memory_cleanup() {
     #[cfg(target_os = "windows")]

@@ -8,7 +8,6 @@ pub mod domain;
 pub mod categorizer;
 pub mod assistant;
 
-pub mod chat_template;
 pub mod glm_ocr;
 pub mod utils;
 pub mod models;
