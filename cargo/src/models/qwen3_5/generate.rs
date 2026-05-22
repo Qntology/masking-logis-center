@@ -274,7 +274,7 @@ impl Qwen3_5GenerateModel {
         let mut cur_pixel_values = pixel_values;
         let mut cur_pixel_values_video = pixel_values_video;
 
-        let enter_id = self.tokenizer.text_encode_vec("\n".to_string(), false).ok().and_then(|v| v.first().cloned()).unwrap_or(999999);
+        let enter_id = self.tokenizer.text_encode_vec("\n".to_string(), false).ok().and_then(|v: Vec<u32>| v.first().cloned()).unwrap_or(999999);
         
         let is_strict_json = mes_text.contains("/no_think") || mes_text.contains("RETURN JSON ONLY") || mes_text.contains("Return ONLY");
         let mut gen_text_buffer = String::new(); 
@@ -448,8 +448,10 @@ impl Qwen3_5GenerateModel {
             let mes_render = self.chat_template.apply_chat_template(mes)?;
             
             let has_vision = mes.messages.iter().any(|msg| {
-                if msg.role == "user" {
-                    msg.parts.iter().any(|p| p.image_url.is_some())
+                if let ChatCompletionRequestMessage::User(user_msg) = msg {
+                    if let ChatCompletionRequestUserMessageContent::Array(parts) = &user_msg.content {
+                        parts.iter().any(|p| matches!(p, ChatCompletionRequestMessageContentPart::ImageURL(_) | ChatCompletionRequestMessageContentPart::VideoURL(_)))
+                    } else { false }
                 } else { false }
             });
 
@@ -515,7 +517,7 @@ impl Qwen3_5GenerateModel {
         let mes_check = self.chat_template.apply_chat_template(mes).unwrap_or_default();
         let is_strict_json = mes_check.contains("/no_think") || mes_check.contains("RETURN JSON ONLY") || mes_check.contains("Return ONLY");
         
-        let enter_id = self.tokenizer.text_encode_vec("\n".to_string(), false).ok().and_then(|v| v.first().cloned()).unwrap_or(999999);
+        let enter_id = self.tokenizer.text_encode_vec("\n".to_string(), false).ok().and_then(|v: Vec<u32>| v.first().cloned()).unwrap_or(999999);
         let mut gen_text_buffer = String::new();
         let mut print_buffer = String::new();
 

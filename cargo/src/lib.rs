@@ -1,5 +1,4 @@
 pub mod db;
-pub mod embedding;
 pub mod model;
 pub mod harness;
 pub mod queue;

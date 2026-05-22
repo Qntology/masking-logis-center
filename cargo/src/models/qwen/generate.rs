@@ -663,7 +663,7 @@ impl QwenVLGenerateModel {
             (Tensor::from_vec(f_ids.clone(), (1, total_toks), &self.text_device)?, 0)
         };
         
-        let total_tokens_after_prefill = offset + input_ids.dim(1)?;
+        let total_tokens_after_prefill: usize = offset + input_ids.dim(1)?;
     
         wait_for_global_io().await; 
         let mut logits = self.qwen.forward(&input_ids, None, None, None, None, None, offset, total_tokens_after_prefill, session_id.clone(), _kv_name.clone()).await?;

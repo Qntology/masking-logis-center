@@ -9,9 +9,10 @@ use crate::{
     models::qwen::{
         common::{GateUpDownMLP, TwoLinearMLP, eager_attention_forward, get_layer_norm},
         config::{QwenVLConfig, QwenVLTextConfig, QwenVLVisionConfig},
+        rope::QwenVLTextRotaryEmbedding,
     },
     position_embed::rope::{
-        Qwen2_5VisionRotaryEmbedding, QwenVLTextRotaryEmbedding, apply_rotary_pos_emb,
+        Qwen2_5VisionRotaryEmbedding, apply_rotary_pos_emb,
         apply_rotary_pos_emb_vision,
     },
     utils::tensor_utils::{
