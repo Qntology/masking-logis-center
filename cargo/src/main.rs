@@ -283,20 +283,28 @@ const OVERLAY_SCRIPT: &str = r#"
         deleteBtn.textContent = 'Delete';
         deleteBtn.style.display = 'none'; 
         deleteBtn.onclick = () => {
-            if (isProcessing) return;
-            // 🚀 메모리에서 전체 선택된 ID를 조회합니다.
+            // 🚀 [Fix] 처리 중인 아이템은 절대 삭제되지 않도록 필터링하여 강력히 방어합니다.
             const selectedIds = Array.from(checkedSessionIds);
+            const idsToDelete = selectedIds.filter(id => !processingIds.includes(id));
+            
+            if (idsToDelete.length === 0) {
+                alert('현재 Pushing 진행 중인 아이템은 삭제할 수 없습니다.');
+                return;
+            }
+            if (idsToDelete.length !== selectedIds.length) {
+                alert('진행 중인 아이템을 제외한 나머지 항목만 삭제됩니다.');
+            }
             
             // 🚀 로컬 상태에 삭제된 ID를 기록하여 focus 이벤트로 인한 좀비 복구를 원천 차단합니다.
-            selectedIds.forEach(id => {
+            idsToDelete.forEach(id => {
                 deletedSessionIds.add(id);
                 checkedSessionIds.delete(id); // 🚀 삭제된 아이템은 체크 유지 목록에서도 제거합니다.
             });
             
             if (window.rpc) {
-                window.rpc("delete_drafts:" + JSON.stringify(selectedIds));
+                window.rpc("delete_drafts:" + JSON.stringify(idsToDelete));
             }
-            stagedItems = stagedItems.filter(i => !selectedIds.includes(i.id));
+            stagedItems = stagedItems.filter(i => !idsToDelete.includes(i.id));
             updateGnbUI();
             renderStagedList();
         };
@@ -349,7 +357,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 pushBtn.textContent = 'Cancel';
                 pushBtn.style.background = '#ffc107'; // 경고색(노란색)
                 deleteBtn.disabled = true;
-                draftBtn.disabled = true;
+                draftBtn.disabled = false; // 🚀 Pushing 진행 중에도 별개로 Draft 아이템 추가가 가능하도록 활성화 유지
                 return;
             }
 
@@ -2198,71 +2206,78 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
             if event.name == rpc_binding_name { // 이벤트 수신명 변경
                 let payload = event.payload.trim_matches('"').to_string();
                 let response = if payload.starts_with("sync_data:") {
-                    let data = &payload["sync_data:".len()..];
-                    match serde_json::from_str::<db::CommerceRecord>(data) {
-                        Ok(mut record) => {
-                            // 🚀 [Fix] 미사용 트레이트 Harness 임포트를 제거하고 DefaultHarness 구조체만 사용합니다.
-                            use terminal_logis_center::harness::DefaultHarness;
-                            let harness = DefaultHarness;
-                            
-                            if record.url.starts_with("file://") && record.context.contains("data:image/") {
-                                if let Some(base64_part) = record.context.split("data:").nth(1) {
-                                    let full_data_url = format!("data:{}", base64_part.trim());
-                                    let ocr_result = {
-                                        let mut model_guard = OCR_MODEL.lock().unwrap();
-                                        if model_guard.is_none() {
-                                            // 🚀 깔끔한 윈도우 경로 생성을 위해 join 분리
-                                            let model_path = app_dir.join("models").join("glm_ocr");
-                                            let model_path_str = model_path.to_string_lossy().to_string();
-                                            // 🚀 SSD 오프로딩이 적용되었으므로 당당하게 4GB CUDA VRAM을 100% 활용합니다.
-                                            let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu); 
-                                            if let Ok(model) = GlmOcrGenerateModel::init(&model_path_str, Some(&ocr_device), None) {
-                                                *model_guard = Some(model);
+                    // 🚀 [Fix] RPC 이벤트 루프(UI 스레드)가 멈추지 않도록 무거운 OCR/저장 로직을 백그라운드 태스크로 분리합니다.
+                    let data = payload["sync_data:".len()..].to_string();
+                    let browser_c = _browser_clone.clone();
+                    let app_dir_c = app_dir.clone();
+                    
+                    tokio::task::spawn(async move {
+                        let result_str = match serde_json::from_str::<db::CommerceRecord>(&data) {
+                            Ok(mut record) => {
+                                use terminal_logis_center::harness::DefaultHarness;
+                                let harness = DefaultHarness;
+                                
+                                if record.url.starts_with("file://") && record.context.contains("data:image/") {
+                                    if let Some(base64_part) = record.context.split("data:").nth(1) {
+                                        let full_data_url = format!("data:{}", base64_part.trim());
+                                        let ocr_result = {
+                                            let mut model_guard = OCR_MODEL.lock().unwrap();
+                                            if model_guard.is_none() {
+                                                let model_path = app_dir_c.join("models").join("glm_ocr");
+                                                let model_path_str = model_path.to_string_lossy().to_string();
+                                                let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu); 
+                                                if let Ok(model) = GlmOcrGenerateModel::init(&model_path_str, Some(&ocr_device), None) {
+                                                    *model_guard = Some(model);
+                                                }
                                             }
-                                        }
-                                        let res = if let Some(model) = model_guard.as_mut() {
-                                            let params = ChatCompletionParameters {
-                                                messages: vec![Message {
-                                                    role: "user".to_string(),
-                                                    parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
-                                                }],
-                                                model: "glm-ocr".to_string(),
-                                                max_tokens: Some(2048),
-                                                temperature: Some(0.2),
-                                                top_p: Some(0.95),
-                                                top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
-                                            };
-                                            model.generate(params).map(|res| res.choices[0].message.content.clone()).unwrap_or_default()
-                                        } else { "OCR Model Load Error".to_string() };
-                                        
-                                        // ★ VRAM 해제: 다음 작업을 위해 OCR 모델 메모리를 즉시 반환합니다.
-                                        *model_guard = None;
-                                        res
-                                    };
-                                    // 🚀 OCR 결과물에서도 마크다운 껍데기를 제거하여 가독성을 높입니다.
-                                    let display_ocr = ocr_result.replace("```markdown", "").replace("```", "").trim().to_string();
-                                    record.context = format!("{}\n---\n[OCR 결과]\n{}", record.context, display_ocr);
-                                } 
-                            }
-                            // 🚀 [Fix] 동기화 시점에 로그를 남겨 어떤 아이템이 들어오는지 명확히 합니다.
-                            println!("[System] 동기화 수신: {} (ID: {})", record.title, record.id);
+                                            let res = if let Some(model) = model_guard.as_mut() {
+                                                let params = ChatCompletionParameters {
+                                                    messages: vec![Message {
+                                                        role: "user".to_string(),
+                                                        parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
+                                                    }],
+                                                    model: "glm-ocr".to_string(),
+                                                    max_tokens: Some(2048),
+                                                    temperature: Some(0.2),
+                                                    top_p: Some(0.95),
+                                                    top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
+                                                };
+                                                model.generate(params).map(|res| res.choices[0].message.content.clone()).unwrap_or_default()
+                                            } else { "OCR Model Load Error".to_string() };
+                                            
+                                            *model_guard = None;
+                                            res
+                                        };
+                                        let display_ocr = ocr_result.replace("```markdown", "").replace("```", "").trim().to_string();
+                                        record.context = format!("{}\n---\n[OCR 결과]\n{}", record.context, display_ocr);
+                                    } 
+                                }
+                                println!("[System] 동기화 수신: {} (ID: {})", record.title, record.id);
 
-                            // 🚀 [Fix] 텍스트가 비어있지 않고 실제 HTML 태그를 포함한 경우에만 평탄화를 수행하여 데이터 증발을 원천 차단합니다.
-                            let is_image = record.context.contains("data:image/") || record.url.starts_with("file://");
-                            
-                            if !is_image && record.context.contains('<') && record.context.contains('>') {
-                                let cleaned_context = harness.clean_html(&record.context);
-                                record.context = cleaned_context;
-                                println!("[System] 동기화: 웹페이지 태그 평탄화 수행됨.");
-                            } else if !is_image {
-                                println!("[System] 동기화: 순수 텍스트 감지 (평탄화 건너뜀).");
-                            }
+                                let is_image = record.context.contains("data:image/") || record.url.starts_with("file://");
+                                if !is_image && record.context.contains('<') && record.context.contains('>') {
+                                    let cleaned_context = harness.clean_html(&record.context);
+                                    record.context = cleaned_context;
+                                    println!("[System] 동기화: 웹페이지 태그 평탄화 수행됨.");
+                                } else if !is_image {
+                                    println!("[System] 동기화: 순수 텍스트 감지 (평탄화 건너뜀).");
+                                }
 
-                            let updated = record.clone();
-                            db::save_records(vec![record], None).await.map(|_| json!({"type":"sync_success","payload":updated}).to_string()).unwrap_or_else(|e| e.to_string())
-                        },
-                        Err(e) => e.to_string(),
-                    }
+                                let updated = record.clone();
+                                db::save_records(vec![record], None).await.map(|_| json!({"type":"sync_success","payload":updated}).to_string()).unwrap_or_else(|e| e.to_string())
+                            },
+                            Err(e) => e.to_string(),
+                        };
+                        
+                        // 🚀 데이터 처리 완료 후, 현재 열려있는 모든 탭에 성공 신호를 전송하여 화면을 즉시 동기화합니다.
+                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(result_str));
+                        if let Ok(pages) = browser_c.pages().await {
+                            for p in pages {
+                                let _ = p.evaluate(script.clone()).await;
+                            }
+                        }
+                    });
+                    json!({"type": "sync_started"}).to_string()
                 } else if payload == "fetch_drafts" {
                     db::fetch_drafts().await.map(|d| json!({"type":"drafts_loaded","payload":d}).to_string()).unwrap_or_else(|e| e.to_string())
                 } else if payload.starts_with("delete_drafts:") {
@@ -2279,445 +2294,430 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                 } else if payload.starts_with("mask_and_push_batch:") {
                     // 🚀 배치 작업 시작 전 중단 신호를 초기화합니다.
                     PUSH_CANCEL_SIGNAL.store(false, Ordering::SeqCst);
-                    let data = &payload["mask_and_push_batch:".len()..];
-                    let response_json = if let Ok(req) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(ids) = req.get("ids").and_then(|i| i.as_array()) {
-                            let id_strings: Vec<String> = ids.iter().filter_map(|i| i.as_str().map(String::from)).collect();
-                            
-                            let mut target_records = Vec::new();
-                            if let Ok(drafts) = db::fetch_drafts().await {
-                                target_records = drafts.into_iter().filter(|r| id_strings.contains(&r.id)).collect();
-                            }
-                            
-                            if let Ok(table) = db::get_or_create_table().await {
-                                let mut has_error = None;
-                                // 현재 가용한 최적의 장치(CUDA 0번 우선)를 할당합니다.
-                                let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-
-                                // ★ 전체 처리율 계산을 위한 단계 설정 (Phase 0, 1, 2)
-                                let total_items = target_records.len();
-                                let total_steps = total_items * 3;
-                                let mut current_step = 0;
-
-                                // 🚀 진행 중 렌더링을 갱신하기 위해 현재 남은 처리 대상 ID들을 관리하는 동적 배열입니다.
-                                let mut active_processing_ids = id_strings.clone();
-
-                                // 🚀 [Fix] 작업 시작 즉시 전역 상태를 0%로 잠가서, 긴 OCR 추론 중에 탭을 전환해도 상태가 풀리지 않게 방어합니다.
-                                {
-                                    // 🚀 진행 중인 아이템 ID 목록(processing_ids)을 함께 브로드캐스트하여 프론트엔드에서 흐리게(Opacity) 처리할 수 있도록 합니다.
-                                    let initial_payload = json!({"item_display": 1, "total_items": total_items, "percent": 0, "processing_ids": active_processing_ids.clone()});
-                                    *GLOBAL_PROGRESS.lock().unwrap() = Some(initial_payload.clone());
-                                    let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": initial_payload})));
-                                    let _ = page_clone.evaluate(script).await;
-                                }
-
-                                // ★ Phase 0: OCR 일괄 처리 및 VRAM 해제
-                                let needs_ocr = target_records.iter().any(|r| r.context.starts_with("data:image/") || r.context.starts_with("data:application/pdf"));
+                    let data = payload["mask_and_push_batch:".len()..].to_string();
+                    let browser_c = _browser_clone.clone();
+                    let app_dir_c = app_dir.clone();
+                    
+                    // 🚀 긴 시간이 걸리는 Pushing 연산을 백그라운드로 분리하여 탭 프리징을 방지합니다.
+                    tokio::task::spawn(async move {
+                        let result_str = if let Ok(req) = serde_json::from_str::<serde_json::Value>(&data) {
+                            if let Some(ids) = req.get("ids").and_then(|i| i.as_array()) {
+                                let id_strings: Vec<String> = ids.iter().filter_map(|i| i.as_str().map(String::from)).collect();
                                 
-                                // 🚀 [Phase 0-1] 웹페이지 텍스트 정제 (데이터 증발 방지 로직 적용)
-                                use terminal_logis_center::harness::DefaultHarness;
-                                let harness = DefaultHarness;
-                                for record in &mut target_records {
-                                    let is_image = record.context.starts_with("data:image/") || record.url.starts_with("file://");
-                                    if !is_image {
-                                        let raw_content = record.context.clone();
-                                        if raw_content.contains('<') && raw_content.contains('>') {
-                                            record.context = harness.clean_html(&raw_content);
-                                            println!("[System] 웹페이지 HTML 태그 평탄화 완료. (ID: {})", record.id);
-                                        } else {
-                                            println!("[System] 웹페이지 순수 텍스트 유지됨. (ID: {})", record.id);
-                                        }
-                                        
-                                        let text_len = record.context.len();
-                                        let preview_text: String = record.context.chars().take(100).collect();
-                                        println!("[Debug:Phase0-1] 웹페이지 텍스트 미리보기 (총 {}바이트) :\n{}", text_len, preview_text);
-                                    }
+                                let mut target_records = Vec::new();
+                                if let Ok(drafts) = db::fetch_drafts().await {
+                                    target_records = drafts.into_iter().filter(|r| id_strings.contains(&r.id)).collect();
                                 }
+                                
+                                if let Ok(table) = db::get_or_create_table().await {
+                                    let mut has_error = None;
+                                    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
 
-                                // 🚀 [Phase 0-2] 이미지/PDF 전용 OCR 처리
-                                if needs_ocr {
+                                    let total_items = target_records.len();
+                                    let total_steps = total_items * 3;
+                                    let mut current_step = 0;
+
+                                    let mut active_processing_ids = id_strings.clone();
+
                                     {
-                                        let mut model_guard = OCR_MODEL.lock().unwrap();
-                                        if model_guard.is_none() {
-                                            // 🚀 깔끔한 윈도우 경로 생성을 위해 join 분리
-                                            let model_path = app_dir.join("models").join("glm_ocr");
-                                            let model_path_str = model_path.to_string_lossy().to_string();
-                                            match GlmOcrGenerateModel::init(&model_path_str, Some(&device), None) {
-                                                Ok(model) => *model_guard = Some(model),
-                                                Err(e) => {
-                                                    let err_msg = format!("OCR Init Error: {:?}", e);
-                                                    println!("[Error] {}", err_msg);
-                                                    has_error = Some(err_msg);
-                                                }
+                                        let initial_payload = json!({"item_display": 1, "total_items": total_items, "percent": 0, "processing_ids": active_processing_ids.clone()});
+                                        *GLOBAL_PROGRESS.lock().unwrap() = Some(initial_payload.clone());
+                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": initial_payload})));
+                                        // 🚀 [Fix] 새 탭을 열어도 진행 상황을 인지할 수 있도록 모든 브라우저 페이지에 브로드캐스트합니다.
+                                        if let Ok(pages) = browser_c.pages().await {
+                                            for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                        }
+                                    }
+
+                                    let needs_ocr = target_records.iter().any(|r| r.context.starts_with("data:image/") || r.context.starts_with("data:application/pdf"));
+                                    
+                                    use terminal_logis_center::harness::DefaultHarness;
+                                    let harness = DefaultHarness;
+                                    for record in &mut target_records {
+                                        let is_image = record.context.starts_with("data:image/") || record.url.starts_with("file://");
+                                        if !is_image {
+                                            let raw_content = record.context.clone();
+                                            if raw_content.contains('<') && raw_content.contains('>') {
+                                                record.context = harness.clean_html(&raw_content);
+                                                println!("[System] 웹페이지 HTML 태그 평탄화 완료. (ID: {})", record.id);
+                                            } else {
+                                                println!("[System] 웹페이지 순수 텍스트 유지됨. (ID: {})", record.id);
                                             }
                                         }
                                     }
 
-                                    for (idx, record) in target_records.iter_mut().enumerate() {
-                                        // 🚀 사용자가 Cancel 버튼을 눌렀다면 루프를 즉시 중단합니다.
-                                        if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
-                                            has_error = Some("Push operation cancelled by user.".to_string());
-                                            break;
-                                        }
-
-                                        let is_image = record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf");
-                                        let item_type = if is_image { "이미지" } else { "텍스트" };
-                                        println!("[System] Phase 0 - [{}]순서-{} 처리 시작 (ID: {})", idx, item_type, record.id);
-                                        
-                                        if is_image && has_error.is_none() {
-                                            let mut ocr_success = false;
-                                            let mut cleaned_ocr = String::new();
-                                            {
-                                                let mut model_guard = OCR_MODEL.lock().unwrap();
-                                                if let Some(model) = model_guard.as_mut() {
-                                                    let params = ChatCompletionParameters {
-                                                        messages: vec![Message {
-                                                            role: "user".to_string(),
-                                                            parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(record.context.clone()) }],
-                                                        }],
-                                                        model: "glm-ocr".to_string(),
-                                                        max_tokens: Some(2048),
-                                                        temperature: Some(0.2),
-                                                        top_p: Some(0.95),
-                                                        top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
-                                                    };
-                                                    match model.generate(params) {
-                                                        Ok(res) => {
-                                                            let raw_ocr = res.choices[0].message.content.clone();
-                                                            cleaned_ocr = raw_ocr.replace("```markdown", "").replace("```", "").trim().to_string();
-                                                            ocr_success = true;
-                                                        },
-                                                        Err(e) => {
-                                                            let err_msg = format!("OCR Error: {}", e);
-                                                            println!("[Error] 이미지 OCR 중 예외 발생: {:?}", e);
-                                                            has_error = Some(err_msg);
-                                                        }
+                                    if needs_ocr {
+                                        {
+                                            let mut model_guard = OCR_MODEL.lock().unwrap();
+                                            if model_guard.is_none() {
+                                                let model_path = app_dir_c.join("models").join("glm_ocr");
+                                                let model_path_str = model_path.to_string_lossy().to_string();
+                                                match GlmOcrGenerateModel::init(&model_path_str, Some(&device), None) {
+                                                    Ok(model) => *model_guard = Some(model),
+                                                    Err(e) => {
+                                                        let err_msg = format!("OCR Init Error: {:?}", e);
+                                                        println!("[Error] {}", err_msg);
+                                                        has_error = Some(err_msg);
                                                     }
                                                 }
                                             }
-                                            if ocr_success {
-                                                record.context = cleaned_ocr.clone();
-                                                println!("[System] 이미지 OCR 완료 및 마크다운 태그 정제됨. (ID: {})", record.id);
-                                                println!("[GlmOcr] 배치 작업 생성된 텍스트 결과:\n{}", cleaned_ocr);
-                                            }
                                         }
-                                        
-                                        // 🚀 실시간 퍼센트 전송 및 브로드캐스트
-                                        current_step += 1;
-                                        let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                        let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
-                                        *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
-                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
-                                        let _ = page_clone.evaluate(script).await;
-                                    }
-
-                                    {
-                                        let mut model_guard = OCR_MODEL.lock().unwrap();
-                                        *model_guard = None; // VRAM 완전 해제
-                                    }
-                                    force_memory_cleanup();
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                                    println!("[System] === Phase 0: 이미지 전용 OCR 처리 종료 (VRAM 해제됨) ===\n");
-                                } else {
-                                    current_step += total_items; // OCR 패스 시 퍼센트 점프
-                                }
-
-                                // ★ Phase 1: Privacy Filter 일괄 마스킹 및 VRAM 해제
-                                let enable_masking = load_app_config().enable_masking.unwrap_or(true);
-                                if has_error.is_none() {
-                                    if enable_masking {
-                                        println!("\n[System] === Phase 1: Privacy Filter 마스킹 시작 ===");
-                                        {
-                                            let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                            if pm_guard.is_none() {
-                                                let pm_path = app_dir.join("models").join("privacy-filter");
-                                                let pm_path_str = pm_path.to_string_lossy().to_string();
-                                                println!("[System] PrivacyManager 모델을 GPU 메모리에 로드 중...");
-                                                *pm_guard = terminal_logis_center::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
-                                            }
-                                        }
-                                        
-                                        // 🚀 [Fix] 일괄 처리(배치) 중 모든 문서가 단일 세션을 공유하도록 외부에서 Session을 생성합니다.
-                                        // 이를 통해 첫 번째 문서는 RECORD_0, 두 번째 문서는 RECORD_1 로 정상 넘버링됩니다.
-                                        let mut privacy_session = terminal_logis_center::privacy_filter::masking::PrivacySession::new();
 
                                         for (idx, record) in target_records.iter_mut().enumerate() {
-                                            // 🚀 사용자가 Cancel 버튼을 눌렀다면 루프를 즉시 중단합니다.
                                             if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
                                                 has_error = Some("Push operation cancelled by user.".to_string());
                                                 break;
                                             }
 
-                                            let mut masked_success = false;
-                                            let mut masked_text = String::new();
-                                            {
-                                                let pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                                if let Some(pm) = pm_guard.as_ref() {
-                                                    println!("[System] 마스킹 진행 중 (Record ID: {})", record.id);
-                                                    // 🚀 기존 mask_text 대신 session과 고유 idx를 직접 주입하는 신규 메서드를 호출합니다.
-                                                    masked_text = pm.mask_text_with_session(&record.context, &mut privacy_session, idx).unwrap_or_else(|e| {
-                                                        let err_str = format!("Masking failed: {}", e);
-                                                        println!("[Error] Rust Backend Error Caught: {}", err_str);
-                                                        has_error = Some(err_str);
-                                                        record.context.clone()
-                                                    });
-                                                    masked_success = true;
-                                                } else {
-                                                    let err_str = "Privacy Filter 모델 로드에 실패했습니다.".to_string();
-                                                    println!("[Error] {}", err_str);
-                                                    has_error = Some(err_str);
+                                            let is_image = record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf");
+                                            if is_image && has_error.is_none() {
+                                                let mut ocr_success = false;
+                                                let mut cleaned_ocr = String::new();
+                                                {
+                                                    let mut model_guard = OCR_MODEL.lock().unwrap();
+                                                    if let Some(model) = model_guard.as_mut() {
+                                                        let params = ChatCompletionParameters {
+                                                            messages: vec![Message {
+                                                                role: "user".to_string(),
+                                                                parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(record.context.clone()) }],
+                                                            }],
+                                                            model: "glm-ocr".to_string(),
+                                                            max_tokens: Some(2048),
+                                                            temperature: Some(0.2),
+                                                            top_p: Some(0.95),
+                                                            top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
+                                                        };
+                                                        match model.generate(params) {
+                                                            Ok(res) => {
+                                                                let raw_ocr = res.choices[0].message.content.clone();
+                                                                cleaned_ocr = raw_ocr.replace("```markdown", "").replace("```", "").trim().to_string();
+                                                                ocr_success = true;
+                                                            },
+                                                            Err(e) => {
+                                                                has_error = Some(format!("OCR Error: {}", e));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if ocr_success {
+                                                    record.context = cleaned_ocr.clone();
                                                 }
                                             }
-                                            if masked_success {
-                                                record.masking = masked_text;
-                                                println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
-                                            }
-
-                                            // 🚀 실시간 퍼센트 전송 및 브로드캐스트
+                                            
                                             current_step += 1;
                                             let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
                                             let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
                                             *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                            
+                                            // 🚀 진행 상황 브로드캐스트
                                             let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
-                                            let _ = page_clone.evaluate(script).await;
+                                            if let Ok(pages) = browser_c.pages().await {
+                                                for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                            }
                                         }
-                                        
+
                                         {
-                                            let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                            *pm_guard = None; // VRAM 완전 해제
+                                            let mut model_guard = OCR_MODEL.lock().unwrap();
+                                            *model_guard = None; 
                                         }
                                         force_memory_cleanup();
-                                        println!("[System] === Phase 1: Privacy Filter 마스킹 종료 (VRAM 해제됨) ===\n");
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                                     } else {
-                                        println!("\n[System] === Phase 1: Privacy Filter 마스킹 건너뜐 (사용자 설정 OFF) ===");
-                                        for record in target_records.iter_mut() {
-                                            // 설정이 꺼진 경우, 임베딩 모델(Phase 2)에 정상적으로 텍스트를 넘겨주기 위해 원본 컨텍스트를 마스킹 필드에 덮어씌웁니다.
-                                            record.masking = record.context.clone();
-                                        }
-                                        current_step += total_items; // UI 퍼센트 보정을 위해 건너뛴 스텝만큼 더합니다.
+                                        current_step += total_items; 
                                     }
-                                } else {
-                                    current_step += total_items;
-                                }
 
-                                // ★ Phase 2: Embedding 일괄 벡터화 및 VRAM 해제
-                                if has_error.is_none() {
-                                    let needs_embedding = target_records.iter().any(|r| !r.masking.trim().is_empty());
-                                    
-                                    if needs_embedding {
-                                        {
-                                            let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
-                                            if em_guard.is_none() {
-                                                let em_path = app_dir.join("models").join("embeddings");
-                                                let em_path_str = em_path.to_string_lossy().to_string();
-                                                *em_guard = terminal_logis_center::embedding::EmbeddingModel::new_with_device(&em_path_str, &device).ok();
-                                            }
-                                        }
-                                        for (idx, record) in target_records.iter_mut().enumerate() {
-                                            // 🚀 사용자가 Cancel 버튼을 눌렀다면 루프를 즉시 중단합니다.
-                                            if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
-                                                has_error = Some("Push operation cancelled by user.".to_string());
-                                                break;
-                                            }
-
-                                            let text_to_embed = record.masking.trim();
-                                            if text_to_embed.is_empty() {
-                                                println!("[System] Phase 2 - [{}]순서 임베딩 건너뜐 (빈 텍스트)", idx);
-                                                record.vector = vec![0.0; 768];
-                                            } else {
-                                                println!("[System] Phase 2 - [{}]순서 임베딩 진행 중...", idx);
-                                                let em_guard = EMBEDDING_MODEL.lock().unwrap();
-                                                if let Some(em) = em_guard.as_ref() {
-                                                    record.vector = em.embed(text_to_embed).unwrap_or_else(|e| {
-                                                        has_error = Some(format!("Embedding failed: {}", e));
-                                                        vec![0.0; 768]
-                                                    });
-                                                } else {
-                                                    has_error = Some("Embedding 모델 로드에 실패했습니다.".to_string());
+                                    let enable_masking = load_app_config().enable_masking.unwrap_or(true);
+                                    if has_error.is_none() {
+                                        if enable_masking {
+                                            {
+                                                let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                                if pm_guard.is_none() {
+                                                    let pm_path = app_dir_c.join("models").join("privacy-filter");
+                                                    let pm_path_str = pm_path.to_string_lossy().to_string();
+                                                    *pm_guard = terminal_logis_center::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
                                                 }
                                             }
+                                            
+                                            let mut privacy_session = terminal_logis_center::privacy_filter::masking::PrivacySession::new();
 
-                                            // 🚀 순차적 완료 처리: 아이템 하나가 완전히 끝났으므로 DB에 즉각 저장하고 상태를 변경합니다.
-                                            record.status = "PUSHED".to_string();
-                                            let expr = format!("id = '{}'", record.id);
-                                            let _ = table.delete(&expr).await;
-                                            let _ = db::save_records(vec![record.clone()], None).await;
+                                            for (idx, record) in target_records.iter_mut().enumerate() {
+                                                if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                                    has_error = Some("Push operation cancelled by user.".to_string());
+                                                    break;
+                                                }
 
-                                            // 진행 중인 아이템 목록에서 현재 아이템 제거
-                                            active_processing_ids.retain(|id| id != &record.id);
+                                                let mut masked_success = false;
+                                                let mut masked_text = String::new();
+                                                {
+                                                    let pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                                    if let Some(pm) = pm_guard.as_ref() {
+                                                        masked_text = pm.mask_text_with_session(&record.context, &mut privacy_session, idx).unwrap_or_else(|e| {
+                                                            has_error = Some(format!("Masking failed: {}", e));
+                                                            record.context.clone()
+                                                        });
+                                                        masked_success = true;
+                                                    } else {
+                                                        has_error = Some("Privacy Filter 모델 로드에 실패했습니다.".to_string());
+                                                    }
+                                                }
+                                                if masked_success {
+                                                    record.masking = masked_text;
+                                                }
 
-                                            // 🚀 실시간 퍼센트 전송 및 완료된 아이템(completed_item) 개별 브로드캐스트
-                                            current_step += 1;
-                                            let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                            let payload = json!({
-                                                "item_display": idx + 1, 
-                                                "total_items": total_items, 
-                                                "percent": percent, 
-                                                "processing_ids": active_processing_ids.clone(),
-                                                "completed_item": record.clone()
-                                            });
-                                            *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
-                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
-                                            let _ = page_clone.evaluate(script).await;
-                                        }
-                                        
-                                        {
-                                            let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
-                                            *em_guard = None; // VRAM 완전 해제
-                                        }
-                                        force_memory_cleanup();
-                                    } else {
-                                        println!("[System] === Phase 2: 임베딩 대상 텍스트가 모두 비어있어 모델 로드를 완전히 건너뜁니다. ===");
-                                        for (idx, record) in target_records.iter_mut().enumerate() {
-                                            if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
-                                                has_error = Some("Push operation cancelled by user.".to_string());
-                                                break;
+                                                current_step += 1;
+                                                let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                                let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
+                                                *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                                
+                                                // 🚀 진행 상황 브로드캐스트
+                                                let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                                if let Ok(pages) = browser_c.pages().await {
+                                                    for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                                }
                                             }
+                                            
+                                            {
+                                                let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                                                *pm_guard = None; 
+                                            }
+                                            force_memory_cleanup();
+                                        } else {
+                                            for record in target_records.iter_mut() {
+                                                record.masking = record.context.clone();
+                                            }
+                                            current_step += total_items; 
+                                        }
+                                    } else {
+                                        current_step += total_items;
+                                    }
 
-                                            record.vector = vec![0.0; 768];
-                                            record.status = "PUSHED".to_string();
-                                            let expr = format!("id = '{}'", record.id);
-                                            let _ = table.delete(&expr).await;
-                                            let _ = db::save_records(vec![record.clone()], None).await;
+                                    if has_error.is_none() {
+                                        let needs_embedding = target_records.iter().any(|r| !r.masking.trim().is_empty());
+                                        
+                                        if needs_embedding {
+                                            {
+                                                let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
+                                                if em_guard.is_none() {
+                                                    let em_path = app_dir_c.join("models").join("embeddings");
+                                                    let em_path_str = em_path.to_string_lossy().to_string();
+                                                    *em_guard = terminal_logis_center::embedding::EmbeddingModel::new_with_device(&em_path_str, &device).ok();
+                                                }
+                                            }
+                                            for (idx, record) in target_records.iter_mut().enumerate() {
+                                                if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                                    has_error = Some("Push operation cancelled by user.".to_string());
+                                                    break;
+                                                }
 
-                                            active_processing_ids.retain(|id| id != &record.id);
-                                            current_step += 1;
-                                            let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                            let payload = json!({
-                                                "item_display": idx + 1, 
-                                                "total_items": total_items, 
-                                                "percent": percent, 
-                                                "processing_ids": active_processing_ids.clone(),
-                                                "completed_item": record.clone()
-                                            });
-                                            *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
-                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
-                                            let _ = page_clone.evaluate(script).await;
+                                                let text_to_embed = record.masking.trim();
+                                                if text_to_embed.is_empty() {
+                                                    record.vector = vec![0.0; 768];
+                                                } else {
+                                                    let em_guard = EMBEDDING_MODEL.lock().unwrap();
+                                                    if let Some(em) = em_guard.as_ref() {
+                                                        record.vector = em.embed(text_to_embed).unwrap_or_else(|e| {
+                                                            has_error = Some(format!("Embedding failed: {}", e));
+                                                            vec![0.0; 768]
+                                                        });
+                                                    } else {
+                                                        has_error = Some("Embedding 모델 로드에 실패했습니다.".to_string());
+                                                    }
+                                                }
+
+                                                record.status = "PUSHED".to_string();
+                                                let expr = format!("id = '{}'", record.id);
+                                                let _ = table.delete(&expr).await;
+                                                let _ = db::save_records(vec![record.clone()], None).await;
+
+                                                active_processing_ids.retain(|id| id != &record.id);
+
+                                                current_step += 1;
+                                                let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                                let payload = json!({
+                                                    "item_display": idx + 1, 
+                                                    "total_items": total_items, 
+                                                    "percent": percent, 
+                                                    "processing_ids": active_processing_ids.clone(),
+                                                    "completed_item": record.clone()
+                                                });
+                                                *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                                
+                                                // 🚀 진행 상황 브로드캐스트
+                                                let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                                if let Ok(pages) = browser_c.pages().await {
+                                                    for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                                }
+                                            }
+                                            
+                                            {
+                                                let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
+                                                *em_guard = None; 
+                                            }
+                                            force_memory_cleanup();
+                                        } else {
+                                            for (idx, record) in target_records.iter_mut().enumerate() {
+                                                if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                                    has_error = Some("Push operation cancelled by user.".to_string());
+                                                    break;
+                                                }
+
+                                                record.vector = vec![0.0; 768];
+                                                record.status = "PUSHED".to_string();
+                                                let expr = format!("id = '{}'", record.id);
+                                                let _ = table.delete(&expr).await;
+                                                let _ = db::save_records(vec![record.clone()], None).await;
+
+                                                active_processing_ids.retain(|id| id != &record.id);
+                                                current_step += 1;
+                                                let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                                let payload = json!({
+                                                    "item_display": idx + 1, 
+                                                    "total_items": total_items, 
+                                                    "percent": percent, 
+                                                    "processing_ids": active_processing_ids.clone(),
+                                                    "completed_item": record.clone()
+                                                });
+                                                *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                                
+                                                // 🚀 진행 상황 브로드캐스트
+                                                let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                                if let Ok(pages) = browser_c.pages().await {
+                                                    for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                                }
+                                            }
                                         }
                                     }
-                                }
 
-                                // DB 갱신 처리
-                                *GLOBAL_PROGRESS.lock().unwrap() = None; 
-                                
-                                // 🚀 루프 도중 중단 신호가 켜졌다면 에러 메시지를 할당합니다.
-                                if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
-                                    has_error = Some("Push operation cancelled by user.".to_string());
-                                }
+                                    *GLOBAL_PROGRESS.lock().unwrap() = None; 
+                                    
+                                    if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                        has_error = Some("Push operation cancelled by user.".to_string());
+                                    }
 
-                                if let Some(err_msg) = has_error {
-                                    json!({"type": "error", "message": err_msg}).to_string()
+                                    if let Some(err_msg) = has_error {
+                                        json!({"type": "error", "message": err_msg}).to_string()
+                                    } else {
+                                        json!({"type": "push_success", "payload": target_records}).to_string()
+                                    }
                                 } else {
-                                    // 🚀 이미 Phase 2 내부에서 개별적으로 save_records를 순차 호출했으므로 일괄 저장은 생략합니다.
-                                    json!({"type": "push_success", "payload": target_records}).to_string()
+                                    json!({"type": "error", "message": "Failed to access database table."}).to_string()
                                 }
                             } else {
-                                json!({"type": "error", "message": "Failed to access database table."}).to_string()
+                                json!({"type": "error", "message": "Invalid ids in request."}).to_string()
                             }
                         } else {
-                            json!({"type": "error", "message": "Invalid ids in request."}).to_string()
+                            json!({"type": "error", "message": "Invalid request payload format."}).to_string()
+                        };
+                        
+                        // 🚀 푸시 완료 응답 역시 모든 창에 브로드캐스트합니다.
+                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(result_str));
+                        if let Ok(pages) = browser_c.pages().await {
+                            for p in pages {
+                                let _ = p.evaluate(script.clone()).await;
+                            }
                         }
-                    } else {
-                        json!({"type": "error", "message": "Invalid request payload format."}).to_string()
-                    };
-                    response_json
+                    });
+                    json!({"type": "push_started"}).to_string()
                 } else if payload == "cancel_push" {
                     // 🚀 중단 신호를 켭니다. mask_and_push_batch의 각 Phase 진입 전후에 이 플래그를 체크하게 됩니다.
                     PUSH_CANCEL_SIGNAL.store(true, Ordering::SeqCst);
                     json!({"type": "push_idle"}).to_string()
                 } else if payload.starts_with("process_file:") {
-                    let full_data_url = &payload["process_file:".len()..];
-                    let mut ocr_result = String::new();
-                    let mut masked_result = String::new();
-                    let mut has_error = None;
+                    let full_data_url = payload["process_file:".len()..].to_string();
+                    let browser_c = _browser_clone.clone();
+                    let app_dir_c = app_dir.clone();
 
-                    // 1. OCR Extract
-                    {
+                    tokio::task::spawn(async move {
+                        let mut ocr_result = String::new();
+                        let mut masked_result = String::new();
+                        let mut has_error = None;
+
+                        // 1. OCR Extract
                         {
-                            let mut model_guard = OCR_MODEL.lock().unwrap();
-                            if model_guard.is_none() {
-                                let model_path = app_dir.join("models").join("glm_ocr");
-                                let model_path_str = model_path.to_string_lossy().to_string();
-                                // 🚀 수동 파일 업로드 시에도 CUDA VRAM 기반 SSD 오프로딩을 적극 적용합니다.
-                                let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-                                match GlmOcrGenerateModel::init(&model_path_str, Some(&ocr_device), None) {
-                                    Ok(model) => *model_guard = Some(model),
-                                    Err(e) => {
-                                        let err_msg = format!("OCR Init Error: {:?}", e);
-                                        println!("[Error] {}", err_msg);
-                                        has_error = Some(err_msg);
+                            {
+                                let mut model_guard = OCR_MODEL.lock().unwrap();
+                                if model_guard.is_none() {
+                                    let model_path = app_dir_c.join("models").join("glm_ocr");
+                                    let model_path_str = model_path.to_string_lossy().to_string();
+                                    let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+                                    match GlmOcrGenerateModel::init(&model_path_str, Some(&ocr_device), None) {
+                                        Ok(model) => *model_guard = Some(model),
+                                        Err(e) => {
+                                            let err_msg = format!("OCR Init Error: {:?}", e);
+                                            println!("[Error] {}", err_msg);
+                                            has_error = Some(err_msg);
+                                        }
                                     }
                                 }
+                                if let Some(model) = model_guard.as_mut() {
+                                    let params = ChatCompletionParameters {
+                                        messages: vec![Message {
+                                            role: "user".to_string(),
+                                            parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
+                                        }],
+                                        model: "glm-ocr".to_string(),
+                                        max_tokens: Some(2048),
+                                        temperature: Some(0.2),
+                                        top_p: Some(0.95),
+                                        top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
+                                    };
+                                    match model.generate(params) {
+                                        Ok(res) => {
+                                            ocr_result = res.choices[0].message.content.clone();
+                                            println!("[GlmOcr] 단일 파일 생성된 텍스트 결과:\n{}", ocr_result);
+                                        },
+                                        Err(e) => {
+                                            let err_msg = format!("OCR Error: {}", e);
+                                            println!("[Error] 단일 파일 OCR 처리 중 예외 발생: {:?}", e);
+                                            has_error = Some(err_msg);
+                                        }
+                                    }
+                                } else {
+                                    has_error = Some("OCR 모델 로드에 실패했습니다.".to_string());
+                                }
+                                *model_guard = None;
+                            } 
+                            force_memory_cleanup(); 
+                            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await; 
+                        }
+
+                        // 2. Privacy Filter
+                        if has_error.is_none() && !ocr_result.is_empty() {
+                            let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
+                            let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+                            if pm_guard.is_none() {
+                                let pm_path = app_dir_c.join("models").join("privacy-filter");
+                                let pm_path_str = pm_path.to_string_lossy().to_string();
+                                *pm_guard = terminal_logis_center::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
                             }
-                            if let Some(model) = model_guard.as_mut() {
-                                let params = ChatCompletionParameters {
-                                    messages: vec![Message {
-                                        role: "user".to_string(),
-                                        parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
-                                    }],
-                                    model: "glm-ocr".to_string(),
-                                    max_tokens: Some(2048),
-                                    temperature: Some(0.2),
-                                    top_p: Some(0.95),
-                                    top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
-                                };
-                                match model.generate(params) {
-                                    Ok(res) => {
-                                        ocr_result = res.choices[0].message.content.clone();
-                                        println!("[GlmOcr] 단일 파일 생성된 텍스트 결과:\n{}", ocr_result);
-                                    },
-                                    Err(e) => {
-                                        let err_msg = format!("OCR Error: {}", e);
-                                        println!("[Error] 단일 파일 OCR 처리 중 예외 발생: {:?}", e); // 🌟 Rust 로그 추가
-                                        has_error = Some(err_msg);
-                                    }
-                                }
+                            if let Some(pm) = pm_guard.as_ref() {
+                                masked_result = pm.mask_text(&ocr_result).unwrap_or_else(|e| {
+                                    has_error = Some(format!("Masking failed: {}", e));
+                                    ocr_result.clone()
+                                });
                             } else {
-                                let err_msg = "OCR 모델 로드에 실패했습니다.".to_string();
-                                println!("[Error] {}", err_msg); // 🌟 Rust 로그 추가
-                                has_error = Some(err_msg);
+                                has_error = Some("Privacy Filter 모델 로드에 실패했습니다.".to_string());
+                                masked_result = ocr_result.clone();
                             }
-                            // ★ VRAM 해제
-                            *model_guard = None;
-                        } // 뮤텍스 락 스코프 종료로 인한 자동 해제
-                        
-                        force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
-                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await; // 확실한 VRAM 해제 텀 부여
-                        
-                        // 🚀 단일 파일 처리 시에도 VRAM 해제 여부를 즉각 확인할 수 있도록 로그를 추가합니다.
-                        println!("[System] === 단일 파일 GLM OCR 처리 종료 (VRAM 해제됨) ===\n");
-                    }
-
-                    // 2. Privacy Filter
-                    if has_error.is_none() && !ocr_result.is_empty() {
-                        let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                        let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-                        if pm_guard.is_none() {
-                            let pm_path = app_dir.join("models").join("privacy-filter");
-                            let pm_path_str = pm_path.to_string_lossy().to_string();
-                            *pm_guard = terminal_logis_center::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
+                            *pm_guard = None;
+                            force_memory_cleanup(); 
                         }
-                        if let Some(pm) = pm_guard.as_ref() {
-                            masked_result = pm.mask_text(&ocr_result).unwrap_or_else(|e| {
-                                has_error = Some(format!("Masking failed: {}", e));
-                                ocr_result.clone()
-                            });
+
+                        let result_str = if let Some(err_msg) = has_error {
+                            json!({"type": "error", "message": err_msg}).to_string()
                         } else {
-                            has_error = Some("Privacy Filter 모델 로드에 실패했습니다.".to_string());
-                            masked_result = ocr_result.clone();
-                        }
-                        // ★ VRAM 해제
-                        *pm_guard = None;
-                        force_memory_cleanup(); // 🚀 OS 커널 레벨 메모리 강제 회수
-                    }
+                            println!("[System] [단일 파일 처리] 최종 전처리 결과:\n{}", masked_result);
+                            json!({"type": "file_processed", "payload": {"ocr": ocr_result, "masked": masked_result}}).to_string()
+                        };
 
-                    if let Some(err_msg) = has_error {
-                        json!({"type": "error", "message": err_msg}).to_string()
-                    } else {
-                        // 🚀 단일 파일 처리 완료 후 최종 텍스트 결과를 콘솔에 출력합니다.
-                        println!("[System] [단일 파일 처리] 최종 전처리 결과:\n{}", masked_result);
-                        json!({"type": "file_processed", "payload": {"ocr": ocr_result, "masked": masked_result}}).to_string()
-                    }
+                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(result_str));
+                        if let Ok(pages) = browser_c.pages().await {
+                            for p in pages {
+                                let _ = p.evaluate(script.clone()).await;
+                            }
+                        }
+                    });
+                    json!({"type": "process_started"}).to_string()
                 } else if payload.starts_with("export_to_file:") {
                     // 🚀 웹 브라우저의 드래그앤드랍 제약을 해결하기 위해 Rust 백엔드에서 물리적 파일 생성을 담당합니다.
                     let data = &payload["export_to_file:".len()..];
