@@ -19,6 +19,7 @@ bin/
 _bin/
 
 # Editor directories and files
+cargo/target
 cargo/data
 .vscode/*
 !.vscode/extensions.json
