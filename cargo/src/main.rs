@@ -1225,8 +1225,32 @@ const OVERLAY_SCRIPT: &str = r#"
                 downloadAllBtn.style.borderRadius = '4px';
                 downloadAllBtn.style.cursor = 'pointer';
                 downloadAllBtn.style.fontWeight = 'bold';
-                downloadAllBtn.style.marginBottom = '15px';
+                downloadAllBtn.style.marginBottom = '10px'; // 🚀 여백 조정
                 downloadAllBtn.style.width = '100%';
+
+                // 🚀 모델 전체 삭제 버튼 추가
+                const deleteAllModelsBtn = document.createElement('button');
+                deleteAllModelsBtn.textContent = getText('model_delete_all') || 'Delete All Models';
+                deleteAllModelsBtn.style.background = '#dc3545';
+                deleteAllModelsBtn.style.color = 'white';
+                deleteAllModelsBtn.style.padding = '8px 15px';
+                deleteAllModelsBtn.style.border = 'none';
+                deleteAllModelsBtn.style.borderRadius = '4px';
+                deleteAllModelsBtn.style.cursor = 'pointer';
+                deleteAllModelsBtn.style.fontWeight = 'bold';
+                deleteAllModelsBtn.style.marginBottom = '30px';
+                deleteAllModelsBtn.style.width = '100%';
+                
+                deleteAllModelsBtn.onclick = () => {
+                    if (confirm(getText('model_delete_all_confirm'))) {
+                        deleteAllModelsBtn.disabled = true;
+                        deleteAllModelsBtn.style.background = '#6c757d';
+                        deleteAllModelsBtn.textContent = 'Deleting...';
+                        if (window.rpc) {
+                            window.rpc("delete_all_models");
+                        }
+                    }
+                };
 
                 const modelListContainer = document.createElement('div');
                 modelListContainer.style.display = 'flex';
@@ -1238,6 +1262,9 @@ const OVERLAY_SCRIPT: &str = r#"
                 
                 // 다운로드 공통 로직 분리
                 const triggerDownload = (m, btn, progressContainer, progressBar) => {
+                    window.download_progress = window.download_progress || {};
+                    window.download_progress[m] = 0; // 🚀 다운로드 시작 시 전역 기록
+                    
                     btn.disabled = true;
                     btn.style.background = '#6c757d';
                     btn.style.cursor = 'not-allowed';
@@ -1261,9 +1288,10 @@ const OVERLAY_SCRIPT: &str = r#"
                         downloadAllBtn.style.background = '#6c757d';
                         toDownload.forEach(m => {
                             const safeId = m.replace(/[\s\(\)]+/g, '-');
-                            const btn = document.getElementById('btn-download-' + safeId);
-                            const pc = document.getElementById('progress-container-' + safeId);
-                            const pb = document.getElementById('progress-bar-' + safeId);
+                            // 🚀 Shadow DOM 내부의 요소를 올바르게 찾도록 document 대신 shadow 객체를 사용합니다.
+                            const btn = shadow.getElementById('btn-download-' + safeId);
+                            const pc = shadow.getElementById('progress-container-' + safeId);
+                            const pb = shadow.getElementById('progress-bar-' + safeId);
                             if (btn && pc && pb && !btn.disabled) {
                                 triggerDownload(m, btn, pc, pb);
                             }
@@ -1292,28 +1320,15 @@ const OVERLAY_SCRIPT: &str = r#"
                     nameSpan.style.fontSize = '13px';
                     nameSpan.style.fontWeight = 'bold';
 
+                    const currentProgress = (window.download_progress && window.download_progress[m] !== undefined) ? window.download_progress[m] : -1;
+
                     const btn = document.createElement('button');
                     btn.id = 'btn-download-' + safeId;
-                    btn.textContent = isDownloaded ? getText('model_downloaded') : getText('model_download');
                     btn.style.padding = '5px 10px';
                     btn.style.fontSize = '12px';
                     btn.style.borderRadius = '3px';
                     btn.style.border = 'none';
                     btn.style.fontWeight = 'bold';
-                    
-                    if (isDownloaded) {
-                        btn.style.background = '#6c757d';
-                        btn.style.color = '#fff';
-                        btn.disabled = true;
-                        btn.style.cursor = 'not-allowed';
-                    } else {
-                        btn.style.background = '#28a745';
-                        btn.style.color = '#fff';
-                        btn.style.cursor = 'pointer';
-                    }
-
-                    topRow.appendChild(nameSpan);
-                    topRow.appendChild(btn);
 
                     const progressContainer = document.createElement('div');
                     progressContainer.id = 'progress-container-' + safeId;
@@ -1326,7 +1341,6 @@ const OVERLAY_SCRIPT: &str = r#"
 
                     const progressBar = document.createElement('div');
                     progressBar.id = 'progress-bar-' + safeId;
-                    progressBar.style.width = '0%';
                     progressBar.style.height = '15px';
                     progressBar.style.background = '#007bff';
                     progressBar.style.transition = 'width 0.2s';
@@ -1334,6 +1348,33 @@ const OVERLAY_SCRIPT: &str = r#"
                     progressBar.style.color = 'white';
                     progressBar.style.fontSize = '10px';
                     progressBar.style.lineHeight = '15px';
+                    
+                    // 🚀 화면 갱신(render) 시 다운로드 진행 상태를 전역 변수에서 확인하여, 버튼과 바를 완벽하게 복구합니다.
+                    if (isDownloaded || currentProgress === 100) {
+                        btn.textContent = getText('model_downloaded');
+                        btn.style.background = '#6c757d';
+                        btn.style.color = '#fff';
+                        btn.disabled = true;
+                        btn.style.cursor = 'not-allowed';
+                    } else if (currentProgress >= 0) {
+                        btn.textContent = `${getText('model_downloading')} (${currentProgress}%)`;
+                        btn.style.background = '#6c757d';
+                        btn.style.color = '#fff';
+                        btn.disabled = true;
+                        btn.style.cursor = 'not-allowed';
+                        progressContainer.style.display = 'block';
+                        progressBar.style.width = `${currentProgress}%`;
+                        progressBar.textContent = `${currentProgress}%`;
+                    } else {
+                        btn.textContent = getText('model_download');
+                        btn.style.background = '#28a745';
+                        btn.style.color = '#fff';
+                        btn.disabled = false;
+                        btn.style.cursor = 'pointer';
+                    }
+
+                    topRow.appendChild(nameSpan);
+                    topRow.appendChild(btn);
                     
                     progressContainer.appendChild(progressBar);
 
@@ -1402,10 +1443,12 @@ const OVERLAY_SCRIPT: &str = r#"
                     modelTitle.textContent = updateText('model_title');
                     modelDesc.textContent = updateText('model_desc');
                     downloadAllBtn.textContent = updateText('model_download_all');
+                    deleteAllModelsBtn.textContent = updateText('model_delete_all'); // 🚀 삭제 버튼 텍스트도 실시간 갱신
                     
                     models.forEach(m => {
                         const safeId = m.replace(/[\s\(\)]+/g, '-');
-                        const btn = document.getElementById('btn-download-' + safeId);
+                        // 🚀 Shadow DOM 내부 요소를 올바르게 참조
+                        const btn = shadow.getElementById('btn-download-' + safeId);
                         const isDownloaded = window.model_status && window.model_status[m];
                         // 현재 다운로드 중(progress/퍼센트가 표시 중)이 아니라면 텍스트를 즉시 전환합니다.
                         if (btn && !btn.disabled && !btn.textContent.includes('%') && !btn.textContent.includes('...')) {
@@ -1443,6 +1486,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 configWrapper.appendChild(modelTitle);
                 configWrapper.appendChild(modelDesc);
                 configWrapper.appendChild(downloadAllBtn); // 🚀 덧붙이기
+                configWrapper.appendChild(deleteAllModelsBtn); // 🚀 삭제 버튼 덧붙이기
                 configWrapper.appendChild(modelListContainer);
                 configWrapper.appendChild(resetTitle);
                 configWrapper.appendChild(resetDesc);
@@ -1850,6 +1894,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     return;
                 }
                 else if (data.type === 'error') {
+                    window.download_progress = {}; // 🚀 에러 발생 시 멈춰있는 다운로드 UI 초기화
                     isProcessing = false; 
                     processingIds = []; // 🚀 에러 발생 시 배열 비움
                     stopPushSpinner();
@@ -1897,11 +1942,15 @@ const OVERLAY_SCRIPT: &str = r#"
                     return;
                 }
                 else if (data.type === 'download_progress') {
+                    window.download_progress = window.download_progress || {};
+                    window.download_progress[data.model] = data.percent; // 🚀 전역 변수에 실시간 갱신
+
                     if (currentTabFilter === 'CONFIG') {
                         const safeId = data.model.replace(/[\s\(\)]+/g, '-');
-                        const pb = document.getElementById('progress-bar-' + safeId);
-                        const pc = document.getElementById('progress-container-' + safeId);
-                        const btn = document.getElementById('btn-download-' + safeId);
+                        // 🚀 백엔드의 다운로드 진행 퍼센트를 화면에 갱신하기 위해 Shadow DOM을 조회합니다.
+                        const pb = shadow.getElementById('progress-bar-' + safeId);
+                        const pc = shadow.getElementById('progress-container-' + safeId);
+                        const btn = shadow.getElementById('btn-download-' + safeId);
 
                         const dict = window.lang_dict || {};
                         const currentLang = window.default_language || 'English';
@@ -1926,15 +1975,19 @@ const OVERLAY_SCRIPT: &str = r#"
                     return;
                 }
                 else if (data.type === 'download_complete') {
+                    window.download_progress = window.download_progress || {};
+                    window.download_progress[data.model] = 100; // 🚀 다운로드 완전 종료 마킹
+
                     // 메모리 상태 동기화 (재진입 시 렌더링 유지)
                     if (!window.model_status) window.model_status = {};
                     window.model_status[data.model] = true;
 
                     if (currentTabFilter === 'CONFIG') {
                         const safeId = data.model.replace(/[\s\(\)]+/g, '-');
-                        const pb = document.getElementById('progress-bar-' + safeId);
-                        const pc = document.getElementById('progress-container-' + safeId);
-                        const btn = document.getElementById('btn-download-' + safeId);
+                        // 🚀 다운로드 완료 시 UI 상태 갱신을 위해 Shadow DOM을 조회합니다.
+                        const pb = shadow.getElementById('progress-bar-' + safeId);
+                        const pc = shadow.getElementById('progress-container-' + safeId);
+                        const btn = shadow.getElementById('btn-download-' + safeId);
                         
                         const dict = window.lang_dict || {};
                         const currentLang = window.default_language || 'English';
@@ -1955,6 +2008,31 @@ const OVERLAY_SCRIPT: &str = r#"
                     div.style.background = '#e6fffa';
                     div.style.borderRadius = '4px';
                     div.textContent = `System: ${data.model} 모델 다운로드가 완료되었습니다.`;
+                    log.appendChild(div);
+                    div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                    return;
+                }
+                else if (data.type === 'delete_models_success') {
+                    // 🚀 전역 상태를 비워 모든 모델을 미설치 상태로 되돌립니다.
+                    window.model_status = {};
+                    window.download_progress = {};
+                    
+                    const dict = window.lang_dict || {};
+                    const currentLang = window.default_language || 'English';
+                    const getText = (key) => dict[currentLang] ? dict[currentLang][key] : (dict['English'] ? dict['English'][key] : key);
+                    
+                    alert(getText('model_delete_success') || 'All models have been successfully deleted.');
+                    
+                    if (currentTabFilter === 'CONFIG') {
+                        renderStagedList();
+                    }
+                    
+                    const div = document.createElement('div');
+                    div.className = 'system';
+                    div.style.padding = '10px';
+                    div.style.background = '#e6fffa';
+                    div.style.borderRadius = '4px';
+                    div.textContent = `System: 설치된 모든 모델 파일이 디스크에서 완전히 제거되었습니다.`;
                     log.appendChild(div);
                     div.scrollIntoView({ behavior: 'smooth', block: 'end' });
                     return;
@@ -2007,31 +2085,50 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     
     let app_dir = gemini_gui_lib::utils::get_app_dir();
 
-    // 🚀 [초기 실행 시 파일 자동 연결] 가중치 파일(.gguf 등)이 이미 존재한다면, 
-    // 누락된 설정 JSON 파일들을 시스템 바이너리에서 즉시 복원하여 연결합니다.
-    let glm_weights = app_dir.join("models/glm_ocr/GLM-OCR-Q8_0.gguf");
-    let privacy_weights = app_dir.join("models/privacy-filter/model.safetensors");
-    let embed_weights = app_dir.join("models/embeddings/embeddinggemma-300m-Q4_0.gguf");
+    // 🚀 마스킹 단어 사전 파일(adjectives.txt, nouns.txt)을 바이너리에 내장하고 AppData 폴더로 무조건 복사합니다.
+    let _ = std::fs::write(app_dir.join("adjectives.txt"), include_str!("../adjectives.txt"));
+    let _ = std::fs::write(app_dir.join("nouns.txt"), include_str!("../nouns.txt"));
 
-    if glm_weights.exists() {
-        let base = app_dir.join("models/glm_ocr");
+    // 🚀 [초기 실행 시 파일 자동 연결] 
+    // GGUF 모델 파일 유무와 관계없이, 앱이 실행될 때마다 프로젝트 내부에 있는 최신 JSON 설정 파일들을 
+    // AppData의 구동 폴더로 무조건 복사(덮어쓰기)하여 파일 누락을 원천 차단합니다.
+    let glm_weights = app_dir.join("models").join("glm_ocr").join("GLM-OCR-Q8_0.gguf");
+    let privacy_weights = app_dir.join("models").join("privacy-filter").join("model.safetensors");
+    let embed_weights = app_dir.join("models").join("embeddings").join("embeddinggemma-300m-Q4_0.gguf");
+
+    {
+        // 🚀 슬래시(/)가 섞여서 출력되는 경로 표기 문제를 해결하기 위해 .join("models").join("...") 형식으로 분리합니다.
+        let base = app_dir.join("models").join("glm_ocr");
+        let _ = std::fs::create_dir_all(&base);
         let _ = std::fs::write(base.join("config.json"), include_str!("../models/glm_ocr/config.json"));
         let _ = std::fs::write(base.join("tokenizer_config.json"), include_str!("../models/glm_ocr/tokenizer_config.json"));
+        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/glm_ocr/tokenizer.json")); 
+        let _ = std::fs::write(base.join("preprocessor_config.json"), include_str!("../models/glm_ocr/preprocessor_config.json")); // 🚀 추가
     }
-    if privacy_weights.exists() {
-        let base = app_dir.join("models/privacy-filter");
+    {
+        let base = app_dir.join("models").join("privacy-filter");
+        let _ = std::fs::create_dir_all(&base);
         let _ = std::fs::write(base.join("config.json"), include_str!("../models/privacy-filter/config.json"));
         let _ = std::fs::write(base.join("tokenizer_config.json"), include_str!("../models/privacy-filter/tokenizer_config.json"));
+        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/privacy-filter/tokenizer.json")); 
     }
-    if embed_weights.exists() {
-        let base = app_dir.join("models/embeddings");
+    {
+        let base = app_dir.join("models").join("embeddings");
+        let _ = std::fs::create_dir_all(&base);
         let _ = std::fs::write(base.join("config.json"), include_str!("../models/embeddings/config.json"));
+        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/embeddings/tokenizer.json")); 
     }
 
-    // 🚀 이제 가중치 파일 존재 여부만으로 모델 설치 상태를 판단합니다.
-    let glm_exists = glm_weights.exists();
-    let privacy_exists = privacy_weights.exists();
-    let embed_exists = embed_weights.exists();
+    let glm_mmproj = app_dir.join("models").join("glm_ocr").join("mmproj-GLM-OCR-Q8_0.gguf"); 
+
+    // 🚀 [무결성 검증] 단순히 파일이 존재하는 것뿐만 아니라, 다운로드가 끊겨 생성된 쓰레기 파일(예: 10MB 미만)인지 용량까지 엄격하게 검사하여 앱 크래시를 원천 차단합니다.
+    let is_valid_model = |p: &std::path::PathBuf| -> bool {
+        p.exists() && std::fs::metadata(p).map(|m| m.len()).unwrap_or(0) > 10_000_000 // 최소 10MB 이상이어야 정상 가중치 파일로 인정
+    };
+
+    let glm_exists = is_valid_model(&glm_weights) && is_valid_model(&glm_mmproj);
+    let privacy_exists = is_valid_model(&privacy_weights);
+    let embed_exists = is_valid_model(&embed_weights);
     let model_status_str = json!({
         "GLM-OCR": glm_exists,
         "Privacy-Filter": privacy_exists,
@@ -2045,9 +2142,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     // 사용자가 무거운 모델 파일(.gguf)만 받아도 즉시 연동되도록 하기 위함입니다.
     let glm_config = include_str!("../models/glm_ocr/config.json");
     let glm_tokenizer_config = include_str!("../models/glm_ocr/tokenizer_config.json");
+    let glm_tokenizer = include_str!("../models/glm_ocr/tokenizer.json"); // 🚀 추가
+    let glm_preprocessor = include_str!("../models/glm_ocr/preprocessor_config.json"); // 🚀 추가
     let privacy_config = include_str!("../models/privacy-filter/config.json");
     let privacy_tokenizer_config = include_str!("../models/privacy-filter/tokenizer_config.json");
+    let privacy_tokenizer = include_str!("../models/privacy-filter/tokenizer.json"); // 🚀 추가
     let embed_config = include_str!("../models/embeddings/config.json");
+    let embed_tokenizer = include_str!("../models/embeddings/tokenizer.json"); // 🚀 추가
 
     // 헬퍼 클로저: 특정 모델 폴더에 내장된 JSON 파일들을 자동으로 생성/복원합니다.
     let ensure_model_configs = |app_dir: &std::path::Path, model_type: &str| {
@@ -2062,13 +2163,17 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
             "GLM-OCR" => {
                 let _ = std::fs::write(base.join("config.json"), glm_config);
                 let _ = std::fs::write(base.join("tokenizer_config.json"), glm_tokenizer_config);
+                let _ = std::fs::write(base.join("tokenizer.json"), glm_tokenizer); // 🚀 추가
+                let _ = std::fs::write(base.join("preprocessor_config.json"), glm_preprocessor); // 🚀 추가
             },
             "Privacy-Filter" => {
                 let _ = std::fs::write(base.join("config.json"), privacy_config);
                 let _ = std::fs::write(base.join("tokenizer_config.json"), privacy_tokenizer_config);
+                let _ = std::fs::write(base.join("tokenizer.json"), privacy_tokenizer); // 🚀 추가
             },
             "Embedding" => {
                 let _ = std::fs::write(base.join("config.json"), embed_config);
+                let _ = std::fs::write(base.join("tokenizer.json"), embed_tokenizer); // 🚀 추가
             },
             _ => (),
         }
@@ -2106,7 +2211,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     let ocr_result = {
                                         let mut model_guard = OCR_MODEL.lock().unwrap();
                                         if model_guard.is_none() {
-                                            let model_path = app_dir.join("models/glm_ocr");
+                                            // 🚀 깔끔한 윈도우 경로 생성을 위해 join 분리
+                                            let model_path = app_dir.join("models").join("glm_ocr");
                                             let model_path_str = model_path.to_string_lossy().to_string();
                                             // 🚀 SSD 오프로딩이 적용되었으므로 당당하게 4GB CUDA VRAM을 100% 활용합니다.
                                             let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu); 
@@ -2118,7 +2224,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             let params = ChatCompletionParameters {
                                                 messages: vec![Message {
                                                     role: "user".to_string(),
-                                                    parts: vec![Part { text: "Extract text".to_string(), image_url: Some(full_data_url.to_string()) }],
+                                                    parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
                                                 }],
                                                 model: "glm-ocr".to_string(),
                                                 max_tokens: Some(2048),
@@ -2233,7 +2339,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     {
                                         let mut model_guard = OCR_MODEL.lock().unwrap();
                                         if model_guard.is_none() {
-                                            let model_path = app_dir.join("models/glm_ocr");
+                                            // 🚀 깔끔한 윈도우 경로 생성을 위해 join 분리
+                                            let model_path = app_dir.join("models").join("glm_ocr");
                                             let model_path_str = model_path.to_string_lossy().to_string();
                                             match GlmOcrGenerateModel::init(&model_path_str, Some(&device), None) {
                                                 Ok(model) => *model_guard = Some(model),
@@ -2266,7 +2373,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     let params = ChatCompletionParameters {
                                                         messages: vec![Message {
                                                             role: "user".to_string(),
-                                                            parts: vec![Part { text: "Extract text from image".to_string(), image_url: Some(record.context.clone()) }],
+                                                            parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(record.context.clone()) }],
                                                         }],
                                                         model: "glm-ocr".to_string(),
                                                         max_tokens: Some(2048),
@@ -2323,7 +2430,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         {
                                             let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
                                             if pm_guard.is_none() {
-                                                let pm_path = app_dir.join("models/privacy-filter");
+                                                let pm_path = app_dir.join("models").join("privacy-filter");
                                                 let pm_path_str = pm_path.to_string_lossy().to_string();
                                                 println!("[System] PrivacyManager 모델을 GPU 메모리에 로드 중...");
                                                 *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
@@ -2396,7 +2503,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         {
                                             let mut em_guard = EMBEDDING_MODEL.lock().unwrap();
                                             if em_guard.is_none() {
-                                                let em_path = app_dir.join("models/embeddings");
+                                                let em_path = app_dir.join("models").join("embeddings");
                                                 let em_path_str = em_path.to_string_lossy().to_string();
                                                 *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device(&em_path_str, &device).ok();
                                             }
@@ -2524,7 +2631,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         {
                             let mut model_guard = OCR_MODEL.lock().unwrap();
                             if model_guard.is_none() {
-                                let model_path = app_dir.join("models/glm_ocr");
+                                let model_path = app_dir.join("models").join("glm_ocr");
                                 let model_path_str = model_path.to_string_lossy().to_string();
                                 // 🚀 수동 파일 업로드 시에도 CUDA VRAM 기반 SSD 오프로딩을 적극 적용합니다.
                                 let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu);
@@ -2541,7 +2648,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 let params = ChatCompletionParameters {
                                     messages: vec![Message {
                                         role: "user".to_string(),
-                                        parts: vec![Part { text: "Extract text".to_string(), image_url: Some(full_data_url.to_string()) }],
+                                        parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
                                     }],
                                     model: "glm-ocr".to_string(),
                                     max_tokens: Some(2048),
@@ -2581,7 +2688,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
                         let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
                         if pm_guard.is_none() {
-                            let pm_path = app_dir.join("models/privacy-filter");
+                            let pm_path = app_dir.join("models").join("privacy-filter");
                             let pm_path_str = pm_path.to_string_lossy().to_string();
                             *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
                         }
@@ -2768,9 +2875,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         // JSON 파일들 복원
                         let glm_c = include_str!("../models/glm_ocr/config.json");
                         let glm_t = include_str!("../models/glm_ocr/tokenizer_config.json");
+                        let glm_tok = include_str!("../models/glm_ocr/tokenizer.json"); // 🚀 추가
+                        let glm_prep = include_str!("../models/glm_ocr/preprocessor_config.json"); // 🚀 추가
                         let priv_c = include_str!("../models/privacy-filter/config.json");
                         let priv_t = include_str!("../models/privacy-filter/tokenizer_config.json");
+                        let priv_tok = include_str!("../models/privacy-filter/tokenizer.json"); // 🚀 추가
                         let emb_c = include_str!("../models/embeddings/config.json");
+                        let emb_tok = include_str!("../models/embeddings/tokenizer.json"); // 🚀 추가
 
                         let target_base = base_config_dir.join("models").join(folder_name);
                         let _ = std::fs::create_dir_all(&target_base);
@@ -2778,13 +2889,17 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             "GLM-OCR" => {
                                 let _ = std::fs::write(target_base.join("config.json"), glm_c);
                                 let _ = std::fs::write(target_base.join("tokenizer_config.json"), glm_t);
+                                let _ = std::fs::write(target_base.join("tokenizer.json"), glm_tok); // 🚀 추가
+                                let _ = std::fs::write(target_base.join("preprocessor_config.json"), glm_prep); // 🚀 추가
                             },
                             "Privacy-Filter" => {
                                 let _ = std::fs::write(target_base.join("config.json"), priv_c);
                                 let _ = std::fs::write(target_base.join("tokenizer_config.json"), priv_t);
+                                let _ = std::fs::write(target_base.join("tokenizer.json"), priv_tok); // 🚀 추가
                             },
                             "Embedding" => {
                                 let _ = std::fs::write(target_base.join("config.json"), emb_c);
+                                let _ = std::fs::write(target_base.join("tokenizer.json"), emb_tok); // 🚀 추가
                             },
                             _ => (),
                         }
@@ -2815,6 +2930,19 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         let mut has_error = false;
 
                         for (file_idx, (url, filename)) in files_to_download.iter().enumerate() {
+                            let file_path = dir_path.join(filename);
+                            let tmp_path = dir_path.join(format!("{}.tmp", filename));
+                            
+                            // 🚀 [손상 파일 스킵 방지] 가중치 파일(.gguf, .safetensors)은 최소 10MB 이상일 때만 정상으로 인정하여 스킵합니다.
+                            // 만약 다운로드가 끊긴 0~9MB짜리 파일이 있다면 스킵하지 않고 처음부터 다시(tmp로) 덮어씌웁니다.
+                            let min_size = if filename.ends_with(".gguf") || filename.ends_with(".safetensors") { 10_000_000 } else { 0 };
+                            if file_path.exists() && std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0) > min_size {
+                                let percent = (((file_idx as f64 + 1.0) / total_files as f64) * 100.0) as u32;
+                                let progress_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "download_progress", "model": model_name, "percent": percent})));
+                                let _ = page_c.evaluate(progress_script).await;
+                                continue;
+                            }
+
                             match client.get(*url).send().await {
                                 Ok(res) => {
                                     if !res.status().is_success() {
@@ -2829,11 +2957,12 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     let total_size = res.content_length().unwrap_or(0) as f64;
                                     let mut downloaded = 0.0;
                                     
-                                    let file_path = dir_path.join(filename);
-                                    match tokio::fs::File::create(&file_path).await {
+                                    // 🚀 [원자적 다운로드] 불완전 다운로드 문제를 막기 위해 .tmp 파일로 먼저 기록합니다.
+                                    match tokio::fs::File::create(&tmp_path).await {
                                         Ok(mut file) => {
                                             use tokio::io::AsyncWriteExt;
                                             let mut stream = res.bytes_stream();
+                                            let mut write_error = false;
                                             
                                             while let Some(chunk_result) = stream.next().await {
                                                 match chunk_result {
@@ -2843,7 +2972,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                             println!("[Error] {}", err_msg);
                                                             let err_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "error", "message": err_msg})));
                                                             let _ = page_c.evaluate(err_script).await;
-                                                            has_error = true;
+                                                            write_error = true;
                                                             break;
                                                         }
                                                         downloaded += chunk.len() as f64;
@@ -2856,18 +2985,28 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                         let _ = page_c.evaluate(progress_script).await;
                                                     },
                                                     Err(e) => {
-                                                        let err_msg = format!("네트워크 스트림 읽기 실패: {:?}", e);
+                                                        let err_msg = format!("네트워크 스트림 읽기 실패 (인터넷 끊김 등): {:?}", e);
                                                         println!("[Error] {}", err_msg);
                                                         let err_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "error", "message": err_msg})));
                                                         let _ = page_c.evaluate(err_script).await;
-                                                        has_error = true;
+                                                        write_error = true;
                                                         break;
                                                     }
                                                 }
                                             }
+                                            
+                                            if write_error {
+                                                // 🚀 에러 발생 시 쓰다 만 tmp 파일을 제거합니다.
+                                                let _ = std::fs::remove_file(&tmp_path);
+                                                has_error = true;
+                                                break;
+                                            } else {
+                                                // 🚀 성공적으로 다운로드가 끝났을 때만 실제 파일명으로 덮어씌웁니다. (이 시점에 찌꺼기 파일이 완벽하게 초기화 복구됩니다)
+                                                let _ = std::fs::rename(&tmp_path, &file_path);
+                                            }
                                         },
                                         Err(e) => {
-                                            let err_msg = format!("파일 생성 실패 ({} 권한을 확인해주세요): {:?}", file_path.display(), e);
+                                            let err_msg = format!("파일 생성 실패 ({} 권한을 확인해주세요): {:?}", tmp_path.display(), e);
                                             println!("[Error] {}", err_msg);
                                             let err_script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "error", "message": err_msg})));
                                             let _ = page_c.evaluate(err_script).await;
@@ -2895,6 +3034,21 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     });
                     
                     json!({"type": "download_started"}).to_string()
+                } else if payload == "delete_all_models" {
+                    // 🚀 OS의 파일 시스템을 통해 models 디렉토리 전체를 강제로 삭제합니다.
+                    let models_dir = app_dir.join("models");
+                    if models_dir.exists() {
+                        if let Err(e) = std::fs::remove_dir_all(&models_dir) {
+                            println!("[Error] 모델 디렉토리 삭제 실패: {:?}", e);
+                            json!({"type": "error", "message": format!("디렉토리를 삭제할 수 없습니다: {}", e)}).to_string()
+                        } else {
+                            println!("[System] 모델 디렉토리 전체 삭제 성공");
+                            json!({"type": "delete_models_success"}).to_string()
+                        }
+                    } else {
+                        // 애초에 폴더가 없으면 성공으로 간주
+                        json!({"type": "delete_models_success"}).to_string()
+                    }
                 } else { "Unknown command".to_string() };
 
                 let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(response));

@@ -22,7 +22,10 @@
     "prompt_title": "Saved Prompts",
     "prompt_empty": "No saved prompts.",
     "prompt_delete": "Delete",
-    "prompt_delete_confirm": "Are you sure you want to delete this prompt?"
+    "prompt_delete_confirm": "Are you sure you want to delete this prompt?",
+    "model_delete_all": "Delete All Models",
+    "model_delete_all_confirm": "Are you sure you want to delete all installed models? You will need to download them again.",
+    "model_delete_success": "All models have been successfully deleted."
   },
   "Korean": {
     "lang_title": "기본 언어 설정 (Default Language)",
@@ -47,7 +50,10 @@
     "prompt_title": "저장된 프롬프트 관리",
     "prompt_empty": "저장된 프롬프트가 없습니다.",
     "prompt_delete": "삭제",
-    "prompt_delete_confirm": "이 프롬프트를 삭제하시겠습니까?"
+    "prompt_delete_confirm": "이 프롬프트를 삭제하시겠습니까?",
+    "model_delete_all": "설치된 모델 전체 삭제",
+    "model_delete_all_confirm": "설치된 모든 모델을 삭제하시겠습니까? 다시 다운로드해야 합니다.",
+    "model_delete_success": "모든 모델이 성공적으로 삭제되었습니다."
   },
   "Chinese": {
     "lang_title": "默认语言设置 (Default Language)",
@@ -70,7 +76,10 @@
     "prompt_title": "已存提示词管理",
     "prompt_empty": "没有保存的提示词。",
     "prompt_delete": "删除",
-    "prompt_delete_confirm": "您确定要删除此提示词吗？"
+    "prompt_delete_confirm": "您确定要删除此提示词吗？",
+    "model_delete_all": "删除所有已安装的模型",
+    "model_delete_all_confirm": "您确定要删除所有已安装的模型吗？您将需要重新下载它们。",
+    "model_delete_success": "所有模型均已成功删除。"
   },
   "Japanese": {
     "lang_title": "デフォルト言語設定 (Default Language)",
@@ -93,7 +102,10 @@
     "prompt_title": "保存済みプロンプトの管理",
     "prompt_empty": "保存されたプロンプトはありません。",
     "prompt_delete": "削除",
-    "prompt_delete_confirm": "このプロンプトを削除しますか？"
+    "prompt_delete_confirm": "このプロンプトを削除しますか？",
+    "model_delete_all": "インストール済みの全モデルを削除",
+    "model_delete_all_confirm": "インストールされているすべてのモデルを削除しますか？再度ダウンロードする必要があります。",
+    "model_delete_success": "すべてのモデルが正常に削除されました。"
   },
   "French": {
     "lang_title": "Paramètre de langue par défaut (Default Language)",
@@ -116,7 +128,10 @@
     "prompt_title": "Gestion des invites",
     "prompt_empty": "Aucune invite enregistrée.",
     "prompt_delete": "Supprimer",
-    "prompt_delete_confirm": "Voulez-vous vraiment supprimer cette invite ?"
+    "prompt_delete_confirm": "Voulez-vous vraiment supprimer cette invite ?",
+    "model_delete_all": "Supprimer tous les modèles installés",
+    "model_delete_all_confirm": "Voulez-vous vraiment supprimer tous les modèles installés ? Vous devrez les retélécharger.",
+    "model_delete_success": "Tous les modèles ont été supprimés avec succès."
   },
   "Spanish": {
     "lang_title": "Configuración de idioma predeterminado (Default Language)",
@@ -139,7 +154,10 @@
     "prompt_title": "Gestión de indicaciones",
     "prompt_empty": "No hay indicaciones guardadas.",
     "prompt_delete": "Eliminar",
-    "prompt_delete_confirm": "¿Está seguro de que desea eliminar esta indicación?"
+    "prompt_delete_confirm": "¿Está seguro de que desea eliminar esta indicación?",
+    "model_delete_all": "Eliminar todos los modelos instalados",
+    "model_delete_all_confirm": "¿Está seguro de que desea eliminar todos los modelos instalados? Tendrá que descargarlos de nuevo.",
+    "model_delete_success": "Todos los modelos han sido eliminados con éxito."
   },
   "Russian": {
     "lang_title": "Настройка языка по умолчанию (Default Language)",
@@ -162,7 +180,10 @@
     "prompt_title": "Сохраненные подсказки",
     "prompt_empty": "Нет сохраненных подсказок.",
     "prompt_delete": "Удалить",
-    "prompt_delete_confirm": "Вы уверены, что хотите удалить эту подсказку?"
+    "prompt_delete_confirm": "Вы уверены, что хотите удалить эту подсказку?",
+    "model_delete_all": "Удалить все установленные модели",
+    "model_delete_all_confirm": "Вы уверены, что хотите удалить все установленные модели? Вам придется скачать их заново.",
+    "model_delete_success": "Все модели успешно удалены."
   },
   "German": {
     "lang_title": "Standardspracheinstellung (Default Language)",
@@ -185,6 +206,9 @@
     "prompt_title": "Gespeicherte Eingabeaufforderungen",
     "prompt_empty": "Keine gespeicherten Eingabeaufforderungen.",
     "prompt_delete": "Löschen",
-    "prompt_delete_confirm": "Möchten Sie diese Eingabeaufforderung wirklich löschen?"
+    "prompt_delete_confirm": "Möchten Sie diese Eingabeaufforderung wirklich löschen?",
+    "model_delete_all": "Alle installierten Modelle löschen",
+    "model_delete_all_confirm": "Möchten Sie wirklich alle installierten Modelle löschen? Sie müssen sie erneut herunterladen.",
+    "model_delete_success": "Alle Modelle wurden erfolgreich gelöscht."
   }
 }

@@ -8,7 +8,16 @@ pub struct TokenizerModel {
 
 impl TokenizerModel {
     pub fn init<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let tokenizer = Tokenizer::from_file(path.as_ref().join("tokenizer.json")).map_err(anyhow::Error::msg)?;
+        let target_path = path.as_ref().join("tokenizer.json");
+        
+        // 🚀 정확히 어떤 경로에서 파일을 찾으려 하는지 시스템 콘솔에 로그를 남깁니다.
+        println!("[System] Tokenizer 로드 시도 경로: {}", target_path.display());
+        
+        let tokenizer = Tokenizer::from_file(&target_path).map_err(|e| {
+            // 🚀 에러 발생 시 지정된 파일을 찾을 수 없다는 메시지와 함께 절대 경로를 출력합니다.
+            anyhow::anyhow!("Tokenizer 파일 로드 실패 (경로: {}): {}", target_path.display(), e)
+        })?;
+        
         Ok(Self { tokenizer })
     }
 
