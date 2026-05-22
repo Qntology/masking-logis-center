@@ -62,11 +62,16 @@ impl PrivacySession {
         // 🚀 [정규화] 앞뒤 공백을 제거하여 모델이 미세하게 다르게 인식한 동일 단어를 하나로 묶습니다.
         let normalized_text = text.trim();
         
-        let clean_label = if label.contains('-') {
-            label.split('-').nth(1).unwrap_or(label)
+        let mut clean_label = if label.contains('-') {
+            label.split('-').nth(1).unwrap_or(label).to_lowercase()
         } else {
-            label
+            label.to_lowercase()
         };
+
+        // 🚀 [주소 마스킹 통일] 상세 주소(Street, BuildingNumber, ZipCode)를 'address' 태그 하나로 묶어줍니다.
+        if matches!(clean_label.as_str(), "street" | "buildingnumber" | "zipcode") {
+            clean_label = "address".to_string();
+        }
 
         // 🚀 [재사용 로직] 이미 세션 맵에 등록된 단어라면 즉시 기존 플레이스홀더를 반환합니다.
         // 이를 통해 drag.context 내의 반복되는 주소가 모두 동일한 태그로 통일됩니다.
@@ -74,7 +79,7 @@ impl PrivacySession {
             return placeholder.clone();
         }
 
-        let count = self.counter_map.entry(clean_label.to_string()).or_insert(0);
+        let count = self.counter_map.entry(clean_label.clone()).or_insert(0);
         let current_idx = *count;
         *count += 1;
         
@@ -83,7 +88,7 @@ impl PrivacySession {
         let noun = &NOUNS[(current_idx / ADJECTIVES.len()) % NOUNS.len()];
         
         // 고유 태그 생성
-        let placeholder = format!("[RECORD_{}][{}:{}-{}]", record_idx, clean_label.to_lowercase(), adj, noun);
+        let placeholder = format!("[RECORD_{}][{}:{}-{}]", record_idx, clean_label, adj, noun);
         
         // 🚀 정규화된 텍스트를 키로 사용하여 맵에 저장합니다.
         self.entity_map.insert(normalized_text.to_string(), placeholder.clone());
@@ -111,67 +116,66 @@ impl PrivacyManager {
         Ok(Self { model })
     }
 
-    pub fn mask_records(&self, texts: Vec<String>) -> Result<Vec<String>> {
-        let mut session = PrivacySession::new();
-        let mut results = Vec::new();
+    // 🚀 [구조 개선] session과 record_idx를 외부에서 주입받아, 여러 문서를 개별적으로 처리할 때도 일관성을 유지하게 합니다.
+    pub fn mask_text_with_session(&self, text: &str, session: &mut PrivacySession, record_idx: usize) -> Result<String> {
+        println!("[PrivacyManager] 텍스트 길이 {} 바이트, predict 호출 진입", text.len());
+        
+        if text.trim().is_empty() {
+            println!("[PrivacyManager] 텍스트가 비어있어 마스킹을 건너뜁니다.");
+            return Ok(text.to_string());
+        }
 
-        for (idx, text) in texts.into_iter().enumerate() {
-            println!("[PrivacyManager] 텍스트 길이 {} 바이트, predict 호출 진입", text.len());
+        let spans = match self.model.predict(text) {
+            Ok(s) => {
+                println!("[PrivacyManager] predict 성공, {} 개의 식별된 Span 찾음", s.len());
+                s
+            },
+            Err(e) => {
+                println!("[PrivacyManager] predict 내부 모델 추론 중 에러 발생: {:?}", e);
+                return Err(e);
+            }
+        };
+        
+        let mut masked_text = text.to_string();
+        let mut sorted_spans = spans;
+        sorted_spans.sort_by(|a, b| b.start.cmp(&a.start));
+
+        for span in sorted_spans {
+            let label = span.entity_group.to_uppercase();
             
-            // 텍스트가 비어있을 경우 GPU 연산을 수행하지 않고 원본을 바로 반환하도록 예외 처리합니다.
-            if text.trim().is_empty() {
-                println!("[PrivacyManager] 텍스트가 비어있어 마스킹을 건너뜁니다.");
-                results.push(text);
+            // 🚀 [지능형 필터링 고도화] 
+            // 1. 신뢰도 대폭 상향: 0.85 미만은 버려서 상품명(클립, 파우치 등)이나 일반 명사의 오인식을 원천 차단합니다.
+            // 2. 공백 제거 후 길이 검사: " 지", " 준" 처럼 토큰 앞뒤에 공백이 포함된 1글자 조사/단어의 피해를 막습니다.
+            if span.score < 0.85 || span.word.trim().chars().count() <= 1 {
                 continue;
             }
 
-            let spans = match self.model.predict(&text) {
-                Ok(s) => {
-                    println!("[PrivacyManager] predict 성공, {} 개의 식별된 Span 찾음", s.len());
-                    s
-                },
-                Err(e) => {
-                    println!("[PrivacyManager] predict 내부 모델 추론 중 에러 발생: {:?}", e);
-                    return Err(e);
-                }
-            };
-            let mut masked_text = text.clone();
-            
-            let mut sorted_spans = spans;
-            // 🚀 [인덱스 밀림 해결] 시작 위치(start)를 기준으로 내림차순 정렬하여 뒤에서부터 치환합니다.
-            // 문자열 길이가 변하더라도 앞쪽 단어들의 상대적 인덱스가 보존되어 반복되는 주소도 정확히 마스킹됩니다.
-            sorted_spans.sort_by(|a, b| b.start.cmp(&a.start));
-
-            for span in sorted_spans {
-                let label = span.entity_group.to_uppercase();
-                
-                // 🚀 [지능형 필터링] 
-                // 1. 점수 기반: 모델의 확신도가 0.5 미만인 경우 무지성 마스킹으로 간주하고 무시합니다.
-                // 2. 길이 기반: 1글자 이하의 단어(조사 등)가 잘못 식별된 경우 컨텍스트 보존을 위해 제외합니다.
-                // 3. 지리 정보: 이미 제외 중인 CITY, STATE 외에 과도하게 잡히는 주소 성분들을 추가 차단합니다.
-                if span.score < 0.5 || span.word.chars().count() <= 1 {
-                    continue;
-                }
-
-                if matches!(label.as_str(), "CITY" | "COUNTY" | "STATE" | "STREET") {
-                    continue; 
-                }
-
-                let placeholder = session.get_or_create_placeholder(&span.word, &label, idx);
-                
-                // 🚀 안전한 범위 내에서만 치환을 수행하도록 체크 로직을 보강합니다.
-                if span.start < masked_text.len() && span.end <= masked_text.len() {
-                    masked_text.replace_range(span.start..span.end, &placeholder);
-                }
+            // 3. 비핵심 정보 제외: 문맥 보존을 위해 금액(AMOUNT)은 마스킹에서 통과시킵니다.
+            // 🚀 시/도/군/구(CITY, COUNTY, STATE)는 맥락 파악을 위해 남겨두고, 상세 주소(STREET, ZIPCODE, BUILDINGNUMBER)는 마스킹되도록 통과 목록에서 제거합니다.
+            if matches!(label.as_str(), "CITY" | "COUNTY" | "STATE" | "AMOUNT") {
+                continue; 
             }
-            results.push(masked_text);
-        }
 
+            let placeholder = session.get_or_create_placeholder(&span.word, &label, record_idx);
+            
+            if span.start < masked_text.len() && span.end <= masked_text.len() {
+                masked_text.replace_range(span.start..span.end, &placeholder);
+            }
+        }
+        Ok(masked_text)
+    }
+
+    pub fn mask_records(&self, texts: Vec<String>) -> Result<Vec<String>> {
+        let mut session = PrivacySession::new();
+        let mut results = Vec::new();
+        for (idx, text) in texts.into_iter().enumerate() {
+            results.push(self.mask_text_with_session(&text, &mut session, idx).unwrap_or(text));
+        }
         Ok(results)
     }
 
     pub fn mask_text(&self, text: &str) -> Result<String> {
-        let results = self.mask_records(vec![text.to_string()])?;
-        Ok(results[0].clone())
+        let mut session = PrivacySession::new();
+        self.mask_text_with_session(text, &mut session, 0)
     }
 }

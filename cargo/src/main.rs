@@ -1,4 +1,4 @@
-use gemini_gui_lib::{db, privacy_filter, glm_ocr, params}; // embedding 제거
+use terminal_logis_center::{db, privacy_filter, glm_ocr, params}; // embedding 제거
 use privacy_filter::viterbi::PrivacySpan; // PrivacyFilterModel 제거
 use candle_core::Device;
 use glm_ocr::generate::{GlmOcrGenerateModel, GenerateModel};
@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 lazy_static! {
     static ref OCR_MODEL: Mutex<Option<GlmOcrGenerateModel>> = Mutex::new(None);
-    static ref PRIVACY_MANAGER: Mutex<Option<gemini_gui_lib::privacy_filter::masking::PrivacyManager>> = Mutex::new(None);
-    static ref EMBEDDING_MODEL: Mutex<Option<gemini_gui_lib::embedding::EmbeddingModel>> = Mutex::new(None);
+    static ref PRIVACY_MANAGER: Mutex<Option<terminal_logis_center::privacy_filter::masking::PrivacyManager>> = Mutex::new(None);
+    static ref EMBEDDING_MODEL: Mutex<Option<terminal_logis_center::embedding::EmbeddingModel>> = Mutex::new(None);
     static ref GLOBAL_PROGRESS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
     // 🚀 Push 작업을 실시간으로 중단하기 위한 전역 플래그입니다.
     static ref PUSH_CANCEL_SIGNAL: AtomicBool = AtomicBool::new(false);
@@ -86,7 +86,7 @@ struct AppConfig {
 }
 
 fn load_app_config() -> AppConfig {
-    let app_dir = gemini_gui_lib::utils::get_app_dir();
+    let app_dir = terminal_logis_center::utils::get_app_dir();
     // 사용자가 설정을 저장할 때 사용하는 app_config.json을 우선적으로 읽습니다.
     let config_path = app_dir.join("app_config.json");
     if let Ok(content) = std::fs::read_to_string(&config_path) {
@@ -2083,7 +2083,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let auto_extract = app_config.auto_extract.unwrap_or(true); // 🚀 기본값은 활성화(true)
     let enable_masking = app_config.enable_masking.unwrap_or(true); // 🚀 마스킹 기능도 기본값 활성화(true)
     
-    let app_dir = gemini_gui_lib::utils::get_app_dir();
+    let app_dir = terminal_logis_center::utils::get_app_dir();
 
     // 🚀 마스킹 단어 사전 파일(adjectives.txt, nouns.txt)을 바이너리에 내장하고 AppData 폴더로 무조건 복사합니다.
     let _ = std::fs::write(app_dir.join("adjectives.txt"), include_str!("../adjectives.txt"));
@@ -2193,7 +2193,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let _browser_clone = browser.clone();
     
     tokio::task::spawn(async move {
-        let app_dir = gemini_gui_lib::utils::get_app_dir();
+        let app_dir = terminal_logis_center::utils::get_app_dir();
         while let Some(event) = bindings.next().await {
             if event.name == rpc_binding_name { // 이벤트 수신명 변경
                 let payload = event.payload.trim_matches('"').to_string();
@@ -2202,7 +2202,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     match serde_json::from_str::<db::CommerceRecord>(data) {
                         Ok(mut record) => {
                             // 🚀 [Fix] 미사용 트레이트 Harness 임포트를 제거하고 DefaultHarness 구조체만 사용합니다.
-                            use gemini_gui_lib::harness::DefaultHarness;
+                            use terminal_logis_center::harness::DefaultHarness;
                             let harness = DefaultHarness;
                             
                             if record.url.starts_with("file://") && record.context.contains("data:image/") {
@@ -2315,7 +2315,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 let needs_ocr = target_records.iter().any(|r| r.context.starts_with("data:image/") || r.context.starts_with("data:application/pdf"));
                                 
                                 // 🚀 [Phase 0-1] 웹페이지 텍스트 정제 (데이터 증발 방지 로직 적용)
-                                use gemini_gui_lib::harness::DefaultHarness;
+                                use terminal_logis_center::harness::DefaultHarness;
                                 let harness = DefaultHarness;
                                 for record in &mut target_records {
                                     let is_image = record.context.starts_with("data:image/") || record.url.starts_with("file://");
@@ -2433,10 +2433,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let pm_path = app_dir.join("models").join("privacy-filter");
                                                 let pm_path_str = pm_path.to_string_lossy().to_string();
                                                 println!("[System] PrivacyManager 모델을 GPU 메모리에 로드 중...");
-                                                *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
+                                                *pm_guard = terminal_logis_center::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
                                             }
                                         }
                                         
+                                        // 🚀 [Fix] 일괄 처리(배치) 중 모든 문서가 단일 세션을 공유하도록 외부에서 Session을 생성합니다.
+                                        // 이를 통해 첫 번째 문서는 RECORD_0, 두 번째 문서는 RECORD_1 로 정상 넘버링됩니다.
+                                        let mut privacy_session = terminal_logis_center::privacy_filter::masking::PrivacySession::new();
+
                                         for (idx, record) in target_records.iter_mut().enumerate() {
                                             // 🚀 사용자가 Cancel 버튼을 눌렀다면 루프를 즉시 중단합니다.
                                             if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
@@ -2450,7 +2454,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let pm_guard = PRIVACY_MANAGER.lock().unwrap();
                                                 if let Some(pm) = pm_guard.as_ref() {
                                                     println!("[System] 마스킹 진행 중 (Record ID: {})", record.id);
-                                                    masked_text = pm.mask_text(&record.context).unwrap_or_else(|e| {
+                                                    // 🚀 기존 mask_text 대신 session과 고유 idx를 직접 주입하는 신규 메서드를 호출합니다.
+                                                    masked_text = pm.mask_text_with_session(&record.context, &mut privacy_session, idx).unwrap_or_else(|e| {
                                                         let err_str = format!("Masking failed: {}", e);
                                                         println!("[Error] Rust Backend Error Caught: {}", err_str);
                                                         has_error = Some(err_str);
@@ -2505,7 +2510,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             if em_guard.is_none() {
                                                 let em_path = app_dir.join("models").join("embeddings");
                                                 let em_path_str = em_path.to_string_lossy().to_string();
-                                                *em_guard = gemini_gui_lib::embedding::EmbeddingModel::new_with_device(&em_path_str, &device).ok();
+                                                *em_guard = terminal_logis_center::embedding::EmbeddingModel::new_with_device(&em_path_str, &device).ok();
                                             }
                                         }
                                         for (idx, record) in target_records.iter_mut().enumerate() {
@@ -2690,7 +2695,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         if pm_guard.is_none() {
                             let pm_path = app_dir.join("models").join("privacy-filter");
                             let pm_path_str = pm_path.to_string_lossy().to_string();
-                            *pm_guard = gemini_gui_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
+                            *pm_guard = terminal_logis_center::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
                         }
                         if let Some(pm) = pm_guard.as_ref() {
                             masked_result = pm.mask_text(&ocr_result).unwrap_or_else(|e| {

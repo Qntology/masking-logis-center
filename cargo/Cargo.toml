@@ -1,10 +1,10 @@
 [package]
-name = "gemini-gui"
+name = "terminal-logis-center"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "gemini_gui_lib"
+name = "terminal_logis_center"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
