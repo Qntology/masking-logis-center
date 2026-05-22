@@ -75,10 +75,10 @@ impl GlmOcrProcessor {
     pub fn process_image(&self, image_path: &str) -> Result<ProcessedImage> {
         let mut img = get_image(image_path)?;
         
-        // 🚀 가로가 1024를 초과할 경우 가로를 1024로 고정하고, 세로는 원본 비율에 맞춰 자동으로 조정합니다.
-        if img.width() > 1024 {
-            let new_width = 1024;
-            let new_height = (img.height() as f32 * (1024.0 / img.width() as f32)).round() as u32;
+        // 🚀 [해상도 보존] 영수증, 송장 등의 작은 글씨가 뭉개지는 현상(OCR 깨짐)을 방지하기 위해 가로 제한을 2048로 넉넉하게 늘려 원본 디테일을 보존합니다.
+        if img.width() > 2048 {
+            let new_width = 2048;
+            let new_height = (img.height() as f32 * (2048.0 / img.width() as f32)).round() as u32;
             img = img.resize_exact(new_width, new_height, image::imageops::FilterType::Lanczos3);
         }
 

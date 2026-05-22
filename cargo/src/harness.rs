@@ -46,7 +46,8 @@ impl DefaultHarness {
         let tag = element.name();
         
         // 1. 데이터적 가치가 없는 메타/리소스 태그들은 자식 노드까지 완전히 무시합니다.
-        if matches!(tag, "script" | "style" | "link" | "noscript" | "iframe" | "svg" | "meta" | "head" | "header" | "footer" | "nav") {
+        // 🚀 [버그 픽스] header, footer, nav는 실제 텍스트가 많이 포함되므로 무시 목록에서 제거하여 누락을 방지합니다.
+        if matches!(tag, "script" | "style" | "link" | "noscript" | "iframe" | "svg" | "meta" | "head" | "path") {
             return;
         }
 

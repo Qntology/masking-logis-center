@@ -865,6 +865,7 @@ impl GlmOcrVisionModel {
             // 텍스트 생성 단계(KV Cache 등)를 위한 GPU 메모리를 최대한 확보합니다.
             if self.file.is_some() {
                 block.clear_weights(); 
+                crate::utils::force_memory_cleanup(); // 🚀 추가: 레이어 해제 즉시 RAM/VRAM 가비지 컬렉션을 강제하여 피크치를 강력하게 억제합니다.
             }
         }
 
@@ -1127,6 +1128,7 @@ impl GlmOcrTextModel {
             // 반면 텍스트를 생성하는 디코딩 단계(Decode, seqlen_offset > 0)에서는 속도 유지를 위해 캐싱을 유지합니다.
             if self.file.is_some() && seqlen_offset == 0 {
                 layer.clear_weights();
+                crate::utils::force_memory_cleanup(); // 🚀 추가: 레이어 해제 즉시 메모리를 강제 회수하여 RAM 피크치를 억제합니다.
             }
         }
 

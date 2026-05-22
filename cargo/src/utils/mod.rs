@@ -58,3 +58,24 @@ pub fn get_app_dir() -> std::path::PathBuf {
         path
     }
 }
+
+// 🚀 OS 커널 레벨에서 가비지 컬렉터를 강제 호출하여 RAM/VRAM 캐시를 즉시 반환하는 헬퍼 함수
+pub fn force_memory_cleanup() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let handle = -1isize;
+        let min_size = usize::MAX;
+        let max_size = usize::MAX;
+        let flags = 6u32; 
+        windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx(handle, min_size, max_size, flags);
+    }
+    #[cfg(target_os = "linux")]
+    unsafe { 
+        libc::malloc_trim(0); 
+    }
+    #[cfg(target_os = "macos")]
+    unsafe { 
+        extern "C" { fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: usize) -> usize; }
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0); 
+    }
+}
