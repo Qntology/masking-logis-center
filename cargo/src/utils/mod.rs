@@ -1,13 +1,9 @@
 pub mod img_utils;
 pub mod video_utils;
 pub mod tensor_utils;
+pub mod crypto;
 
 use candle_core::{Device, DType};
-
-pub mod crypto {
-    pub fn encrypt_data(data: &[u8]) -> anyhow::Result<Vec<u8>> { Ok(data.to_vec()) }
-    pub fn decrypt_data(data: &[u8]) -> anyhow::Result<Vec<u8>> { Ok(data.to_vec()) }
-}
 
 pub mod paths {
     pub fn get_kv_dir(_: Option<&str>) -> std::path::PathBuf {

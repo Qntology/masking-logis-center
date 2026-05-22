@@ -2239,7 +2239,7 @@ impl Qwen3_5Model {
         video_grid_thw: Option<&Tensor>,
         seqlen_offset: usize,
     ) -> Result<Tensor> {
-        let (bs, seq_len, _) = inputs_embeds.dims3()?;
+        let (bs, _seq_len, _) = inputs_embeds.dims3()?;
 
         
         // 디코딩 중에는 절대 재계산하지 않고, 저장해둔 오프셋(delta)을 유지하여 위치 연속성을 100% 보장합니다.
@@ -2324,7 +2324,7 @@ impl Qwen3_5Model {
 
         let position_ids;
         if cache_position.is_some() && seqlen_offset > 0 {
-            let (bs, _seq_len, _) = inputs_embeds.dims3()?;
+            let (bs, seq_len, _) = inputs_embeds.dims3()?;
             
             
             let delta = cache_position.unwrap().i(0)?

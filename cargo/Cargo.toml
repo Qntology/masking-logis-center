@@ -37,6 +37,7 @@ rayon = "1.10.0"
 memmap2 = "0.9.4"
 nvml-wrapper = "0.10.0"
 safetensors = "0.4.3"
+rand = "0.8.5"
 
 [features]
 default = ["cuda"]
