@@ -7,6 +7,10 @@ pub struct TokenizerModel {
 }
 
 impl TokenizerModel {
+    pub fn new(tokenizer: Tokenizer) -> Self {
+        Self { tokenizer }
+    }
+
     pub fn init<P: AsRef<Path>>(path: P) -> Result<Self> {
         let target_path = path.as_ref().join("tokenizer.json");
         
@@ -32,5 +36,15 @@ impl TokenizerModel {
 
     pub fn token_to_id(&self, token: &str) -> Option<u32> {
         self.tokenizer.token_to_id(token)
+    }
+
+    pub fn token_decode(&self, ids: Vec<u32>) -> Result<String> { 
+        self.decode(&ids, true) 
+    }
+    
+    pub fn text_encode(&self, text: String, device: &candle_core::Device) -> Result<candle_core::Tensor> {
+        let vec = self.text_encode_vec(text, false)?;
+        let len = vec.len();
+        candle_core::Tensor::from_vec(vec, (1, len), device).map_err(anyhow::Error::msg)
     }
 }

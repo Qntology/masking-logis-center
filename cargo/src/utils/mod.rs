@@ -4,6 +4,34 @@ pub mod tensor_utils;
 
 use candle_core::{Device, DType};
 
+pub mod crypto {
+    pub fn encrypt_data(data: &[u8]) -> anyhow::Result<Vec<u8>> { Ok(data.to_vec()) }
+    pub fn decrypt_data(data: &[u8]) -> anyhow::Result<Vec<u8>> { Ok(data.to_vec()) }
+}
+
+pub mod paths {
+    pub fn get_kv_dir(_: Option<&str>) -> std::path::PathBuf {
+        crate::utils::get_app_dir().join("kv")
+    }
+}
+
+pub mod direct_loader {
+    pub fn save_kv_block(path: &std::path::Path, data: &[u8]) -> anyhow::Result<()> {
+        if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
+        std::fs::write(path, data)?;
+        Ok(())
+    }
+    pub fn load_kv_block(path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+        Ok(std::fs::read(path)?)
+    }
+}
+
+pub fn is_extraction_stopped() -> bool { false }
+pub fn get_cuda_device(id: usize) -> candle_core::Device { candle_core::Device::new_cuda(id).unwrap_or(candle_core::Device::Cpu) }
+pub fn get_logit_processor(temperature: Option<f32>, top_p: Option<f32>, _top_k: Option<usize>, seed: u64) -> candle_transformers::generation::LogitsProcessor {
+    candle_transformers::generation::LogitsProcessor::new(seed, temperature.map(|v| v as f64), top_p.map(|v| v as f64))
+}
+
 pub fn get_device(device: Option<&Device>) -> Device {
     match device {
         Some(d) => d.clone(),

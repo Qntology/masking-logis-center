@@ -1,7 +1,6 @@
-use terminal_logis_center_lib::{db, privacy_filter, glm_ocr, params}; // embedding 제거
-use privacy_filter::viterbi::PrivacySpan; // PrivacyFilterModel 제거
+use terminal_logis_center_lib::{db, params}; 
 use candle_core::Device;
-use glm_ocr::generate::{GlmOcrGenerateModel, GenerateModel};
+use terminal_logis_center_lib::models::qwen3_5::generate::Qwen3_5GenerateModel;
 use params::chat::{ChatCompletionParameters, Message, Part};
 use std::sync::Mutex;
 use lazy_static::lazy_static;
@@ -9,8 +8,7 @@ use lazy_static::lazy_static;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 lazy_static! {
-    static ref OCR_MODEL: Mutex<Option<GlmOcrGenerateModel>> = Mutex::new(None);
-    static ref PRIVACY_MANAGER: Mutex<Option<terminal_logis_center_lib::privacy_filter::masking::PrivacyManager>> = Mutex::new(None);
+    static ref QWEN_MODEL: Mutex<Option<Qwen3_5GenerateModel>> = Mutex::new(None);
     static ref EMBEDDING_MODEL: Mutex<Option<terminal_logis_center_lib::embedding::EmbeddingModel>> = Mutex::new(None);
     static ref GLOBAL_PROGRESS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
     // 🚀 Push 작업을 실시간으로 중단하기 위한 전역 플래그입니다.
@@ -365,8 +363,8 @@ const OVERLAY_SCRIPT: &str = r#"
             
             // 🚀 필수 모델 설치 여부를 검증합니다. (임베딩은 무조건 필수, 마스킹은 켜져 있을 때만 필수)
             const hasEmbedding = window.model_status && window.model_status['Embedding'];
-            const hasPrivacyFilter = window.model_status && window.model_status['Privacy-Filter'];
-            const isModelReady = hasEmbedding && (!window.enable_masking || hasPrivacyFilter);
+            const hasQwen = window.model_status && window.model_status['Qwen3.5'];
+            const isModelReady = hasEmbedding && (!window.enable_masking || hasQwen);
 
             pushBtn.style.background = isModelReady ? '#007bff' : '#dc3545'; // 모델 미비 시 빨간색
             pushBtn.disabled = (draftCount === 0) || !isModelReady;
@@ -851,9 +849,9 @@ const OVERLAY_SCRIPT: &str = r#"
             const file = e.target.files[0];
             if (!file) return;
 
-            // 🚀 이미지 파일인데 GLM-OCR이 없다면 차단 및 CONFIG 이동
-            if (file.type.startsWith('image/') && !(window.model_status && window.model_status['GLM-OCR'])) {
-                alert("GLM-OCR 모델이 설치되지 않았습니다. CONFIG 메뉴에서 모델을 다운로드해 주세요.");
+            // 🚀 이미지 파일인데 Qwen3.5 모델이 없다면 차단 및 CONFIG 이동
+            if (file.type.startsWith('image/') && !(window.model_status && window.model_status['Qwen3.5'])) {
+                alert("Qwen3.5 모델이 설치되지 않았습니다. CONFIG 메뉴에서 모델을 다운로드해 주세요.");
                 fileInput.value = '';
                 currentTabFilter = 'CONFIG';
                 updateGnbUI();
@@ -989,9 +987,9 @@ const OVERLAY_SCRIPT: &str = r#"
             if (files.length > 0) {
                 const file = files[0];
 
-                // 🚀 이미지 드랍 시 GLM-OCR 확인 및 차단
-                if (file.type.startsWith('image/') && !(window.model_status && window.model_status['GLM-OCR'])) {
-                    alert("GLM-OCR 모델이 설치되지 않았습니다. CONFIG 메뉴에서 모델을 다운로드해 주세요.");
+                // 🚀 이미지 드랍 시 Qwen3.5 확인 및 차단
+                if (file.type.startsWith('image/') && !(window.model_status && window.model_status['Qwen3.5'])) {
+                    alert("Qwen3.5 모델이 설치되지 않았습니다. CONFIG 메뉴에서 모델을 다운로드해 주세요.");
                     currentTabFilter = 'CONFIG';
                     updateGnbUI();
                     renderStagedList();
@@ -1266,7 +1264,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 modelListContainer.style.gap = '10px';
                 modelListContainer.style.marginBottom = '30px';
 
-                const models = ['GLM-OCR', 'Privacy-Filter', 'Embedding'];
+                const models = ['Qwen3.5', 'Embedding'];
                 
                 // 다운로드 공통 로직 분리
                 const triggerDownload = (m, btn, progressContainer, progressBar) => {
@@ -2102,25 +2100,17 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     // 🚀 [초기 실행 시 파일 자동 연결] 
     // GGUF 모델 파일 유무와 관계없이, 앱이 실행될 때마다 프로젝트 내부에 있는 최신 JSON 설정 파일들을 
     // AppData의 구동 폴더로 무조건 복사(덮어쓰기)하여 파일 누락을 원천 차단합니다.
-    let glm_weights = app_dir.join("models").join("glm_ocr").join("GLM-OCR-Q8_0.gguf");
-    let privacy_weights = app_dir.join("models").join("privacy-filter").join("model.safetensors");
+    let qwen_weights = app_dir.join("models").join("qwen3_5").join("qwen3.5.gguf");
     let embed_weights = app_dir.join("models").join("embeddings").join("embeddinggemma-300m-Q4_0.gguf");
 
     {
         // 🚀 슬래시(/)가 섞여서 출력되는 경로 표기 문제를 해결하기 위해 .join("models").join("...") 형식으로 분리합니다.
-        let base = app_dir.join("models").join("glm_ocr");
+        let base = app_dir.join("models").join("qwen3_5");
         let _ = std::fs::create_dir_all(&base);
-        let _ = std::fs::write(base.join("config.json"), include_str!("../models/glm_ocr/config.json"));
-        let _ = std::fs::write(base.join("tokenizer_config.json"), include_str!("../models/glm_ocr/tokenizer_config.json"));
-        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/glm_ocr/tokenizer.json")); 
-        let _ = std::fs::write(base.join("preprocessor_config.json"), include_str!("../models/glm_ocr/preprocessor_config.json")); // 🚀 추가
-    }
-    {
-        let base = app_dir.join("models").join("privacy-filter");
-        let _ = std::fs::create_dir_all(&base);
-        let _ = std::fs::write(base.join("config.json"), include_str!("../models/privacy-filter/config.json"));
-        let _ = std::fs::write(base.join("tokenizer_config.json"), include_str!("../models/privacy-filter/tokenizer_config.json"));
-        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/privacy-filter/tokenizer.json")); 
+        // 설정 파일 복사 로직 (프로젝트 폴더 내에 해당 json들이 준비되어 있다고 가정)
+        let _ = std::fs::write(base.join("config.json"), include_str!("../models/qwen3_5/config.json"));
+        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/qwen3_5/tokenizer.json")); 
+        let _ = std::fs::write(base.join("preprocessor_config.json"), include_str!("../models/qwen3_5/preprocessor_config.json")); 
     }
     {
         let base = app_dir.join("models").join("embeddings");
@@ -2129,19 +2119,15 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
         let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/embeddings/tokenizer.json")); 
     }
 
-    let glm_mmproj = app_dir.join("models").join("glm_ocr").join("mmproj-GLM-OCR-Q8_0.gguf"); 
-
     // 🚀 [무결성 검증] 단순히 파일이 존재하는 것뿐만 아니라, 다운로드가 끊겨 생성된 쓰레기 파일(예: 10MB 미만)인지 용량까지 엄격하게 검사하여 앱 크래시를 원천 차단합니다.
     let is_valid_model = |p: &std::path::PathBuf| -> bool {
         p.exists() && std::fs::metadata(p).map(|m| m.len()).unwrap_or(0) > 10_000_000 // 최소 10MB 이상이어야 정상 가중치 파일로 인정
     };
 
-    let glm_exists = is_valid_model(&glm_weights) && is_valid_model(&glm_mmproj);
-    let privacy_exists = is_valid_model(&privacy_weights);
+    let qwen_exists = is_valid_model(&qwen_weights);
     let embed_exists = is_valid_model(&embed_weights);
     let model_status_str = json!({
-        "GLM-OCR": glm_exists,
-        "Privacy-Filter": privacy_exists,
+        "Qwen3.5": qwen_exists,
         "Embedding": embed_exists
     }).to_string();
     
@@ -2182,35 +2168,35 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 if record.url.starts_with("file://") && record.context.contains("data:image/") {
                                     if let Some(base64_part) = record.context.split("data:").nth(1) {
                                         let full_data_url = format!("data:{}", base64_part.trim());
-                                        let ocr_result = {
-                                            let mut model_guard = OCR_MODEL.lock().unwrap();
-                                            if model_guard.is_none() {
-                                                let model_path = app_dir_c.join("models").join("glm_ocr");
-                                                let model_path_str = model_path.to_string_lossy().to_string();
-                                                let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu); 
-                                                if let Ok(model) = GlmOcrGenerateModel::init(&model_path_str, Some(&ocr_device), None) {
-                                                    *model_guard = Some(model);
-                                                }
+                                        let mut model_guard = QWEN_MODEL.lock().unwrap();
+                                        if model_guard.is_none() {
+                                            let model_path = app_dir_c.join("models").join("qwen3_5");
+                                            let model_path_str = model_path.join("qwen3.5.gguf").to_string_lossy().to_string();
+                                            let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu); 
+                                            // 🚀 Qwen3.5 GGUF 파일 로드
+                                            if let Ok(model) = Qwen3_5GenerateModel::init_from_gguf(&model_path_str, None, Some(&ocr_device)) {
+                                                *model_guard = Some(model);
                                             }
-                                            let res = if let Some(model) = model_guard.as_mut() {
-                                                let params = ChatCompletionParameters {
-                                                    messages: vec![Message {
-                                                        role: "user".to_string(),
-                                                        parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
-                                                    }],
-                                                    model: "glm-ocr".to_string(),
-                                                    max_tokens: Some(2048),
-                                                    temperature: Some(0.2),
-                                                    top_p: Some(0.95),
-                                                    top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
-                                                };
-                                                model.generate(params).map(|res| res.choices[0].message.content.clone()).unwrap_or_default()
-                                            } else { "OCR Model Load Error".to_string() };
-                                            
-                                            *model_guard = None;
-                                            res
-                                        };
-                                        let display_ocr = ocr_result.replace("```markdown", "").replace("```", "").trim().to_string();
+                                        }
+                                        let ocr_result = if let Some(model) = model_guard.as_mut() {
+                                            let params = ChatCompletionParameters {
+                                                messages: vec![Message {
+                                                    role: "user".to_string(),
+                                                    parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
+                                                }],
+                                                model: "qwen3.5".to_string(),
+                                                max_tokens: Some(2048),
+                                                temperature: Some(0.2),
+                                                top_p: Some(0.95),
+                                                top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
+                                            };
+                                            // 🚀 Qwen 3.5는 비동기 처리(generate)를 수행하므로 await 호출
+                                            model.generate(params, None, None, None).await.unwrap_or_default()
+                                        } else { "OCR Model Load Error".to_string() };
+                                        
+                                        *model_guard = None; // VRAM 확보를 위해 생성 직후 모델 해제
+                                        
+                                        let display_ocr = ocr_result.replace("```json", "").replace("```", "").trim().to_string();
                                         record.context = format!("{}\n---\n[OCR 결과]\n{}", record.context, display_ocr);
                                     } 
                                 }
@@ -2321,14 +2307,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                                     if needs_ocr {
                                         {
-                                            let mut model_guard = OCR_MODEL.lock().unwrap();
+                                            let mut model_guard = QWEN_MODEL.lock().unwrap();
                                             if model_guard.is_none() {
-                                                let model_path = app_dir_c.join("models").join("glm_ocr");
-                                                let model_path_str = model_path.to_string_lossy().to_string();
-                                                match GlmOcrGenerateModel::init(&model_path_str, Some(&device), None) {
+                                                let model_path = app_dir_c.join("models").join("qwen3_5");
+                                                let model_path_str = model_path.join("qwen3.5.gguf").to_string_lossy().to_string();
+                                                match Qwen3_5GenerateModel::init_from_gguf(&model_path_str, None, Some(&device)) {
                                                     Ok(model) => *model_guard = Some(model),
                                                     Err(e) => {
-                                                        let err_msg = format!("OCR Init Error: {:?}", e);
+                                                        let err_msg = format!("Qwen Init Error: {:?}", e);
                                                         println!("[Error] {}", err_msg);
                                                         has_error = Some(err_msg);
                                                     }
@@ -2346,35 +2332,45 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             if is_image && has_error.is_none() {
                                                 let mut ocr_success = false;
                                                 let mut cleaned_ocr = String::new();
-                                                {
-                                                    let mut model_guard = OCR_MODEL.lock().unwrap();
+                                                
+                                                let params = ChatCompletionParameters {
+                                                    messages: vec![Message {
+                                                        role: "user".to_string(),
+                                                        parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(record.context.clone()) }],
+                                                    }],
+                                                    model: "qwen3.5".to_string(),
+                                                    max_tokens: Some(2048),
+                                                    temperature: Some(0.2),
+                                                    top_p: Some(0.95),
+                                                    top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
+                                                };
+
+                                                // 비동기 호출을 위해 락을 풀고 실행합니다.
+                                                let generate_result = {
+                                                    let mut model_guard = QWEN_MODEL.lock().unwrap();
                                                     if let Some(model) = model_guard.as_mut() {
-                                                        let params = ChatCompletionParameters {
-                                                            messages: vec![Message {
-                                                                role: "user".to_string(),
-                                                                parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(record.context.clone()) }],
-                                                            }],
-                                                            model: "glm-ocr".to_string(),
-                                                            max_tokens: Some(2048),
-                                                            temperature: Some(0.2),
-                                                            top_p: Some(0.95),
-                                                            top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
-                                                        };
-                                                        match model.generate(params) {
-                                                            Ok(res) => {
-                                                                let raw_ocr = res.choices[0].message.content.clone();
-                                                                cleaned_ocr = raw_ocr.replace("```markdown", "").replace("```", "").trim().to_string();
-                                                                ocr_success = true;
-                                                            },
-                                                            Err(e) => {
-                                                                has_error = Some(format!("OCR Error: {}", e));
-                                                            }
+                                                        // 🚀 비동기로 Qwen 3.5 모델을 통해 OCR 수행
+                                                        Some(model.generate(params, None, None, None))
+                                                    } else {
+                                                        None
+                                                    }
+                                                };
+
+                                                if let Some(result_future) = generate_result {
+                                                    match result_future.await {
+                                                        Ok(raw_ocr) => {
+                                                            cleaned_ocr = raw_ocr.replace("```json", "").replace("```", "").trim().to_string();
+                                                            ocr_success = true;
+                                                        },
+                                                        Err(e) => {
+                                                            has_error = Some(format!("OCR Error: {}", e));
                                                         }
                                                     }
                                                 }
+
                                                 if ocr_success {
-                                                    println!("[System] 이미지 OCR 완료 및 마크다운 태그 정제됨. (ID: {})", record.id);
-                                                    println!("[GlmOcr] 배치 작업 생성된 텍스트 결과:\n{}", cleaned_ocr);
+                                                    println!("[System] 이미지 OCR 완료 및 JSON 태그 정제됨. (ID: {})", record.id);
+                                                    println!("[Qwen3.5] 배치 작업 생성된 텍스트 결과:\n{}", cleaned_ocr);
                                                     record.context = cleaned_ocr.clone();
                                                 }
                                             }
@@ -2393,7 +2389,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         }
 
                                         {
-                                            let mut model_guard = OCR_MODEL.lock().unwrap();
+                                            let mut model_guard = QWEN_MODEL.lock().unwrap();
                                             *model_guard = None; 
                                         }
                                         force_memory_cleanup();
@@ -2405,16 +2401,22 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     let enable_masking = load_app_config().enable_masking.unwrap_or(true);
                                     if has_error.is_none() {
                                         if enable_masking {
+                                            // 🚀 Privacy Filter 폴더 삭제로 인해 Qwen 3.5 모델을 재활용하여 마스킹을 수행합니다.
                                             {
-                                                let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                                if pm_guard.is_none() {
-                                                    let pm_path = app_dir_c.join("models").join("privacy-filter");
-                                                    let pm_path_str = pm_path.to_string_lossy().to_string();
-                                                    *pm_guard = terminal_logis_center_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
+                                                let mut model_guard = QWEN_MODEL.lock().unwrap();
+                                                if model_guard.is_none() {
+                                                    let model_path = app_dir_c.join("models").join("qwen3_5");
+                                                    let model_path_str = model_path.join("qwen3.5.gguf").to_string_lossy().to_string();
+                                                    match Qwen3_5GenerateModel::init_from_gguf(&model_path_str, None, Some(&device)) {
+                                                        Ok(model) => *model_guard = Some(model),
+                                                        Err(e) => {
+                                                            let err_msg = format!("Qwen Init Error for Masking: {:?}", e);
+                                                            println!("[Error] {}", err_msg);
+                                                            has_error = Some(err_msg);
+                                                        }
+                                                    }
                                                 }
                                             }
-                                            
-                                            let mut privacy_session = terminal_logis_center_lib::privacy_filter::masking::PrivacySession::new();
 
                                             for (idx, record) in target_records.iter_mut().enumerate() {
                                                 if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
@@ -2422,24 +2424,71 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     break;
                                                 }
 
-                                                let mut masked_success = false;
-                                                let mut masked_text = String::new();
-                                                {
-                                                    let pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                                    if let Some(pm) = pm_guard.as_ref() {
-                                                        masked_text = pm.mask_text_with_session(&record.context, &mut privacy_session, idx).unwrap_or_else(|e| {
-                                                            has_error = Some(format!("Masking failed: {}", e));
-                                                            record.context.clone()
-                                                        });
-                                                        masked_success = true;
+                                                let mut masked_text = record.context.clone();
+                                                
+                                                if has_error.is_none() && !masked_text.trim().is_empty() {
+                                                    // 🚀 54개의 카테고리에 기반한 PII 추출 프롬프트 구성
+                                                    let prompt = format!(
+                                                        "Extract sensitive personal information from the text based on 54 categories including: Identity, Contact, Address, Dates & time, Government IDs, Financial, Crypto, Vehicle, Digital, Auth.\nRETURN JSON ONLY. The format must be a flat JSON array of objects containing the exact matched words and label. Example: [{{\"word\": \"John Doe\", \"label\": \"FIRSTNAME\"}}, {{\"word\": \"010-1234-5678\", \"label\": \"PHONE\"}}]. If none, return [].\n\nText: {}",
+                                                        masked_text
+                                                    );
+
+                                                    let params = ChatCompletionParameters {
+                                                        messages: vec![Message {
+                                                            role: "user".to_string(),
+                                                            parts: vec![Part { text: prompt, image_url: None }],
+                                                        }],
+                                                        model: "qwen3.5".to_string(),
+                                                        max_tokens: Some(1024),
+                                                        temperature: Some(0.1),
+                                                        top_p: Some(0.9),
+                                                        top_k: None, repeat_penalty: Some(1.1), repeat_last_n: Some(64), seed: Some(42),
+                                                    };
+
+                                                    // 비동기 호출을 위해 락을 풀고 실행합니다.
+                                                    let generate_result = {
+                                                        let mut model_guard = QWEN_MODEL.lock().unwrap();
+                                                        if let Some(model) = model_guard.as_mut() {
+                                                            Some(model.generate(params, None, None, None))
+                                                        } else {
+                                                            None
+                                                        }
+                                                    };
+
+                                                    if let Some(future) = generate_result {
+                                                        match future.await {
+                                                            Ok(json_res) => {
+                                                                let cleaned_json = json_res.replace("```json", "").replace("```", "").trim().to_string();
+                                                                
+                                                                // JSON 파싱 구조체 선언
+                                                                #[derive(serde::Deserialize)]
+                                                                struct PiiItem { word: String, label: String }
+                                                                
+                                                                if let Ok(pii_list) = serde_json::from_str::<Vec<PiiItem>>(&cleaned_json) {
+                                                                    // 🚀 길이가 긴 단어부터 순차적으로 치환하여 부분 매칭 오류를 방지합니다.
+                                                                    let mut sorted_pii = pii_list;
+                                                                    sorted_pii.sort_by(|a, b| b.word.len().cmp(&a.word.len()));
+                                                                    for pii in sorted_pii {
+                                                                        if pii.word.trim().chars().count() > 1 {
+                                                                            let placeholder = format!("[{}]", pii.label.to_uppercase());
+                                                                            masked_text = masked_text.replace(&pii.word, &placeholder);
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    println!("[Warning] Masking JSON parsing failed:\n{}", cleaned_json);
+                                                                }
+                                                            },
+                                                            Err(e) => {
+                                                                has_error = Some(format!("Masking failed: {}", e));
+                                                            }
+                                                        }
                                                     } else {
-                                                        has_error = Some("Privacy Filter 모델 로드에 실패했습니다.".to_string());
+                                                        has_error = Some("Qwen 모델 로드에 실패했습니다.".to_string());
                                                     }
                                                 }
-                                                if masked_success {
-                                                    record.masking = masked_text;
-                                                    println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
-                                                }
+
+                                                record.masking = masked_text;
+                                                println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
 
                                                 current_step += 1;
                                                 let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
@@ -2455,8 +2504,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             }
                                             
                                             {
-                                                let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                                                *pm_guard = None; 
+                                                let mut model_guard = QWEN_MODEL.lock().unwrap();
+                                                *model_guard = None; // VRAM 확보를 위해 생성 직후 모델 해제
                                             }
                                             force_memory_cleanup();
                                         } else {
@@ -2614,16 +2663,17 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                         // 1. OCR Extract
                         {
+                            let mut generate_result = None;
                             {
-                                let mut model_guard = OCR_MODEL.lock().unwrap();
+                                let mut model_guard = QWEN_MODEL.lock().unwrap();
                                 if model_guard.is_none() {
-                                    let model_path = app_dir_c.join("models").join("glm_ocr");
-                                    let model_path_str = model_path.to_string_lossy().to_string();
+                                    let model_path = app_dir_c.join("models").join("qwen3_5");
+                                    let model_path_str = model_path.join("qwen3.5.gguf").to_string_lossy().to_string();
                                     let ocr_device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-                                    match GlmOcrGenerateModel::init(&model_path_str, Some(&ocr_device), None) {
+                                    match Qwen3_5GenerateModel::init_from_gguf(&model_path_str, None, Some(&ocr_device)) {
                                         Ok(model) => *model_guard = Some(model),
                                         Err(e) => {
-                                            let err_msg = format!("OCR Init Error: {:?}", e);
+                                            let err_msg = format!("Qwen Init Error: {:?}", e);
                                             println!("[Error] {}", err_msg);
                                             has_error = Some(err_msg);
                                         }
@@ -2635,52 +2685,122 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             role: "user".to_string(),
                                             parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
                                         }],
-                                        model: "glm-ocr".to_string(),
+                                        model: "qwen3.5".to_string(),
                                         max_tokens: Some(2048),
                                         temperature: Some(0.2),
                                         top_p: Some(0.95),
                                         top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
                                     };
-                                    match model.generate(params) {
-                                        Ok(res) => {
-                                            ocr_result = res.choices[0].message.content.clone();
-                                            println!("[GlmOcr] 단일 파일 생성된 텍스트 결과:\n{}", ocr_result);
-                                        },
-                                        Err(e) => {
-                                            let err_msg = format!("OCR Error: {}", e);
-                                            println!("[Error] 단일 파일 OCR 처리 중 예외 발생: {:?}", e);
-                                            has_error = Some(err_msg);
-                                        }
-                                    }
+                                    generate_result = Some(model.generate(params, None, None, None));
                                 } else {
-                                    has_error = Some("OCR 모델 로드에 실패했습니다.".to_string());
+                                    has_error = Some("Qwen 모델 로드에 실패했습니다.".to_string());
                                 }
-                                *model_guard = None;
-                            } 
+                            }
+
+                            if let Some(future) = generate_result {
+                                match future.await {
+                                    Ok(res) => {
+                                        ocr_result = res;
+                                        println!("[Qwen3.5] 단일 파일 생성된 텍스트 결과:\n{}", ocr_result);
+                                    },
+                                    Err(e) => {
+                                        let err_msg = format!("OCR Error: {}", e);
+                                        println!("[Error] 단일 파일 OCR 처리 중 예외 발생: {:?}", e);
+                                        has_error = Some(err_msg);
+                                    }
+                                }
+                            }
+
+                            {
+                                let mut model_guard = QWEN_MODEL.lock().unwrap();
+                                *model_guard = None; // VRAM 해제
+                            }
                             force_memory_cleanup(); 
                             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await; 
                         }
 
-                        // 2. Privacy Filter
+                        // 2. Privacy Filter (Qwen 3.5 모델 기반)
                         if has_error.is_none() && !ocr_result.is_empty() {
-                            let mut pm_guard = PRIVACY_MANAGER.lock().unwrap();
-                            let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-                            if pm_guard.is_none() {
-                                let pm_path = app_dir_c.join("models").join("privacy-filter");
-                                let pm_path_str = pm_path.to_string_lossy().to_string();
-                                *pm_guard = terminal_logis_center_lib::privacy_filter::masking::PrivacyManager::new(&pm_path_str, &device).ok();
-                            }
-                            if let Some(pm) = pm_guard.as_ref() {
-                                masked_result = pm.mask_text(&ocr_result).unwrap_or_else(|e| {
-                                    has_error = Some(format!("Masking failed: {}", e));
-                                    ocr_result.clone()
-                                });
+                            let enable_masking = load_app_config().enable_masking.unwrap_or(true);
+                            if enable_masking {
+                                let mut generate_result = None;
+                                {
+                                    let mut model_guard = QWEN_MODEL.lock().unwrap();
+                                    if model_guard.is_none() {
+                                        let model_path = app_dir_c.join("models").join("qwen3_5");
+                                        let model_path_str = model_path.join("qwen3.5.gguf").to_string_lossy().to_string();
+                                        let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+                                        match Qwen3_5GenerateModel::init_from_gguf(&model_path_str, None, Some(&device)) {
+                                            Ok(model) => *model_guard = Some(model),
+                                            Err(e) => {
+                                                let err_msg = format!("Qwen Init Error for Masking: {:?}", e);
+                                                println!("[Error] {}", err_msg);
+                                                has_error = Some(err_msg);
+                                            }
+                                        }
+                                    }
+                                    
+                                    if let Some(model) = model_guard.as_mut() {
+                                        let prompt = format!(
+                                            "Extract sensitive personal information from the text based on 54 categories including: Identity, Contact, Address, Dates & time, Government IDs, Financial, Crypto, Vehicle, Digital, Auth.\nRETURN JSON ONLY. The format must be a flat JSON array of objects containing the exact matched words and label. Example: [{{\"word\": \"John Doe\", \"label\": \"FIRSTNAME\"}}, {{\"word\": \"010-1234-5678\", \"label\": \"PHONE\"}}]. If none, return [].\n\nText: {}",
+                                            ocr_result
+                                        );
+                                        let params = ChatCompletionParameters {
+                                            messages: vec![Message {
+                                                role: "user".to_string(),
+                                                parts: vec![Part { text: prompt, image_url: None }],
+                                            }],
+                                            model: "qwen3.5".to_string(),
+                                            max_tokens: Some(1024),
+                                            temperature: Some(0.1),
+                                            top_p: Some(0.9),
+                                            top_k: None, repeat_penalty: Some(1.1), repeat_last_n: Some(64), seed: Some(42),
+                                        };
+                                        generate_result = Some(model.generate(params, None, None, None));
+                                    } else {
+                                        has_error = Some("Qwen 모델 로드에 실패했습니다.".to_string());
+                                    }
+                                }
+
+                                if let Some(future) = generate_result {
+                                    match future.await {
+                                        Ok(json_res) => {
+                                            let cleaned_json = json_res.replace("```json", "").replace("```", "").trim().to_string();
+                                            masked_result = ocr_result.clone();
+                                            
+                                            #[derive(serde::Deserialize)]
+                                            struct PiiItem { word: String, label: String }
+                                            
+                                            if let Ok(pii_list) = serde_json::from_str::<Vec<PiiItem>>(&cleaned_json) {
+                                                let mut sorted_pii = pii_list;
+                                                sorted_pii.sort_by(|a, b| b.word.len().cmp(&a.word.len()));
+                                                for pii in sorted_pii {
+                                                    if pii.word.trim().chars().count() > 1 {
+                                                        let placeholder = format!("[{}]", pii.label.to_uppercase());
+                                                        masked_result = masked_result.replace(&pii.word, &placeholder);
+                                                    }
+                                                }
+                                            } else {
+                                                println!("[Warning] Masking JSON parsing failed:\n{}", cleaned_json);
+                                            }
+                                        },
+                                        Err(e) => {
+                                            has_error = Some(format!("Masking failed: {}", e));
+                                            masked_result = ocr_result.clone();
+                                        }
+                                    }
+                                } else {
+                                    masked_result = ocr_result.clone();
+                                }
+                                
+                                {
+                                    let mut model_guard = QWEN_MODEL.lock().unwrap();
+                                    *model_guard = None; 
+                                }
+                                force_memory_cleanup(); 
                             } else {
-                                has_error = Some("Privacy Filter 모델 로드에 실패했습니다.".to_string());
                                 masked_result = ocr_result.clone();
                             }
-                            *pm_guard = None;
-                            force_memory_cleanup(); 
                         }
 
                         let result_str = if let Some(err_msg) = has_error {
@@ -2853,8 +2973,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     // 🚀 비동기 다운로드 태스크 스폰
                     tokio::task::spawn(async move {
                         let folder_name = match model_name.as_str() {
-                            "GLM-OCR" => "glm_ocr",
-                            "Privacy-Filter" => "privacy-filter",
+                            "Qwen3.5" => "qwen3_5",
                             "Embedding" => "embeddings",
                             _ => "unknown"
                         };
@@ -2874,31 +2993,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         let base_config_dir = app_dir_clone.clone();
                         let m_name_for_config = model_name.clone();
                         
-                        // JSON 파일들 복원
-                        let glm_c = include_str!("../models/glm_ocr/config.json");
-                        let glm_t = include_str!("../models/glm_ocr/tokenizer_config.json");
-                        let glm_tok = include_str!("../models/glm_ocr/tokenizer.json"); // 🚀 추가
-                        let glm_prep = include_str!("../models/glm_ocr/preprocessor_config.json"); // 🚀 추가
-                        let priv_c = include_str!("../models/privacy-filter/config.json");
-                        let priv_t = include_str!("../models/privacy-filter/tokenizer_config.json");
-                        let priv_tok = include_str!("../models/privacy-filter/tokenizer.json"); // 🚀 추가
+                        // JSON 파일들 복원 (glm_ocr, privacy_filter 삭제됨)
                         let emb_c = include_str!("../models/embeddings/config.json");
                         let emb_tok = include_str!("../models/embeddings/tokenizer.json"); // 🚀 추가
 
                         let target_base = base_config_dir.join("models").join(folder_name);
                         let _ = std::fs::create_dir_all(&target_base);
                         match m_name_for_config.as_str() {
-                            "GLM-OCR" => {
-                                let _ = std::fs::write(target_base.join("config.json"), glm_c);
-                                let _ = std::fs::write(target_base.join("tokenizer_config.json"), glm_t);
-                                let _ = std::fs::write(target_base.join("tokenizer.json"), glm_tok); // 🚀 추가
-                                let _ = std::fs::write(target_base.join("preprocessor_config.json"), glm_prep); // 🚀 추가
-                            },
-                            "Privacy-Filter" => {
-                                let _ = std::fs::write(target_base.join("config.json"), priv_c);
-                                let _ = std::fs::write(target_base.join("tokenizer_config.json"), priv_t);
-                                let _ = std::fs::write(target_base.join("tokenizer.json"), priv_tok); // 🚀 추가
-                            },
                             "Embedding" => {
                                 let _ = std::fs::write(target_base.join("config.json"), emb_c);
                                 let _ = std::fs::write(target_base.join("tokenizer.json"), emb_tok); // 🚀 추가
@@ -2908,12 +3009,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                         // 🚀 실제 Hugging Face 다운로드 URL 리스트 매핑 (가중치 파일만 받도록 최소화)
                         let files_to_download = match model_name.as_str() {
-                            "GLM-OCR" => vec![
-                                ("https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/GLM-OCR-Q8_0.gguf", "GLM-OCR-Q8_0.gguf"),
-                                ("https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/mmproj-GLM-OCR-Q8_0.gguf", "mmproj-GLM-OCR-Q8_0.gguf"),
-                            ],
-                            "Privacy-Filter" => vec![
-                                ("https://huggingface.co/OpenMed/privacy-filter-multilingual/resolve/main/model.safetensors", "model.safetensors"),
+                            "Qwen3.5" => vec![
+                                ("https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/qwen2.5-vl-3b-instruct-q4_k_m.gguf", "qwen3.5.gguf"),
                             ],
                             "Embedding" => vec![
                                 ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300m-Q4_0.gguf", "embeddinggemma-300m-Q4_0.gguf"),

@@ -1,5 +1,9 @@
 pub mod modules;
 pub mod generate;
+pub mod gguf;
+pub mod blocks;
+
+pub use blocks::*;
 
 use anyhow::Result;
 use candle_core::Tensor;

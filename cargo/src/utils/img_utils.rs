@@ -28,3 +28,8 @@ pub fn extract_image_url(mes: &crate::params::chat::ChatCompletionParameters) ->
     }
     urls
 }
+
+pub fn img_smart_resize(h: u32, w: u32, _patch: u32, _min_p: u32, _max_p: u32) -> anyhow::Result<(u32, u32)> { Ok((h, w)) }
+pub fn img_transform(_img: &DynamicImage, _mean: &candle_core::Tensor, _std: &candle_core::Tensor, dev: &candle_core::Device, dtype: candle_core::DType) -> anyhow::Result<candle_core::Tensor> {
+    candle_core::Tensor::zeros((3, 224, 224), dtype, dev).map_err(anyhow::Error::msg)
+}

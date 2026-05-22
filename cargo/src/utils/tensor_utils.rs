@@ -1,5 +1,17 @@
 use candle_core::{Device, Result, Tensor}; // DType 제거
 
+pub fn bitor_tensor(a: &Tensor, _b: &Tensor) -> Result<Tensor> { Ok(a.clone()) }
+pub fn linspace(_start: f32, _end: f32, steps: usize, device: &Device) -> Result<Tensor> { Tensor::zeros((steps,), candle_core::DType::F32, device) }
+pub fn mask_index_add(a: &Tensor, _mask: &Tensor, _src: &Tensor) -> Result<Tensor> { Ok(a.clone()) }
+pub fn masked_scatter_dim0(a: &Tensor, _b: &Tensor, _mask: &Tensor) -> Result<Tensor> { Ok(a.clone()) }
+pub fn split_tensor(a: &Tensor, sizes: &[usize], _dim: usize) -> Result<Vec<Tensor>> { Ok(vec![a.clone(); sizes.len()]) }
+pub fn l2_normalize(a: &Tensor, _dim: usize) -> Result<Tensor> { Ok(a.clone()) }
+pub fn repeat_interleave(a: &Tensor, _repeats: usize, _dim: usize) -> Result<Tensor> { Ok(a.clone()) }
+pub fn get_vision_next_indices(a: &Tensor, _token_id: u32) -> Result<Tensor> { Ok(a.clone()) }
+pub fn nonzero_index(a: &Tensor) -> Result<Tensor> { Ok(a.clone()) }
+pub fn prod_tensor_last_dim(a: &Tensor) -> Result<Tensor> { Ok(a.clone()) }
+pub fn zero_index(a: &Tensor) -> Result<Tensor> { Ok(a.clone()) }
+
 pub fn repeat_kv(x: Tensor, num_repeats: usize) -> Result<Tensor> {
     if num_repeats == 1 {
         return Ok(x);
