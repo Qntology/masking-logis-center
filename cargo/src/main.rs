@@ -107,8 +107,8 @@ fn load_app_config() -> AppConfig {
 const OVERLAY_SCRIPT: &str = r#"
 (function() {
     if (window.self !== window.top) return;
-    if (window.geminiSidebarLoaded) return;
-    window.geminiSidebarLoaded = true;
+    if (window.SidebarLoaded) return;
+    window.SidebarLoaded = true;
 
     async function generatePageId(url) {
         const msgUint8 = new TextEncoder().encode(url);
@@ -122,14 +122,14 @@ const OVERLAY_SCRIPT: &str = r#"
     }
 
     function initUI() {
-        if (document.getElementById('gemini-agent-host')) return;
+        if (document.getElementById('terminal-logis-center')) return;
         if (!document.body) {
             window.requestAnimationFrame(initUI);
             return;
         }
 
         const host = document.createElement('div');
-        host.id = 'gemini-agent-host';
+        host.id = 'terminal-logis-center';
         try {
             document.body.appendChild(host);
         } catch (e) {
@@ -2263,6 +2263,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     println!("[System] 동기화: 순수 텍스트 감지 (평탄화 건너뜀).");
                                 }
 
+                                tokio::task::yield_now().await; // 🚀 추가: 저장 전 스레드 양보
                                 let updated = record.clone();
                                 db::save_records(vec![record], None).await.map(|_| json!({"type":"sync_success","payload":updated}).to_string()).unwrap_or_else(|e| e.to_string())
                             },
@@ -2279,7 +2280,16 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     });
                     json!({"type": "sync_started"}).to_string()
                 } else if payload == "fetch_drafts" {
-                    db::fetch_drafts().await.map(|d| json!({"type":"drafts_loaded","payload":d}).to_string()).unwrap_or_else(|e| e.to_string())
+                    // 🚀 [Fix] DB 조회 작업도 백그라운드 태스크로 분리하여 탭 프리징과 블로킹을 방지합니다.
+                    let browser_c = _browser_clone.clone();
+                    tokio::task::spawn(async move {
+                        let res_str = db::fetch_drafts().await.map(|d| json!({"type":"drafts_loaded","payload":d}).to_string()).unwrap_or_else(|e| e.to_string());
+                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(res_str));
+                        if let Ok(pages) = browser_c.pages().await {
+                            for p in pages { let _ = p.evaluate(script.clone()).await; }
+                        }
+                    });
+                    json!({"type": "fetch_started"}).to_string()
                 } else if payload.starts_with("delete_drafts:") {
                     let data = &payload["delete_drafts:".len()..];
                     if let Ok(ids) = serde_json::from_str::<Vec<String>>(data) {
@@ -2344,6 +2354,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 println!("[System] 웹페이지 순수 텍스트 유지됨. (ID: {})", record.id);
                                             }
                                         }
+                                        tokio::task::yield_now().await; // 🚀 추가: CPU 점유율을 양보하여 새 탭의 이벤트가 처리되게 합니다.
                                     }
 
                                     if needs_ocr {
@@ -2414,6 +2425,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             if let Ok(pages) = browser_c.pages().await {
                                                 for p in pages { let _ = p.evaluate(script.clone()).await; }
                                             }
+                                            tokio::task::yield_now().await; // 🚀 추가
                                         }
 
                                         {
@@ -2474,6 +2486,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 if let Ok(pages) = browser_c.pages().await {
                                                     for p in pages { let _ = p.evaluate(script.clone()).await; }
                                                 }
+                                                tokio::task::yield_now().await; // 🚀 추가
                                             }
                                             
                                             {
@@ -2547,6 +2560,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 if let Ok(pages) = browser_c.pages().await {
                                                     for p in pages { let _ = p.evaluate(script.clone()).await; }
                                                 }
+                                                tokio::task::yield_now().await; // 🚀 추가
                                             }
                                             
                                             {
@@ -2584,6 +2598,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 if let Ok(pages) = browser_c.pages().await {
                                                     for p in pages { let _ = p.evaluate(script.clone()).await; }
                                                 }
+                                                tokio::task::yield_now().await; // 🚀 추가
                                             }
                                         }
                                     }
@@ -2768,11 +2783,19 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                 } else if payload.starts_with("gemini_chat:") {
                     "[System] Gemini 서비스 비활성화됨".to_string()
                 } else if payload == "check_progress" {
-                    if let Some(progress) = GLOBAL_PROGRESS.lock().unwrap().clone() {
-                        json!({"type": "push_progress", "payload": progress}).to_string()
-                    } else {
-                        json!({"type": "push_idle"}).to_string()
-                    }
+                    let browser_c = _browser_clone.clone();
+                    tokio::task::spawn(async move {
+                        let res_str = if let Some(progress) = GLOBAL_PROGRESS.lock().unwrap().clone() {
+                            json!({"type": "push_progress", "payload": progress}).to_string()
+                        } else {
+                            json!({"type": "push_idle"}).to_string()
+                        };
+                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(res_str));
+                        if let Ok(pages) = browser_c.pages().await {
+                            for p in pages { let _ = p.evaluate(script.clone()).await; }
+                        }
+                    });
+                    json!({"type": "check_started"}).to_string()
                 } else if payload == "reset_all_data" {
                     if let Ok(_) = db::reset_all_records().await {
                         json!({"type": "reset_success", "message": "모든 데이터가 성공적으로 초기화되었습니다."}).to_string()
@@ -2842,12 +2865,21 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     let _ = std::fs::write(&prompt_path, serde_json::to_string(&prompts).unwrap_or_default());
                     json!({"type": "prompts_loaded", "payload": prompts}).to_string()
                 } else if payload == "fetch_prompts" {
-                    let prompt_path = app_dir.join("prompts.json");
-                    let prompts: Vec<String> = std::fs::read_to_string(&prompt_path)
-                        .ok()
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .unwrap_or_default();
-                    json!({"type": "prompts_loaded", "payload": prompts}).to_string()
+                    let browser_c = _browser_clone.clone();
+                    let app_dir_c = app_dir.clone();
+                    tokio::task::spawn(async move {
+                        let prompt_path = app_dir_c.join("prompts.json");
+                        let prompts: Vec<String> = std::fs::read_to_string(&prompt_path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
+                        let res_str = json!({"type": "prompts_loaded", "payload": prompts}).to_string();
+                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(res_str));
+                        if let Ok(pages) = browser_c.pages().await {
+                            for p in pages { let _ = p.evaluate(script.clone()).await; }
+                        }
+                    });
+                    json!({"type": "fetch_started"}).to_string()
                 } else if payload.starts_with("download_model:") {
                     let model_name = payload["download_model:".len()..].to_string();
                     let page_c = page_clone.clone();

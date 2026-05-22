@@ -49,11 +49,11 @@ pub fn extract_user_text(mes: &crate::params::chat::ChatCompletionParameters) ->
 
 pub fn get_app_dir() -> std::path::PathBuf {
     if let Some(mut path) = dirs::data_local_dir() {
-        path.push("gemini-gui");
+        path.push("terminal-logis");
         let _ = std::fs::create_dir_all(&path);
         path
     } else {
-        let path = std::path::PathBuf::from("gemini-gui-data");
+        let path = std::path::PathBuf::from("terminal-logis-data");
         let _ = std::fs::create_dir_all(&path);
         path
     }
