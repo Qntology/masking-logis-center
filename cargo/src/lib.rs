@@ -11,7 +11,7 @@ pub mod utils;
 pub mod models;
 pub mod tokenizer;
 pub mod position_embed;
-pub mod params;
+pub mod openai_types;
 
 pub mod chat_template {
     use anyhow::Result;

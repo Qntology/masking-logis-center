@@ -9,11 +9,10 @@ use crate::{
     models::qwen::{
         common::{GateUpDownMLP, TwoLinearMLP, eager_attention_forward, get_layer_norm},
         config::{QwenVLConfig, QwenVLTextConfig, QwenVLVisionConfig},
-        // [FIX] 올바른 최신 rope.rs 경로로 변경!
-        rope::{
-            Qwen2_5VisionRotaryEmbedding, QwenVLTextRotaryEmbedding, apply_rotary_pos_emb,
-            apply_rotary_pos_emb_vision,
-        },
+    },
+    position_embed::rope::{
+        Qwen2_5VisionRotaryEmbedding, QwenVLTextRotaryEmbedding, apply_rotary_pos_emb,
+        apply_rotary_pos_emb_vision,
     },
     utils::tensor_utils::{
         bitor_tensor, linspace, mask_index_add, masked_scatter_dim0,

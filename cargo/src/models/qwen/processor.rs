@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use crate::{
     models::qwen::config::PreprocessorConfig,
-    params::chat::ChatCompletionParameters,
+    openai_types::{
+        ChatCompletionParameters, ChatCompletionRequestMessage,
+        ChatCompletionRequestUserMessageContent, ChatCompletionRequestMessageContentPart,
+    },
     utils::{
         img_utils::{get_image, img_smart_resize, img_transform},
     },
@@ -70,12 +73,18 @@ impl QwenVLProcessor {
         vision_map.insert("image".to_string(), Vec::new());
         vision_map.insert("video".to_string(), Vec::new());
         for chat_mes in mes.messages.clone() {
-            if chat_mes.role == "user" {
-                for part in chat_mes.parts {
-                    if let Some(url) = part.image_url {
-                        vision_map.get_mut("image").unwrap().push(url);
+            match chat_mes {
+                ChatCompletionRequestMessage::User(user_msg) => {
+                    if let ChatCompletionRequestUserMessageContent::Array(parts) = user_msg.content {
+                        for part in parts {
+                            if let ChatCompletionRequestMessageContentPart::ImageURL(img_part) = part {
+                                vision_map.get_mut("image").unwrap().push(img_part.image_url.url);
+                            } 
+                            // Video support removed for simplicity/compilation
+                        }
                     }
                 }
+                _ => {}
             }
         }
         Ok(vision_map)

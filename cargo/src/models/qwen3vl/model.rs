@@ -18,8 +18,8 @@ use crate::{
             Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig, qwen3vl_text_config2qwen3_config,
         },
     },
-    models::qwen::rope::{ // 🚀
-        Qwen2_5VisionRotaryEmbedding, QwenVLTextRotaryEmbedding, apply_rotary_pos_emb_vision,
+    position_embed::rope::{
+        Qwen2_5VisionRotaryEmbedding, Qwen3VLTextRotaryEmbedding, apply_rotary_pos_emb_vision,
     },
     utils::tensor_utils::{
         bitor_tensor, get_vision_next_indices, linspace, mask_index_add, masked_scatter_dim0,

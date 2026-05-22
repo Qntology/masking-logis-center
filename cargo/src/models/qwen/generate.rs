@@ -18,7 +18,7 @@ use crate::{
         find_type_files, get_device, get_dtype, get_logit_processor,
         direct_loader::{save_kv_block, load_kv_block},
     },
-    params::chat::ChatCompletionParameters,
+    openai_types::ChatCompletionParameters,
 };
 use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}, Mutex};
 use std::fs;

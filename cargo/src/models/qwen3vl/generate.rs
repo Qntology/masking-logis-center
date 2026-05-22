@@ -1,4 +1,4 @@
-use crate::params::chat::ChatCompletionParameters;
+use crate::openai_types::ChatCompletionParameters;
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;

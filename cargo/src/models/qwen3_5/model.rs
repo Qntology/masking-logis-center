@@ -18,8 +18,8 @@ use crate::{
         },
         qwen3_5::config::{Qwen3_5Config, Qwen3_5TextConfig},
         qwen3vl::model::Qwen3VLVisionModel,
-        qwen::rope::{QwenVLTextRotaryEmbedding, apply_rotary_pos_emb}, // 🚀 올바른 모듈 매핑
     },
+    position_embed::rope::{Qwen3VLTextRotaryEmbedding, apply_rotary_pos_emb},
     utils::tensor_utils::{
         l2_normalize, masked_scatter_dim0,
         prepare_causal_attention_mask, repeat_interleave, split_tensor,
@@ -1457,7 +1457,7 @@ pub struct Qwen3_5TextModel {
     embed_tokens: Embedding,
     pub layers: Vec<Qwen3_5DecoderLayer>,
     norm: Qwen3_5RMSNorm,
-    rotary_emb: QwenVLTextRotaryEmbedding,
+    rotary_emb: Qwen3VLTextRotaryEmbedding,
     mrope_section: Vec<usize>,
     dtype: DType,
     pub registry: KVRegistry,
@@ -1484,7 +1484,7 @@ impl Qwen3_5TextModel {
         }
         let norm = Qwen3_5RMSNorm::new(vb.pp("norm"), config.hidden_size, config.rms_norm_eps)?;
         let rope_dim = (config.head_dim as f32 * config.rope_parameters.partial_rotary_factor) as usize;
-        let rotary_emb = QwenVLTextRotaryEmbedding::new(rope_dim, config.rope_parameters.rope_theta);
+        let rotary_emb = Qwen3VLTextRotaryEmbedding::new(rope_dim, config.rope_parameters.rope_theta);
         Ok(Self {
             embed_tokens, layers, norm, rotary_emb, mrope_section: config.rope_parameters.mrope_section.clone(), dtype: vb.dtype(),
             registry, current_kv_len: 0, active_session_id: None, active_kv_name: None,
@@ -1550,7 +1550,7 @@ impl Qwen3_5TextModel {
         
         let norm_weight = gguf.get_dequantized_f16("output_norm.weight").or_else(|_| gguf.get_dequantized("output_norm.weight"))?.to_dtype(candle_core::DType::BF16)?;
         let norm = Qwen3_5RMSNorm::from_weight(norm_weight, rms_norm_eps)?;
-        let rotary_emb = QwenVLTextRotaryEmbedding::new(rope_dimension_count, rope_freq_base);
+        let rotary_emb = Qwen3VLTextRotaryEmbedding::new(rope_dimension_count, rope_freq_base);
 
         Ok(Self {
             embed_tokens, layers, norm, rotary_emb, mrope_section, dtype,

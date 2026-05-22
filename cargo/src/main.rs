@@ -1,7 +1,11 @@
-use terminal_logis_center_lib::{db, params}; 
+use terminal_logis_center_lib::{db, openai_types}; 
 use candle_core::Device;
 use terminal_logis_center_lib::models::qwen3_5::generate::Qwen3_5GenerateModel;
-use params::chat::{ChatCompletionParameters, Message, Part};
+use terminal_logis_center_lib::openai_types::{
+    ChatCompletionParameters, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestMessageContentPart,
+    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartImage, ImageURL
+};
 use std::sync::Mutex;
 use lazy_static::lazy_static;
 
@@ -9,7 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 lazy_static! {
     static ref QWEN_MODEL: Mutex<Option<Qwen3_5GenerateModel>> = Mutex::new(None);
-    static ref EMBEDDING_MODEL: Mutex<Option<terminal_logis_center_lib::embedding::EmbeddingModel>> = Mutex::new(None);
+    // 🚀 EmbeddingModel의 이동된 경로(models::embedding)를 반영합니다.
+    static ref EMBEDDING_MODEL: Mutex<Option<terminal_logis_center_lib::models::embedding::EmbeddingModel>> = Mutex::new(None);
     static ref GLOBAL_PROGRESS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
     // 🚀 Push 작업을 실시간으로 중단하기 위한 전역 플래그입니다.
     static ref PUSH_CANCEL_SIGNAL: AtomicBool = AtomicBool::new(false);
@@ -1271,7 +1276,8 @@ const OVERLAY_SCRIPT: &str = r#"
                 modelListContainer.style.gap = '10px';
                 modelListContainer.style.marginBottom = '30px';
 
-                const models = ['Qwen3.5', 'Embedding'];
+                // 🚀 Qwen3 모델을 목록에 추가합니다.
+                const models = ['Qwen3', 'Qwen3.5', 'Embedding'];
                 
                 // 다운로드 공통 로직 분리
                 const triggerDownload = (m, btn, progressContainer, progressBar) => {
@@ -2107,23 +2113,32 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     // 🚀 [초기 실행 시 파일 자동 연결] 
     // GGUF 모델 파일 유무와 관계없이, 앱이 실행될 때마다 프로젝트 내부에 있는 최신 JSON 설정 파일들을 
     // AppData의 구동 폴더로 무조건 복사(덮어쓰기)하여 파일 누락을 원천 차단합니다.
+    let qwen3_weights = app_dir.join("models").join("qwen3").join("qwen3.gguf");
     let qwen_weights = app_dir.join("models").join("qwen3_5").join("qwen3.5.gguf");
     let embed_weights = app_dir.join("models").join("embeddings").join("embeddinggemma-300m-Q4_0.gguf");
 
     {
+        let base = app_dir.join("models").join("qwen3");
+        let _ = std::fs::create_dir_all(&base);
+        // 🚀 Qwen3-0.6B 로컬 경로 복원
+        let _ = std::fs::write(base.join("config.json"), include_str!("../models/Qwen3-0.6B-Instruct-gguf/config.json"));
+        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/Qwen3-0.6B-Instruct-gguf/tokenizer.json")); 
+    }
+    {
         // 🚀 슬래시(/)가 섞여서 출력되는 경로 표기 문제를 해결하기 위해 .join("models").join("...") 형식으로 분리합니다.
         let base = app_dir.join("models").join("qwen3_5");
         let _ = std::fs::create_dir_all(&base);
-        // 설정 파일 복사 로직 (물리 파일이 없는 환경에서의 빌드 에러 방지를 위해 빈 JSON으로 폴백 처리합니다)
-        let _ = std::fs::write(base.join("config.json"), "{}");
-        let _ = std::fs::write(base.join("tokenizer.json"), "{}"); 
-        let _ = std::fs::write(base.join("preprocessor_config.json"), "{}"); 
+        // 🚀 제공해주신 Qwen3.5-0.8B 로컬 경로로 매크로 복원
+        let _ = std::fs::write(base.join("config.json"), include_str!("../models/Qwen3.5-0.8B-Instruct-gguf/config.json"));
+        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/Qwen3.5-0.8B-Instruct-gguf/tokenizer.json")); 
+        let _ = std::fs::write(base.join("preprocessor_config.json"), include_str!("../models/Qwen3.5-0.8B-Instruct-gguf/preprocessor_config.json")); 
     }
     {
         let base = app_dir.join("models").join("embeddings");
         let _ = std::fs::create_dir_all(&base);
-        let _ = std::fs::write(base.join("config.json"), "{}");
-        let _ = std::fs::write(base.join("tokenizer.json"), "{}"); 
+        // 🚀 제공해주신 Embedding 로컬 경로로 매크로 복원
+        let _ = std::fs::write(base.join("config.json"), include_str!("../models/embeddinggemma-300m/config.json"));
+        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/embeddinggemma-300m/tokenizer.json")); 
     }
 
     // 🚀 [무결성 검증] 단순히 파일이 존재하는 것뿐만 아니라, 다운로드가 끊겨 생성된 쓰레기 파일(예: 10MB 미만)인지 용량까지 엄격하게 검사하여 앱 크래시를 원천 차단합니다.
@@ -2131,9 +2146,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
         p.exists() && std::fs::metadata(p).map(|m| m.len()).unwrap_or(0) > 10_000_000 // 최소 10MB 이상이어야 정상 가중치 파일로 인정
     };
 
+    let qwen3_exists = is_valid_model(&qwen3_weights);
     let qwen_exists = is_valid_model(&qwen_weights);
     let embed_exists = is_valid_model(&embed_weights);
     let model_status_str = json!({
+        "Qwen3": qwen3_exists,
         "Qwen3.5": qwen_exists,
         "Embedding": embed_exists
     }).to_string();
@@ -2186,16 +2203,21 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             }
                                         }
                                         let ocr_result = if let Some(model) = local_model.as_mut() {
+                                            // 🚀 새로운 OpenAI 규격에 맞춰 파라미터 계층 구조를 조립합니다.
                                             let params = ChatCompletionParameters {
-                                                messages: vec![Message {
-                                                    role: "user".to_string(),
-                                                    parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
-                                                }],
+                                                messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                                                    content: ChatCompletionRequestUserMessageContent::Array(vec![
+                                                        ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "Extract text from image and return as JSON format".to_string() }),
+                                                        ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: full_data_url.to_string(), detail: None } })
+                                                    ]),
+                                                    name: None,
+                                                })],
                                                 model: "qwen3.5".to_string(),
                                                 max_tokens: Some(2048),
                                                 temperature: Some(0.2),
                                                 top_p: Some(0.95),
-                                                top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
+                                                seed: Some(42),
+                                                ..Default::default()
                                             };
                                             // 🚀 Qwen 3.5는 비동기 처리(generate)를 수행하므로 await 호출
                                             model.generate(params, None, None, None).await.unwrap_or_default()
@@ -2340,16 +2362,21 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let mut ocr_success = false;
                                                 let mut cleaned_ocr = String::new();
                                                 
+                                                // 🚀 OCR용 파라미터 적용
                                                 let params = ChatCompletionParameters {
-                                                    messages: vec![Message {
-                                                        role: "user".to_string(),
-                                                        parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(record.context.clone()) }],
-                                                    }],
+                                                    messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                                                        content: ChatCompletionRequestUserMessageContent::Array(vec![
+                                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "Extract text from image and return as JSON format".to_string() }),
+                                                            ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: record.context.clone(), detail: None } })
+                                                        ]),
+                                                        name: None,
+                                                    })],
                                                     model: "qwen3.5".to_string(),
                                                     max_tokens: Some(2048),
                                                     temperature: Some(0.2),
                                                     top_p: Some(0.95),
-                                                    top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
+                                                    seed: Some(42),
+                                                    ..Default::default()
                                                 };
 
                                                 // 🚀 Lock 충돌을 피하기 위해 글로벌 모델을 임시로 꺼내옵니다.
@@ -2377,11 +2404,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             
                                             current_step += 1;
                                             let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                            let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
+                                            let payload = serde_json::json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
                                             *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                             
                                             // 🚀 진행 상황 브로드캐스트
-                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", serde_json::json!(serde_json::json!({"type": "push_progress", "payload": payload})));
                                             if let Ok(pages) = browser_c.pages().await {
                                                 for p in pages { let _ = p.evaluate(script.clone()).await; }
                                             }
@@ -2390,7 +2417,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                                         {
                                             let mut model_guard = QWEN_MODEL.lock().unwrap();
-                                            *model_guard = None; 
+                                            *model_guard = None; // VRAM 확보를 위해 생성 직후 모델 해제
                                         }
                                         force_memory_cleanup();
                                         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -2427,22 +2454,23 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let mut masked_text = record.context.clone();
                                                 
                                                 if has_error.is_none() && !masked_text.trim().is_empty() {
-                                                    // 🚀 54개의 카테고리에 기반한 PII 추출 프롬프트 구성
                                                     let prompt = format!(
                                                         "Extract sensitive personal information from the text based on 54 categories including: Identity, Contact, Address, Dates & time, Government IDs, Financial, Crypto, Vehicle, Digital, Auth.\nRETURN JSON ONLY. The format must be a flat JSON array of objects containing the exact matched words and label. Example: [{{\"word\": \"John Doe\", \"label\": \"FIRSTNAME\"}}, {{\"word\": \"010-1234-5678\", \"label\": \"PHONE\"}}]. If none, return [].\n\nText: {}",
                                                         masked_text
                                                     );
 
+                                                    // 🚀 Masking용 파라미터 적용
                                                     let params = ChatCompletionParameters {
-                                                        messages: vec![Message {
-                                                            role: "user".to_string(),
-                                                            parts: vec![Part { text: prompt, image_url: None }],
-                                                        }],
+                                                        messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                                                            content: ChatCompletionRequestUserMessageContent::Text(prompt),
+                                                            name: None,
+                                                        })],
                                                         model: "qwen3.5".to_string(),
                                                         max_tokens: Some(1024),
                                                         temperature: Some(0.1),
                                                         top_p: Some(0.9),
-                                                        top_k: None, repeat_penalty: Some(1.1), repeat_last_n: Some(64), seed: Some(42),
+                                                        seed: Some(42),
+                                                        ..Default::default()
                                                     };
 
                                                     // 🚀 Lock 충돌을 피하기 위해 글로벌 모델을 임시로 꺼내옵니다.
@@ -2486,11 +2514,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                                                 current_step += 1;
                                                 let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                                let payload = json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
+                                                let payload = serde_json::json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
                                                 *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
                                                 
                                                 // 🚀 진행 상황 브로드캐스트
-                                                let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                                let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", serde_json::json!(serde_json::json!({"type": "push_progress", "payload": payload})));
                                                 if let Ok(pages) = browser_c.pages().await {
                                                     for p in pages { let _ = p.evaluate(script.clone()).await; }
                                                 }
@@ -2521,7 +2549,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 if em_guard.is_none() {
                                                     let em_path = app_dir_c.join("models").join("embeddings");
                                                     let em_path_str = em_path.to_string_lossy().to_string();
-                                                    *em_guard = terminal_logis_center_lib::embedding::EmbeddingModel::new_with_device(&em_path_str, &device).ok();
+                                                    // 🚀 올바른 모듈 경로 반영
+                                                    *em_guard = terminal_logis_center_lib::models::embedding::EmbeddingModel::new_with_device(&em_path_str, &device).ok();
                                                 }
                                             }
                                             for (idx, record) in target_records.iter_mut().enumerate() {
@@ -2673,16 +2702,21 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             }
                             
                             if let Some(model) = local_model.as_mut() {
+                                // 🚀 OCR 파라미터 갱신
                                 let params = ChatCompletionParameters {
-                                    messages: vec![Message {
-                                        role: "user".to_string(),
-                                        parts: vec![Part { text: "Extract text from image and return as JSON format".to_string(), image_url: Some(full_data_url.to_string()) }],
-                                    }],
+                                    messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                                        content: ChatCompletionRequestUserMessageContent::Array(vec![
+                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "Extract text from image and return as JSON format".to_string() }),
+                                            ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: full_data_url.to_string(), detail: None } })
+                                        ]),
+                                        name: None,
+                                    })],
                                     model: "qwen3.5".to_string(),
                                     max_tokens: Some(2048),
                                     temperature: Some(0.2),
                                     top_p: Some(0.95),
-                                    top_k: None, repeat_penalty: Some(1.2), repeat_last_n: Some(64), seed: Some(42),
+                                    seed: Some(42),
+                                    ..Default::default()
                                 };
                                 match model.generate(params, None, None, None).await {
                                     Ok(res) => {
@@ -2728,16 +2762,19 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         "Extract sensitive personal information from the text based on 54 categories including: Identity, Contact, Address, Dates & time, Government IDs, Financial, Crypto, Vehicle, Digital, Auth.\nRETURN JSON ONLY. The format must be a flat JSON array of objects containing the exact matched words and label. Example: [{{\"word\": \"John Doe\", \"label\": \"FIRSTNAME\"}}, {{\"word\": \"010-1234-5678\", \"label\": \"PHONE\"}}]. If none, return [].\n\nText: {}",
                                         ocr_result
                                     );
+                                    
+                                    // 🚀 Masking 파라미터 갱신
                                     let params = ChatCompletionParameters {
-                                        messages: vec![Message {
-                                            role: "user".to_string(),
-                                            parts: vec![Part { text: prompt, image_url: None }],
-                                        }],
+                                        messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                                            content: ChatCompletionRequestUserMessageContent::Text(prompt),
+                                            name: None,
+                                        })],
                                         model: "qwen3.5".to_string(),
                                         max_tokens: Some(1024),
                                         temperature: Some(0.1),
                                         top_p: Some(0.9),
-                                        top_k: None, repeat_penalty: Some(1.1), repeat_last_n: Some(64), seed: Some(42),
+                                        seed: Some(42),
+                                        ..Default::default()
                                     };
                                     match model.generate(params, None, None, None).await {
                                         Ok(json_res) => {
@@ -2946,6 +2983,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     // 🚀 비동기 다운로드 태스크 스폰
                     tokio::task::spawn(async move {
                         let folder_name = match model_name.as_str() {
+                            "Qwen3" => "qwen3",
                             "Qwen3.5" => "qwen3_5",
                             "Embedding" => "embeddings",
                             _ => "unknown"
@@ -2967,13 +3005,20 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         let m_name_for_config = model_name.clone();
                         
                         // JSON 파일들 복원 (glm_ocr, privacy_filter 삭제됨)
-                        // 물리 파일이 없는 상태에서 컴파일 통과를 위해 기본 빈 JSON 문자열을 삽입합니다.
-                        let emb_c = "{}";
-                        let emb_tok = "{}"; // 🚀 추가
+                        let q3_c = include_str!("../models/Qwen3-0.6B-Instruct-gguf/config.json");
+                        let q3_tok = include_str!("../models/Qwen3-0.6B-Instruct-gguf/tokenizer.json");
+                        
+                        // 🚀 제공해주신 Embedding 로컬 경로로 매크로 복원
+                        let emb_c = include_str!("../models/embeddinggemma-300m/config.json");
+                        let emb_tok = include_str!("../models/embeddinggemma-300m/tokenizer.json"); // 🚀 추가
 
                         let target_base = base_config_dir.join("models").join(folder_name);
                         let _ = std::fs::create_dir_all(&target_base);
                         match m_name_for_config.as_str() {
+                            "Qwen3" => {
+                                let _ = std::fs::write(target_base.join("config.json"), q3_c);
+                                let _ = std::fs::write(target_base.join("tokenizer.json"), q3_tok);
+                            },
                             "Embedding" => {
                                 let _ = std::fs::write(target_base.join("config.json"), emb_c);
                                 let _ = std::fs::write(target_base.join("tokenizer.json"), emb_tok); // 🚀 추가
@@ -2983,8 +3028,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                         // 🚀 실제 Hugging Face 다운로드 URL 리스트 매핑 (가중치 파일만 받도록 최소화)
                         let files_to_download = match model_name.as_str() {
+                            "Qwen3" => vec![
+                                ("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/blob/main/Qwen3-0.6B-Q8_0.gguf", "qwen3.gguf"),
+                            ],
                             "Qwen3.5" => vec![
-                                ("https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/qwen2.5-vl-3b-instruct-q4_k_m.gguf", "qwen3.5.gguf"),
+                                // 🚀 Qwen3.5 비전 프로젝터(mmproj)와 Q8_0 본체 가중치 두 개를 모두 다운로드하도록 변경
+                                ("https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/mmproj-BF16.gguf", "mmproj-BF16.gguf"),
+                                ("https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf", "qwen3.5.gguf"),
                             ],
                             "Embedding" => vec![
                                 ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300m-Q4_0.gguf", "embeddinggemma-300m-Q4_0.gguf"),

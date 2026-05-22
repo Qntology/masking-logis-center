@@ -7,7 +7,7 @@ use candle_nn::{
 };
 
 use crate::{
-    models::qwen::rope::apply_rotary_pos_emb,
+    position_embed::rope::apply_rotary_pos_emb,
 };
 
 #[derive(Debug, Clone)]

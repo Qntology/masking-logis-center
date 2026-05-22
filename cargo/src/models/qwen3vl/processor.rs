@@ -1,7 +1,9 @@
 #![allow(unexpected_cfgs)]
 use std::collections::HashMap;
 
-use crate::params::chat::ChatCompletionParameters;
+use crate::openai_types::{
+    ChatCompletionParameters, ChatCompletionRequestMessage as ChatMessage, ChatCompletionRequestUserMessageContent as ChatMessageContent, ChatCompletionRequestMessageContentPart as ChatMessageContentPart,
+};
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Shape, Tensor};
 #[cfg(feature = "ffmpeg")]
@@ -130,10 +132,16 @@ impl Qwen3VLProcessor {
         vision_map.insert("image".to_string(), Vec::new());
         vision_map.insert("video".to_string(), Vec::new());
         for chat_mes in mes.messages.clone() {
-            if chat_mes.role == "user" {
-                for part in chat_mes.parts {
-                    if let Some(img_url) = part.image_url {
-                        vision_map.get_mut("image").unwrap().push(img_url.clone());
+            if let ChatMessage::User(user_mes) = chat_mes {
+                if let ChatMessageContent::Array(part_vec) = user_mes.content {
+                    for part in part_vec {
+                        if let ChatMessageContentPart::ImageURL(img_part) = part {
+                            let img_url = img_part.image_url;
+                            vision_map.get_mut("image").unwrap().push(img_url.url);
+                        } else if let ChatMessageContentPart::VideoURL(video_part) = part {
+                            let video_url = video_part.video_url;
+                            vision_map.get_mut("video").unwrap().push(video_url.url);
+                        }
                     }
                 }
             }

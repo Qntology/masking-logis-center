@@ -1,4 +1,4 @@
-use crate::params::chat::ChatCompletionParameters;
+use crate::openai_types::{ChatCompletionParameters, ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent, ChatCompletionRequestMessageContentPart};
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor, quantized::gguf_file};
 use candle_nn::VarBuilder;
@@ -118,8 +118,19 @@ impl Qwen3_5GenerateModel {
         };
 
         let tokenizer = model_gguf.build_tokenizer(Some(false), Some(false), Some(false))?;
-        let (pre_processor, mut mmproj_gguf) = if let Some(mmproj_f) = mmproj_file {
-            let mut reader = std::fs::File::open(mmproj_f)?;
+        
+        // 🚀 mmproj_file 인자가 None이더라도, 같은 폴더에 다운로드된 mmproj-BF16.gguf 파일이 존재하면 자동으로 합체하도록 개선
+        let auto_mmproj = std::path::Path::new(model_file).with_file_name("mmproj-BF16.gguf");
+        let target_mmproj = if let Some(f) = mmproj_file {
+            Some(f.to_string())
+        } else if auto_mmproj.exists() {
+            Some(auto_mmproj.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        let (pre_processor, mut mmproj_gguf) = if let Some(mmproj_f) = target_mmproj {
+            let mut reader = std::fs::File::open(&mmproj_f)?;
             let content = gguf_file::Content::read(&mut reader)?;
             let mmproj_gguf = Gguf::new(content, reader, device.clone());
             let processor = Qwen3VLProcessor::new_qwen3_5_default(&device, DType::F32)?;
@@ -191,8 +202,10 @@ impl Qwen3_5GenerateModel {
         
         // 메세지 내 비전 URL 유무 판별
         let has_vision = mes.messages.iter().any(|msg| {
-            if msg.role == "user" {
-                msg.parts.iter().any(|p| p.image_url.is_some())
+            if let ChatCompletionRequestMessage::User(user_msg) = msg {
+                if let ChatCompletionRequestUserMessageContent::Array(parts) = &user_msg.content {
+                    parts.iter().any(|p| matches!(p, ChatCompletionRequestMessageContentPart::ImageURL(_) | ChatCompletionRequestMessageContentPart::VideoURL(_)))
+                } else { false }
             } else { false }
         });
 
@@ -671,14 +684,27 @@ impl Qwen3_5GenerateModel {
 
         let mut mes_render = String::new();
         for msg in &mes.messages {
-            if msg.role == "system" {
-                let mut combined = String::new();
-                for part in &msg.parts { combined.push_str(&part.text); }
-                mes_render.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", combined));
-            } else if msg.role == "user" {
-                let mut combined = String::new();
-                for part in &msg.parts { combined.push_str(&part.text); }
-                mes_render.push_str(&format!("<|im_start|>user\n{}", combined));
+            match msg {
+                ChatCompletionRequestMessage::System(sys) => {
+                    mes_render.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", sys.content));
+                }
+                ChatCompletionRequestMessage::User(user) => {
+                    match &user.content {
+                        ChatCompletionRequestUserMessageContent::Text(text) => {
+                            mes_render.push_str(&format!("<|im_start|>user\n{}", text));
+                        }
+                        ChatCompletionRequestUserMessageContent::Array(parts) => {
+                            let mut combined = String::new();
+                            for part in parts {
+                                if let ChatCompletionRequestMessageContentPart::Text(t) = part {
+                                    combined.push_str(&t.text);
+                                }
+                            }
+                            mes_render.push_str(&format!("<|im_start|>user\n{}", combined));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
