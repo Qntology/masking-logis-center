@@ -2228,8 +2228,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     name: None,
                                                 })],
                                                 model: "qwen3.5".to_string(),
-                                                max_tokens: Some(2048),
-                                                temperature: Some(0.2),
+                                                max_tokens: Some(1024),
+                                                temperature: Some(0.3),
                                                 top_p: Some(0.95),
                                                 ..Default::default()
                                             };
@@ -2386,8 +2386,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                         name: None,
                                                     })],
                                                     model: "qwen3.5".to_string(),
-                                                    max_tokens: Some(2048),
-                                                    temperature: Some(0.2),
+                                                    max_tokens: Some(1024),
+                                                    temperature: Some(0.3),
                                                     top_p: Some(0.95),
                                                     ..Default::default()
                                                 };
@@ -2749,8 +2749,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         name: None,
                                     })],
                                     model: "qwen3.5".to_string(),
-                                    max_tokens: Some(2048),
-                                    temperature: Some(0.2),
+                                    max_tokens: Some(1024),
+                                    temperature: Some(0.3),
                                     top_p: Some(0.95),
                                     ..Default::default()
                                 };
@@ -3067,9 +3067,9 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 ("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/blob/main/Qwen3-0.6B-Q8_0.gguf", "qwen3.gguf"),
                             ],
                             "Qwen3.5" => vec![
-                                // 🚀 Qwen3.5 비전 프로젝터(mmproj)와 Q4_K_M 본체 가중치 두 개를 모두 다운로드하도록 변경
+                                // 🚀 Qwen3.5 비전 프로젝터(mmproj)와 Q8_0 본체 가중치 두 개를 모두 다운로드하도록 변경
                                 ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-BF16.gguf", "mmproj-BF16.gguf"),
-                                ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf", "qwen3.5.gguf"),
+                                ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q8_0.gguf", "qwen3.5.gguf"),
                             ],
                             "Embedding" => vec![
                                 ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300m-Q4_0.gguf", "embeddinggemma-300m-Q4_0.gguf"),
