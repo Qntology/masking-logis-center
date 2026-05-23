@@ -14,7 +14,6 @@ static PENDING_ANSWERS: Lazy<Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>> 
     Arc::new(Mutex::new(HashMap::new()))
 });
 
-// 🌟 [추가] 백엔드가 실시간으로 바라볼 시드 저장소 및 리스너 생존 상태
 static ACTIVE_SEED: AtomicU64 = AtomicU64::new(0);
 static LISTENER_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -59,12 +58,8 @@ pub fn get_local_network_prefix() -> String {
     }
 }
 
-// TCP 시그널링 리스너 (Answer 회신 대기 기능 포함)
 pub fn start_signal_listener(seed: u64) {
-    // 🌟 [CRITICAL FIX] 명령이 들어올 때마다 시드(Seed) 번호만 최신화합니다.
     ACTIVE_SEED.store(seed, Ordering::SeqCst);
-    
-    // 🌟 [CRITICAL FIX] 이미 9999 포트가 열려있다면, 포트 충돌(os error 10048)을 방지하기 위해 여기서 튕겨냅니다.
     if LISTENER_STARTED.swap(true, Ordering::SeqCst) {
         println!("[SIGNAL] Listener already running. Seed updated to: {}", seed);
         return;
@@ -89,22 +84,18 @@ pub fn start_signal_listener(seed: u64) {
                     let mut buf = vec![0u8; 1024 * 16];
                     if let Ok(n) = socket.read(&mut buf).await {
                         if let Ok(msg) = serde_json::from_slice::<SignalMessage>(&buf[..n]) {
-                            // 🌟 [CRITICAL FIX] 고정된 매개변수가 아닌 실시간으로 업데이트되는 ACTIVE_SEED를 검사합니다!
                             let current_seed = ACTIVE_SEED.load(Ordering::SeqCst);
                             if msg.seed == current_seed {
                                 println!("[SIGNAL] Seed match from {}. Offer received.", ip_str);
                                 
-                                // Answer를 전달받을 채널 생성
                                 let (tx, mut rx) = mpsc::channel::<String>(1);
                                 {
                                     let mut map = PENDING_ANSWERS.lock().await;
                                     map.insert(ip_str.clone(), tx);
                                 }
 
-                                // [Tauri 제거] 브로드캐스트나 Emitter가 불필요한 백엔드 환경이므로 시스템 콘솔로만 기록합니다.
-                                println!("[SIGNAL] WebRTC Offer SDP Emitted to UI for {}", ip_str);
+                                println!("[SIGNAL] WebRTC Offer SDP Received from {}", ip_str);
 
-                                // 프론트엔드로부터 Answer가 올 때까지 대기 (최대 10초)
                                 tokio::select! {
                                     Some(answer_sdp) = rx.recv() => {
                                         let resp = SignalMessage { seed, sdp: answer_sdp };
@@ -118,7 +109,6 @@ pub fn start_signal_listener(seed: u64) {
                                     }
                                 }
                                 
-                                // 작업 완료 후 맵에서 제거
                                 let mut map = PENDING_ANSWERS.lock().await;
                                 map.remove(&ip_str);
                             }

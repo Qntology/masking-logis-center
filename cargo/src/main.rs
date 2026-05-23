@@ -1800,8 +1800,20 @@ const OVERLAY_SCRIPT: &str = r#"
                     if (needsRender) {
                         renderStagedList(); // 변경점이 있으면 즉시 렌더링하여 타 탭과 상태 일치
                     }
+                    window.currentPushStatus = {
+                        item_display: data.payload.item_display,
+                        total_items: data.payload.total_items,
+                        percent: data.payload.percent
+                    };
                     draftBtn.textContent = `Draft (${data.payload.item_display}/${data.payload.total_items}) ${data.payload.percent}%...`;
                     updatePushBtnState(); 
+                    return;
+                }
+                else if (data.type === 'llm_progress') {
+                    if (isProcessing && window.currentPushStatus) {
+                        let summary = data.payload.summary || '';
+                        draftBtn.textContent = `Draft (${window.currentPushStatus.item_display}/${window.currentPushStatus.total_items}) ${summary}`;
+                    }
                     return;
                 }
                 else if (data.type === 'push_idle') {
@@ -1813,6 +1825,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     if (isProcessing) {
                         isProcessing = false;
                         processingIds = []; // 🚀 작업이 끝난 경우 진행 상태 배열 비움
+                        window.currentPushStatus = null;
                         stopPushSpinner();
                         updatePushBtnState();
                         renderStagedList();
@@ -1836,6 +1849,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 else if (data.type === 'push_success') {
                     isProcessing = false; 
                     processingIds = []; // 🚀 성공 시 배열 비움
+                    window.currentPushStatus = null;
                     stopPushSpinner();
                     deleteBtn.disabled = false;
                     draftBtn.disabled = false;
@@ -1916,6 +1930,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     window.download_progress = {}; // 🚀 에러 발생 시 멈춰있는 다운로드 UI 초기화
                     isProcessing = false; 
                     processingIds = []; // 🚀 에러 발생 시 배열 비움
+                    window.currentPushStatus = null;
                     stopPushSpinner();
                     if (fileSpinnerInterval) {
                         clearInterval(fileSpinnerInterval);
@@ -2207,16 +2222,15 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             let params = ChatCompletionParameters {
                                                 messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                                     content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                                        ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "Extract text from image and return as JSON format".to_string() }),
+                                                        ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
                                                         ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: full_data_url.to_string(), detail: None } })
                                                     ]),
                                                     name: None,
                                                 })],
                                                 model: "qwen3.5".to_string(),
                                                 max_tokens: Some(2048),
-                                                temperature: Some(0.2),
+                                                temperature: Some(0.0),
                                                 top_p: Some(0.95),
-                                                seed: Some(42),
                                                 ..Default::default()
                                             };
                                             // 🚀 Qwen 3.5는 비동기 처리(generate)를 수행하므로 await 호출
@@ -2366,33 +2380,34 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let params = ChatCompletionParameters {
                                                     messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                                         content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "Extract text from image and return as JSON format".to_string() }),
+                                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format.  [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
                                                             ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: record.context.clone(), detail: None } })
                                                         ]),
                                                         name: None,
                                                     })],
                                                     model: "qwen3.5".to_string(),
                                                     max_tokens: Some(2048),
-                                                    temperature: Some(0.2),
+                                                    temperature: Some(0.0),
                                                     top_p: Some(0.95),
-                                                    seed: Some(42),
                                                     ..Default::default()
                                                 };
 
                                                 // 🚀 Lock 충돌을 피하기 위해 글로벌 모델을 임시로 꺼내옵니다.
                                                 let mut local_model = QWEN_MODEL.lock().unwrap().take();
                                                 if let Some(model) = local_model.as_mut() {
-                                                    match model.generate(params, None, None, None).await {
+                                                    let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
+                                                    match model.generate(params, Some(cancel_flag), Some(record.id.clone()), None).await {
                                                         Ok(raw_ocr) => {
                                                             cleaned_ocr = raw_ocr.replace("```json", "").replace("```", "").trim().to_string();
                                                             ocr_success = true;
                                                         },
                                                         Err(e) => {
                                                             has_error = Some(format!("OCR Error: {}", e));
+                                                            local_model = None; // 🚀 취소/에러 시 객체를 즉시 파괴하여 VRAM 회수
                                                         }
                                                     }
                                                 }
-                                                // 사용 후 다음 순서를 위해 다시 넣어둡니다.
+                                                // 사용 후 다음 순서를 위해 다시 넣어둡니다. (단, 에러 시 None이 들어가 VRAM 비워짐)
                                                 *QWEN_MODEL.lock().unwrap() = local_model;
 
                                                 if ocr_success {
@@ -2423,6 +2438,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                                     } else {
                                         current_step += total_items; 
+                                        let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                        let payload = serde_json::json!({"item_display": 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
+                                        *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", serde_json::json!(serde_json::json!({"type": "push_progress", "payload": payload})));
+                                        if let Ok(pages) = browser_c.pages().await {
+                                            for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                        }
                                     }
 
                                     let enable_masking = load_app_config().enable_masking.unwrap_or(true);
@@ -2469,14 +2491,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                         max_tokens: Some(1024),
                                                         temperature: Some(0.1),
                                                         top_p: Some(0.9),
-                                                        seed: Some(42),
                                                         ..Default::default()
                                                     };
 
                                                     // 🚀 Lock 충돌을 피하기 위해 글로벌 모델을 임시로 꺼내옵니다.
                                                     let mut local_model = QWEN_MODEL.lock().unwrap().take();
                                                     if let Some(model) = local_model.as_mut() {
-                                                        match model.generate(params, None, None, None).await {
+                                                        let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
+                                                        match model.generate(params, Some(cancel_flag), Some(record.id.clone()), None).await {
                                                             Ok(json_res) => {
                                                                 let cleaned_json = json_res.replace("```json", "").replace("```", "").trim().to_string();
                                                                 
@@ -2500,12 +2522,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                             },
                                                             Err(e) => {
                                                                 has_error = Some(format!("Masking failed: {}", e));
+                                                                local_model = None; // 🚀 취소/에러 시 객체를 즉시 파괴하여 VRAM 회수
                                                             }
                                                         }
                                                     } else {
                                                         has_error = Some("Qwen 모델 로드에 실패했습니다.".to_string());
                                                     }
-                                                    // 사용 후 다음 순서를 위해 다시 넣어둡니다.
+                                                    // 사용 후 다음 순서를 위해 다시 넣어둡니다. (단, 에러 시 None이 들어가 VRAM 비워짐)
                                                     *QWEN_MODEL.lock().unwrap() = local_model;
                                                 }
 
@@ -2535,9 +2558,23 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 record.masking = record.context.clone();
                                             }
                                             current_step += total_items; 
+                                            let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                            let payload = serde_json::json!({"item_display": 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
+                                            *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", serde_json::json!(serde_json::json!({"type": "push_progress", "payload": payload})));
+                                            if let Ok(pages) = browser_c.pages().await {
+                                                for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                            }
                                         }
                                     } else {
                                         current_step += total_items;
+                                        let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                        let payload = serde_json::json!({"item_display": 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
+                                        *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", serde_json::json!(serde_json::json!({"type": "push_progress", "payload": payload})));
+                                        if let Ok(pages) = browser_c.pages().await {
+                                            for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                        }
                                     }
 
                                     if has_error.is_none() {
@@ -2706,16 +2743,15 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 let params = ChatCompletionParameters {
                                     messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                         content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "Extract text from image and return as JSON format".to_string() }),
+                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
                                             ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: full_data_url.to_string(), detail: None } })
                                         ]),
                                         name: None,
                                     })],
                                     model: "qwen3.5".to_string(),
                                     max_tokens: Some(2048),
-                                    temperature: Some(0.2),
+                                    temperature: Some(0.0),
                                     top_p: Some(0.95),
-                                    seed: Some(42),
                                     ..Default::default()
                                 };
                                 match model.generate(params, None, None, None).await {
@@ -2773,7 +2809,6 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         max_tokens: Some(1024),
                                         temperature: Some(0.1),
                                         top_p: Some(0.9),
-                                        seed: Some(42),
                                         ..Default::default()
                                     };
                                     match model.generate(params, None, None, None).await {
@@ -3237,6 +3272,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::task::spawn(async move {
         while let Some(h) = handler.next().await { if h.is_err() { break; } }
         let _ = tx.send(()).await;
+    });
+
+    let (prog_tx, mut prog_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = terminal_logis_center_lib::scheduler::PROGRESS_TX.set(prog_tx);
+    let browser_for_prog = browser.clone();
+    tokio::task::spawn(async move {
+        while let Some(msg) = prog_rx.recv().await {
+            let script = format!(
+                "window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));",
+                serde_json::json!(serde_json::json!({
+                    "type": "llm_progress",
+                    "payload": msg
+                }))
+            );
+            if let Ok(pages) = browser_for_prog.pages().await {
+                for p in pages {
+                    let _ = p.evaluate(script.clone()).await;
+                }
+            }
+        }
     });
     
     let mut target_events = browser.event_listener::<EventTargetCreated>().await?;

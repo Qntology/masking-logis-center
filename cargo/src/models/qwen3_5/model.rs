@@ -1597,6 +1597,11 @@ impl Qwen3_5TextModel {
         let total_layers = self.layers.len();
 
         for l_idx in 0..total_layers {
+            // 🚀 [CRITICAL] 레이어 로딩 및 연산 전 취소 신호 발생 시 즉시 중단합니다.
+            if crate::utils::is_extraction_stopped() {
+                return Err(anyhow::anyhow!("Inference cancelled during layer processing"));
+            }
+
             // 가중치가 비워져 있을 때만 Mmap 로드! 
             if self.layers[l_idx].is_cleared() {
                 self.reload_layer(l_idx, xs.device())?;

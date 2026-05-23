@@ -44,6 +44,8 @@ regex = "1.10.4"
 flate2 = "1.0.30"
 rcgen = "0.13.1"
 rand_chacha = "0.3.1"
+# 🚀 aa.rs 스펙과 동일하게 백엔드 JS 엔진을 연결하되, 현재 폴더 구조에 맞춰 경로를 수정합니다.
+boa_engine = { path = "crates/boa-engine/core/engine" }
 
 [features]
 default = ["cuda"]
@@ -53,7 +55,15 @@ cpu = []
 flash-attn = []
 
 [target.'cfg(windows)'.dependencies]
+direct-storage = { path = "./direct-storage" }
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Graphics_Direct3D12", "Win32_Security", "Win32_System_IO"] }
 windows-sys = { version = "0.52.0", features = ["Win32_System_Threading", "Win32_System_Memory", "Win32_Foundation"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.29"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
