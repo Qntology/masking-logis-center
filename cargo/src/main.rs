@@ -2222,7 +2222,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             let params = ChatCompletionParameters {
                                                 messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                                     content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                                        ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
+                                                        ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {...} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
                                                         ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: full_data_url.to_string(), detail: None } })
                                                     ]),
                                                     name: None,
@@ -2380,7 +2380,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let params = ChatCompletionParameters {
                                                     messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                                         content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format.  [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
+                                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format.  [OUTPUT FORMAT] {...} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
                                                             ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: record.context.clone(), detail: None } })
                                                         ]),
                                                         name: None,
@@ -2743,7 +2743,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 let params = ChatCompletionParameters {
                                     messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                         content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
+                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {...} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
                                             ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: full_data_url.to_string(), detail: None } })
                                         ]),
                                         name: None,
