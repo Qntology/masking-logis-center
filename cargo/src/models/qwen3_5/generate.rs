@@ -193,7 +193,7 @@ impl Qwen3_5GenerateModel {
         kv_name: Option<String>
     ) -> Result<String> {
         let seed = mes.seed.unwrap_or(32768) as u64;
-        let temperature = mes.temperature.unwrap_or(0.0);
+        let temperature = mes.temperature.unwrap_or(0.2);
         let top_p = mes.top_p.unwrap_or(0.95);
         let mut logit_processor =
             get_logit_processor(Some(temperature as f32), Some(top_p as f32), Some(80), seed);
@@ -434,7 +434,7 @@ impl Qwen3_5GenerateModel {
         kv_name: Option<String>
     ) -> Result<GenerationResult> {
         let mut logit_processor = get_logit_processor(
-            Some(mes.temperature.unwrap_or(0.0) as f32), 
+            Some(mes.temperature.unwrap_or(0.2) as f32), 
             Some(mes.top_p.unwrap_or(0.95) as f32), 
             Some(80), 
             mes.seed.unwrap_or(32768) as u64

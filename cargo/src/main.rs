@@ -2229,7 +2229,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 })],
                                                 model: "qwen3.5".to_string(),
                                                 max_tokens: Some(1024),
-                                                temperature: Some(0.3),
+                                                temperature: Some(0.1),
                                                 top_p: Some(0.95),
                                                 ..Default::default()
                                             };
@@ -2387,7 +2387,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     })],
                                                     model: "qwen3.5".to_string(),
                                                     max_tokens: Some(1024),
-                                                    temperature: Some(0.3),
+                                                    temperature: Some(0.1),
                                                     top_p: Some(0.95),
                                                     ..Default::default()
                                                 };
@@ -2750,7 +2750,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     })],
                                     model: "qwen3.5".to_string(),
                                     max_tokens: Some(1024),
-                                    temperature: Some(0.3),
+                                    temperature: Some(0.1),
                                     top_p: Some(0.95),
                                     ..Default::default()
                                 };
