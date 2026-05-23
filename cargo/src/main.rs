@@ -2143,10 +2143,10 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
         // 🚀 슬래시(/)가 섞여서 출력되는 경로 표기 문제를 해결하기 위해 .join("models").join("...") 형식으로 분리합니다.
         let base = app_dir.join("models").join("qwen3_5");
         let _ = std::fs::create_dir_all(&base);
-        // 🚀 제공해주신 Qwen3.5-0.8B 로컬 경로로 매크로 복원
-        let _ = std::fs::write(base.join("config.json"), include_str!("../models/Qwen3.5-0.8B-Instruct-gguf/config.json"));
-        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/Qwen3.5-0.8B-Instruct-gguf/tokenizer.json")); 
-        let _ = std::fs::write(base.join("preprocessor_config.json"), include_str!("../models/Qwen3.5-0.8B-Instruct-gguf/preprocessor_config.json")); 
+        // 🚀 제공해주신 Qwen3.5-2B 로컬 경로로 매크로 복원
+        let _ = std::fs::write(base.join("config.json"), include_str!("../models/Qwen3.5-2B-Instruct-gguf/config.json"));
+        let _ = std::fs::write(base.join("tokenizer.json"), include_str!("../models/Qwen3.5-2B-Instruct-gguf/tokenizer.json")); 
+        let _ = std::fs::write(base.join("preprocessor_config.json"), include_str!("../models/Qwen3.5-2B-Instruct-gguf/preprocessor_config.json")); 
     }
     {
         let base = app_dir.join("models").join("embeddings");
@@ -2222,14 +2222,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             let params = ChatCompletionParameters {
                                                 messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                                     content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                                        ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {...} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
+                                                        ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {'image_text':'...'} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
                                                         ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: full_data_url.to_string(), detail: None } })
                                                     ]),
                                                     name: None,
                                                 })],
                                                 model: "qwen3.5".to_string(),
                                                 max_tokens: Some(2048),
-                                                temperature: Some(0.0),
+                                                temperature: Some(0.2),
                                                 top_p: Some(0.95),
                                                 ..Default::default()
                                             };
@@ -2380,14 +2380,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let params = ChatCompletionParameters {
                                                     messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                                         content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format.  [OUTPUT FORMAT] {...} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
+                                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {'image_text':'...'} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
                                                             ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: record.context.clone(), detail: None } })
                                                         ]),
                                                         name: None,
                                                     })],
                                                     model: "qwen3.5".to_string(),
                                                     max_tokens: Some(2048),
-                                                    temperature: Some(0.0),
+                                                    temperature: Some(0.2),
                                                     top_p: Some(0.95),
                                                     ..Default::default()
                                                 };
@@ -2743,14 +2743,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 let params = ChatCompletionParameters {
                                     messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                         content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {...} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
+                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {'image_text':'...'} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
                                             ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: full_data_url.to_string(), detail: None } })
                                         ]),
                                         name: None,
                                     })],
                                     model: "qwen3.5".to_string(),
                                     max_tokens: Some(2048),
-                                    temperature: Some(0.0),
+                                    temperature: Some(0.2),
                                     top_p: Some(0.95),
                                     ..Default::default()
                                 };
@@ -3067,9 +3067,9 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 ("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/blob/main/Qwen3-0.6B-Q8_0.gguf", "qwen3.gguf"),
                             ],
                             "Qwen3.5" => vec![
-                                // 🚀 Qwen3.5 비전 프로젝터(mmproj)와 Q8_0 본체 가중치 두 개를 모두 다운로드하도록 변경
-                                ("https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/mmproj-BF16.gguf", "mmproj-BF16.gguf"),
-                                ("https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf", "qwen3.5.gguf"),
+                                // 🚀 Qwen3.5 비전 프로젝터(mmproj)와 Q4_K_M 본체 가중치 두 개를 모두 다운로드하도록 변경
+                                ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-BF16.gguf", "mmproj-BF16.gguf"),
+                                ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf", "qwen3.5.gguf"),
                             ],
                             "Embedding" => vec![
                                 ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300m-Q4_0.gguf", "embeddinggemma-300m-Q4_0.gguf"),
