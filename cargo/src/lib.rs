@@ -17,7 +17,7 @@ pub mod chat_template {
     pub struct ChatTemplate;
     impl ChatTemplate {
         pub fn init(_path: &str) -> Result<Self> { Ok(Self) }
-        pub fn apply_chat_template(&self, _mes: &crate::params::chat::ChatCompletionParameters) -> Result<String> { Ok(String::new()) }
+        pub fn apply_chat_template(&self, _mes: &crate::openai_types::ChatCompletionParameters) -> Result<String> { Ok(String::new()) }
     }
 }
 

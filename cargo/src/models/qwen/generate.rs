@@ -528,10 +528,10 @@ impl QwenVLGenerateModel {
         // [CRITICAL FIX] CPU 모드일 경우 데이터 타입을 설정 파일 무시하고 F32로 완전히 통일
         let effective_dtype = if t_dev.is_cpu() { DType::F32 } else { parsed_dtype };
 
-        let gguf_f = find_type_files(path, "gguf")?; let mmproj_p = gguf_f.iter().find(|f| f.to_string_lossy().contains("mmproj")).cloned();
-        let mut m_p = gguf_f.iter().find(|f| f.to_string_lossy().contains("Qwen3-0.6B-Q8_0.gguf")).cloned();
-        if m_p.is_none() { m_p = gguf_f.iter().find(|f| f.to_string_lossy().contains("Qwen3-0.6B-Q4_K_M.gguf")).cloned(); }
-        if m_p.is_none() { m_p = gguf_f.iter().find(|f| !f.to_string_lossy().contains("mmproj")).cloned(); }
+        let gguf_f = find_type_files(path, "gguf")?; let mmproj_p = gguf_f.iter().find(|f| f.contains("mmproj")).cloned();
+        let mut m_p = gguf_f.iter().find(|f| f.contains("Qwen3-0.6B-Q8_0.gguf")).cloned();
+        if m_p.is_none() { m_p = gguf_f.iter().find(|f| f.contains("Qwen3-0.6B-Q4_K_M.gguf")).cloned(); }
+        if m_p.is_none() { m_p = gguf_f.iter().find(|f| !f.contains("mmproj")).cloned(); }
         let qwen = if !gguf_f.is_empty() {
             let kv_res = hard_token_limit.unwrap_or(4096) as u64 * 40000;
             if mmproj_p.is_some() && !force_text_only {
@@ -550,7 +550,7 @@ impl QwenVLGenerateModel {
         } else { ModelVariant::Standard(QwenVLModel::new(cfg, unsafe { VarBuilder::from_mmaped_safetensors(&find_type_files(path, "safetensors")?, effective_dtype, &t_dev)? })?) };
         let g_p = std::path::Path::new(cfg_path).join("generation_config.json"); let g_cfg = if g_p.exists() { serde_json::from_slice(&std::fs::read(g_p)?)? } else { QwenVLGenerationConfig::default() };
         let (e1, e2) = match &g_cfg.eos_token_id { serde_json::Value::Number(n) => { let id = n.as_u64().unwrap_or(151645) as u32; (id, id) }, serde_json::Value::Array(arr) => { (arr.get(0).and_then(|v| v.as_u64()).unwrap_or(151643) as u32, arr.get(1).and_then(|v| v.as_u64()).unwrap_or(151643) as u32) }, _ => (151643, 151643) };
-        let loaded_model_name = if m_p.as_ref().map(|p| p.to_string_lossy().contains("0.6B")).unwrap_or(false) { "0.6B".to_string() } else { "2B".to_string() };
+        let loaded_model_name = if m_p.as_ref().map(|p| p.contains("0.6B")).unwrap_or(false) { "0.6B".to_string() } else { "2B".to_string() };
         
         // pre_processor 에도 effective_dtype를 전달하여 생성 단계부터 F32 보장
         Ok(Self { chat_template, tokenizer, pre_processor: QwenVLProcessor::new(tok_path, &v_dev, effective_dtype)?, qwen, text_device: t_dev, vision_device: v_dev, eos_token_id1: e1, eos_token_id2: e2, generation_config: g_cfg, model_name: loaded_model_name, hard_token_limit, kv_root })

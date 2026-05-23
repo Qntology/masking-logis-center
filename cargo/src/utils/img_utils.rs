@@ -27,7 +27,7 @@ pub fn get_image(file: &str) -> Result<DynamicImage> {
         return Err(anyhow!("HTTP URLs not supported in local mode".to_string()));
     }
     if file.starts_with("file://") {
-        let path = url::Url::parse(file)?;
+        let path = reqwest::Url::parse(file)?;
         let path = path.to_file_path();
         let path = match path {
             Ok(path) => path,

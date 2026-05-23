@@ -703,7 +703,7 @@ pub struct Qwen3VLTextModel {
     embed_tokens: Embedding,
     layers: Vec<Qwen3DecoderLayer>,
     norm: RmsNorm,
-    rotary_emb: QwenVLTextRotaryEmbedding,
+    rotary_emb: Qwen3VLTextRotaryEmbedding,
     mrope_section: Vec<usize>,
 }
 
@@ -720,7 +720,7 @@ impl Qwen3VLTextModel {
         }
         let norm = rms_norm(config.hidden_size, config.rms_norm_eps, vb.pp("norm"))?;
         let head_dim = config.head_dim;
-        let rotary_emb = QwenVLTextRotaryEmbedding::new(head_dim, config.rope_theta);
+        let rotary_emb = Qwen3VLTextRotaryEmbedding::new(head_dim, config.rope_theta);
         let mrope_section = config.rope_scaling.mrope_section.clone();
         Ok(Self {
             embed_tokens,
