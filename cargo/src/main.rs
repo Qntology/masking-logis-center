@@ -2218,11 +2218,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             }
                                         }
                                         let ocr_result = if let Some(model) = local_model.as_mut() {
+                                            let lang = load_app_config().language.unwrap_or_else(|| "Korean".to_string());
+                                            let ocr_prompt = format!("[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {{'language':'{}', 'image_text':'...'}} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think", lang);
+
                                             // 🚀 새로운 OpenAI 규격에 맞춰 파라미터 계층 구조를 조립합니다.
                                             let params = ChatCompletionParameters {
                                                 messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                                     content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                                        ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {'image_text':'...'} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
+                                                        ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: ocr_prompt }),
                                                         ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: full_data_url.to_string(), detail: None } })
                                                     ]),
                                                     name: None,
@@ -2376,11 +2379,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let mut ocr_success = false;
                                                 let mut cleaned_ocr = String::new();
                                                 
+                                                let lang = load_app_config().language.unwrap_or_else(|| "Korean".to_string());
+                                                let ocr_prompt = format!("[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {{'language':'{}', 'image_text':'...'}} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think", lang);
+
                                                 // 🚀 OCR용 파라미터 적용
                                                 let params = ChatCompletionParameters {
                                                     messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                                         content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {'image_text':'...'} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
+                                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: ocr_prompt }),
                                                             ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: record.context.clone(), detail: None } })
                                                         ]),
                                                         name: None,
@@ -2739,11 +2745,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             }
                             
                             if let Some(model) = local_model.as_mut() {
+                                let lang = load_app_config().language.unwrap_or_else(|| "Korean".to_string());
+                                let ocr_prompt = format!("[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {{'language':'{}', 'image_text':'...'}} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think", lang);
+
                                 // 🚀 OCR 파라미터 갱신
                                 let params = ChatCompletionParameters {
                                     messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                                         content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {'image_text':'...'} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string() }),
+                                            ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: ocr_prompt }),
                                             ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: full_data_url.to_string(), detail: None } })
                                         ]),
                                         name: None,
