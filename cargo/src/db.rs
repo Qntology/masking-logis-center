@@ -19,6 +19,8 @@ pub struct CommerceRecord {
     pub domain: String,
     pub context: String,
     #[serde(default)]
+    pub context_for_llm: String, // 🚀 NEW: HTML 전처리 시 이미지 태그를 아예 배제한 LLM 전용 텍스트
+    #[serde(default)]
     pub masking: String,
     #[serde(default)]
     pub label: String, // 🚀 NEW: 추출된 라벨 JSON을 저장하는 필드
@@ -49,6 +51,7 @@ pub async fn get_or_create_table() -> Result<lancedb::Table, lancedb::Error> {
                 Field::new("title", DataType::Utf8, false),
                 Field::new("domain", DataType::Utf8, false),
                 Field::new("context", DataType::Utf8, false),
+                Field::new("context_for_llm", DataType::Utf8, false), // 🚀 NEW
                 Field::new("masking", DataType::Utf8, false),
                 Field::new("label", DataType::Utf8, false), // 🚀 NEW
                 Field::new("status", DataType::Utf8, false),
@@ -80,7 +83,12 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
         // DRAFT 상태이거나 아직 마스킹 로직을 타지 않아 비어있는 경우 context 텍스트를 기본값으로 채워줍니다.
         // (실제 정규 마스킹 처리는 push_data 시점 백엔드에서 수행됨)
         if record.masking.is_empty() {
-            record.masking = record.context.clone();
+            // 🚀 FIX: 데이터 최초 생성 시에도 이미지가 제외된 LLM 텍스트를 기반으로 Masking 값을 초기화합니다.
+            record.masking = if !record.context_for_llm.trim().is_empty() {
+                record.context_for_llm.clone()
+            } else {
+                record.context.clone()
+            };
         }
         
         // Domain Categorization
@@ -109,6 +117,7 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
     let title_array = Arc::new(StringArray::from(records.iter().map(|r| r.title.as_str()).collect::<Vec<&str>>())) as ArrayRef;
     let domain_array = Arc::new(StringArray::from(records.iter().map(|r| r.domain.as_str()).collect::<Vec<&str>>())) as ArrayRef;
     let context_array = Arc::new(StringArray::from(records.iter().map(|r| r.context.as_str()).collect::<Vec<&str>>())) as ArrayRef;
+    let context_for_llm_array = Arc::new(StringArray::from(records.iter().map(|r| r.context_for_llm.as_str()).collect::<Vec<&str>>())) as ArrayRef; // 🚀 NEW
     let masking_array = Arc::new(StringArray::from(records.iter().map(|r| r.masking.as_str()).collect::<Vec<&str>>())) as ArrayRef;
     let label_array = Arc::new(StringArray::from(records.iter().map(|r| r.label.as_str()).collect::<Vec<&str>>())) as ArrayRef; // 🚀 NEW
     let status_array = Arc::new(StringArray::from(records.iter().map(|r| r.status.as_str()).collect::<Vec<&str>>())) as ArrayRef;
@@ -136,6 +145,7 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
         Field::new("title", DataType::Utf8, false),
         Field::new("domain", DataType::Utf8, false),
         Field::new("context", DataType::Utf8, false),
+        Field::new("context_for_llm", DataType::Utf8, false), // 🚀 NEW
         Field::new("masking", DataType::Utf8, false),
         Field::new("label", DataType::Utf8, false), // 🚀 NEW
         Field::new("status", DataType::Utf8, false),
@@ -148,7 +158,7 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
 
     let batch = RecordBatch::try_new(
         schema.clone(),
-        vec![id_array, host_array, url_array, title_array, domain_array, context_array, masking_array, label_array, status_array, track_array, version_array, created_at_array, updated_at_array, vector_array] // 🚀 NEW array added
+        vec![id_array, host_array, url_array, title_array, domain_array, context_array, context_for_llm_array, masking_array, label_array, status_array, track_array, version_array, created_at_array, updated_at_array, vector_array] // 🚀 NEW array added
     ).map_err(|e| lancedb::Error::Runtime { message: e.to_string() })?;
 
     table.add(vec![batch]).execute().await?;
@@ -212,14 +222,15 @@ fn extract_from_batch(batch: &RecordBatch, results: &mut Vec<CommerceRecord>) ->
     let titles = batch.column(3).as_string::<i32>();
     let domains = batch.column(4).as_string::<i32>();
     let contexts = batch.column(5).as_string::<i32>();
-    let maskings = batch.column(6).as_string::<i32>();
-    let labels = batch.column(7).as_string::<i32>(); // 🚀 NEW
-    let statuses = batch.column(8).as_string::<i32>();
-    let tracks = batch.column(9).as_string::<i32>();
-    let versions = batch.column(10).as_primitive::<Int32Type>();
-    let created_ats = batch.column(11).as_primitive::<Int64Type>();
-    let updated_ats = batch.column(12).as_primitive::<Int64Type>();
-    let vectors_list = batch.column(13).as_fixed_size_list();
+    let contexts_for_llm = batch.column(6).as_string::<i32>(); // 🚀 NEW
+    let maskings = batch.column(7).as_string::<i32>();
+    let labels = batch.column(8).as_string::<i32>(); // 🚀 NEW
+    let statuses = batch.column(9).as_string::<i32>();
+    let tracks = batch.column(10).as_string::<i32>();
+    let versions = batch.column(11).as_primitive::<Int32Type>();
+    let created_ats = batch.column(12).as_primitive::<Int64Type>();
+    let updated_ats = batch.column(13).as_primitive::<Int64Type>();
+    let vectors_list = batch.column(14).as_fixed_size_list();
     let vectors_values = vectors_list.values().as_primitive::<Float32Type>();
 
     for i in 0..batch.num_rows() {
@@ -235,6 +246,7 @@ fn extract_from_batch(batch: &RecordBatch, results: &mut Vec<CommerceRecord>) ->
             title: titles.value(i).to_string(),
             domain: domains.value(i).to_string(),
             context: contexts.value(i).to_string(),
+            context_for_llm: contexts_for_llm.value(i).to_string(), // 🚀 NEW
             masking: maskings.value(i).to_string(),
             label: labels.value(i).to_string(), // 🚀 NEW
             status: statuses.value(i).to_string(),

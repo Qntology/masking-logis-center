@@ -2417,10 +2417,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                                 let is_image = record.context.contains("data:image/") || record.url.starts_with("file://");
                                 if !is_image && record.context.contains('<') && record.context.contains('>') {
-                                    let cleaned_context = harness.clean_html(&record.context);
+                                    let cleaned_context = harness.clean_html(&record.context, true);
+                                    let cleaned_context_for_llm = harness.clean_html(&record.context, false); // 🚀 NEW: 전처리 시점에서 2가지 타입 동시 생성
                                     record.context = cleaned_context;
+                                    record.context_for_llm = cleaned_context_for_llm; // 🚀 NEW
                                     println!("[System] 동기화: 웹페이지 태그 평탄화 수행됨.");
                                 } else if !is_image {
+                                    record.context_for_llm = record.context.clone(); // 🚀 NEW: 이미 순수 텍스트면 복사해서 사용
                                     println!("[System] 동기화: 순수 텍스트 감지 (평탄화 건너뜀).");
                                 }
 
@@ -2509,9 +2512,13 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         if !is_image {
                                             let raw_content = record.context.clone();
                                             if raw_content.contains('<') && raw_content.contains('>') {
-                                                record.context = harness.clean_html(&raw_content);
+                                                record.context = harness.clean_html(&raw_content, true);
+                                                record.context_for_llm = harness.clean_html(&raw_content, false); // 🚀 NEW: 전처리 시점에서 2가지 타입 동시 생성
                                                 println!("[System] 웹페이지 HTML 태그 평탄화 완료. (ID: {})", record.id);
                                             } else {
+                                                if record.context_for_llm.is_empty() {
+                                                    record.context_for_llm = record.context.clone(); // 🚀 NEW
+                                                }
                                                 println!("[System] 웹페이지 순수 텍스트 유지됨. (ID: {})", record.id);
                                             }
                                         }
@@ -2569,6 +2576,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let mut local_model = QWEN_MODEL.lock().unwrap().take();
                                                 if let Some(model) = local_model.as_mut() {
                                                     let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
+                                                    // 🚀 FIX: OCR 추출 시에도 이전 문맥이 섞여 패닉(Index Out of Bounds)이 일어나는 것을 완벽하게 방지합니다.
+                                                    model.clear_kv_cache();
                                                     match model.generate(params, Some(cancel_flag), Some(record.id.clone()), None).await {
                                                         Ok(raw_ocr) => {
                                                             cleaned_ocr = raw_ocr.replace("```json", "").replace("```", "").trim().to_string();
@@ -2646,16 +2655,27 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     break;
                                                 }
 
-                                                let mut masked_text = record.context.clone();
+                                                // 🚀 DB의 masking 컬럼에도 이미지가 완전히 제거된 텍스트를 저장하도록 초기값을 변경합니다.
+                                                let mut masked_text = if !record.context_for_llm.trim().is_empty() {
+                                                    record.context_for_llm.clone()
+                                                } else {
+                                                    record.context.clone()
+                                                };
                                                 
                                                 if has_error.is_none() && !masked_text.trim().is_empty() {
+                                                    // 🚀 NEW: DB에 분리 저장해둔 LLM 전용 텍스트를 마스킹 원본으로 사용합니다.
+                                                    let text_for_masking = masked_text.clone();
+
+                                                    // 🚀 NEW: 개발자 확인용 로그 - LLM에게 실제로 전달되는 "이미지가 제거된" 텍스트를 출력합니다.
+                                                    println!("[System] [LLM 실제 입력 텍스트 확인용 (ID: {})]\n{}", record.id, text_for_masking);
+
                                                     // 🚀 NEW: 요구사항에 맞춘 구체적인 영문 프롬프트 카테고리
                                                     // 🚀 FIX: 객체의 키를 라벨로, 값을 단어로 사용하도록 프롬프트 수정
                                                     // 🚀 FIX: 할루시네이션 방지를 위해 Example 문구를 완전히 제거합니다.
                                                     // 🚀 FIX: RETURN JSON ONLY 사용 시 강제되는 '{' 구조와 충돌하지 않도록 감싸는 객체(items) 형태로 지시합니다.
                                                     let prompt = format!(
                                                         "[TASK] Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think",
-                                                        masked_text
+                                                        text_for_masking
                                                     );
 
                                                     // 🚀 Masking용 파라미터 적용
@@ -2675,6 +2695,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     let mut local_model = QWEN_MODEL.lock().unwrap().take();
                                                     if let Some(model) = local_model.as_mut() {
                                                         let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
+                                                        // 🚀 다음 아이템 처리 시 이전 아이템의 KV 캐시 길이(kv_len)가 남아있어 배열 인덱스 초과(Index Out of Bounds)로 인해 스레드가 패닉(중단)되는 현상을 원천 차단합니다.
+                                                        model.clear_kv_cache();
                                                         match model.generate(params, Some(cancel_flag), Some(record.id.clone()), None).await {
                                                             Ok(json_res) => {
                                                                 let cleaned_json = json_res.replace("```json", "").replace("```", "").trim().to_string();
@@ -3026,6 +3048,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 }
                                 
                                 if let Some(model) = local_model.as_mut() {
+                                    // 🚀 FIX: 이미지/문서 파일의 OCR 텍스트 결과에는 애초에 [Image: ] HTML 태그가 들어있지 않으므로, 원본 ocr_result를 그대로 사용합니다.
+                                    
                                     // 🚀 FIX: 객체의 키를 라벨로, 값을 단어로 사용하도록 프롬프트 수정
                                     // 🚀 FIX: 할루시네이션 방지를 위해 Example 문구를 완전히 제거합니다.
                                     // 🚀 FIX: RETURN JSON ONLY 사용 시 강제되는 '{' 구조와 충돌하지 않도록 감싸는 객체(items) 형태로 지시합니다.
