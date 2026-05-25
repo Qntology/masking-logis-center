@@ -1,4 +1,4 @@
-use terminal_logis_center_lib::{db, openai_types}; 
+use terminal_logis_center_lib::db; 
 use candle_core::Device;
 use terminal_logis_center_lib::models::qwen3_5::generate::Qwen3_5GenerateModel;
 use terminal_logis_center_lib::openai_types::{
@@ -285,14 +285,6 @@ lazy_static! {
         .filter_map(|l| l.split_whitespace().last())
         .filter(|l| !l.is_empty())
         .collect();
-}
-
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ModelSize {
-    Qwen,    // 0.6B for Ingestion (기존 Small)
-    Qwen3,   // Qwen3 Text Model (기존 Large, /qwen3/ 로직 전용)
-    Qwen3_5, // 0.8B Qwen 3.5 (Text Optimized)
 }
 
 // 🚀 NEW: 임의의 사전 조합으로 @형용사_명사@ 형태의 고유 마스킹 텍스트 생성
@@ -2662,8 +2654,19 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 ..Default::default()
                                             };
                                             
-                                            // 🚀 락이 해제된 자유로운 상태에서 추론
-                                            model.generate(params, None, Some(record.id.clone()), Some("image".to_string())).await.unwrap_or_default()
+                                            // 🚀 기존 방식: 직접 릴레이 & 락을 걸고 제너레이터 호출
+                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, None).await {
+                                                println!("[Error] VRAM Relay failed: {}", e);
+                                                "OCR Model Load Error".to_string()
+                                            } else {
+                                                let _ = model.ensure_qwen3_5(true).await; // Vision 모드 탑재
+                                                if let Some(gen) = model.qwen3_5_generator.lock().await.as_mut() {
+                                                    gen.clear_kv_cache();
+                                                    gen.generate(params, None, Some(record.id.clone()), Some("image".to_string())).await.unwrap_or_default()
+                                                } else {
+                                                    "OCR Model Load Error".to_string()
+                                                }
+                                            }
                                         } else { "OCR Model Load Error".to_string() };
                                         
                                         {
@@ -2687,6 +2690,95 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 } else if !is_image {
                                     record.context_for_llm = record.context.clone(); // 🚀 NEW: 이미 순수 텍스트면 복사해서 사용
                                     println!("[System] 동기화: 순수 텍스트 감지 (평탄화 건너뜀).");
+                                }
+
+                                // 🚀 [PRIVACY] Push 단계 이전에 추출 스케줄러 패턴을 대입하여 Qwen3.5 직접 호출
+                                let target_text = if !record.context_for_llm.trim().is_empty() {
+                                    record.context_for_llm.clone()
+                                } else {
+                                    record.context.clone()
+                                };
+                                
+                                let should_mask = load_app_config().enable_masking.unwrap_or(true);
+                                if should_mask && !target_text.trim().is_empty() {
+                                    let model_wrapper = {
+                                        let mut model_guard = QWEN_MODEL.lock().await;
+                                        if model_guard.is_none() {
+                                            let device = terminal_logis_center_lib::utils::get_cuda_device(0);
+                                            if let Ok(m) = LogisModel::new(&device).await {
+                                                *model_guard = Some(m);
+                                            }
+                                        }
+                                        model_guard.as_ref().cloned()
+                                    };
+
+                                    if let Some(model) = model_wrapper {
+                                        println!("[Scheduler] Qwen3.5: Asking extraction question for masking...");
+                                        
+                                        // 기존의 Extraction Instruction 포맷을 그대로 유지하며 PII 추출을 강제합니다.
+                                        let prompt = format!(
+                                            "[TASK] Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think",
+                                            target_text
+                                        );
+
+                                        let params = ChatCompletionParameters {
+                                            messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                                                content: ChatCompletionRequestUserMessageContent::Text(prompt),
+                                                name: None,
+                                            })],
+                                            model: "qwen3.5".to_string(),
+                                            max_tokens: Some(1048),
+                                            temperature: Some(0.0),
+                                            top_p: Some(0.95),
+                                            ..Default::default()
+                                        };
+
+                                        // 취소 플래그를 위한 더미 토큰 생성
+                                        let dummy_cancel = Arc::new(AtomicBool::new(false));
+                                        let snapshot_id = format!("{}_detail", record.id);
+                                        
+                                        match model.generate(params, Some(dummy_cancel), Some(snapshot_id), Some("text".to_string())).await {
+                                            Ok(res_text) => {
+                                                println!("[DEBUG-SCHED] Step C Raw Response: '{}'", res_text);
+                                                let cleaned_json = res_text.replace("```json", "").replace("```", "").trim().to_string();
+                                                
+                                                #[derive(serde::Deserialize)]
+                                                struct PiiResponse { items: Vec<std::collections::HashMap<String, String>> }
+                                                
+                                                if let Ok(parsed_res) = serde_json::from_str::<PiiResponse>(&cleaned_json) {
+                                                    let mut label_map = serde_json::Map::new();
+                                                    let mut masked_text = record.context.clone();
+                                                    
+                                                    // 추출된 JSON 알맹이만 빼내어 니모닉 마스킹 수행
+                                                    for map in parsed_res.items {
+                                                        for (label, word) in map {
+                                                            if word.trim().chars().count() > 1 {
+                                                                let mnemonic = generate_mnemonic();
+                                                                label_map.insert(mnemonic.clone(), serde_json::json!({ "word": word.clone(), "label": label }));
+                                                                masked_text = masked_text.replace(&word, &mnemonic);
+                                                            }
+                                                        }
+                                                    }
+                                                    record.masking = masked_text;
+                                                    record.label = serde_json::Value::Object(label_map).to_string();
+                                                }
+                                            },
+                                            Err(e) => {
+                                                println!("[Scheduler] ERROR: Qwen 3.5 generation failed! {:?}", e);
+                                            }
+                                        }
+                                        
+                                        // 메모리 정리
+                                        {
+                                            let mut model_guard = QWEN_MODEL.lock().await;
+                                            if let Some(m) = model_guard.take() { m.deep_purge().await; }
+                                        }
+                                        force_memory_cleanup();
+                                    } else {
+                                        println!("[Scheduler] ERROR: Qwen 3.5 LogisModel is missing!");
+                                    }
+                                } else {
+                                    record.masking = record.context.clone();
                                 }
 
                                 tokio::task::yield_now().await; // 🚀 추가: 저장 전 스레드 양보
@@ -2834,8 +2926,24 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                     };
 
                                                     let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
-                                                    // 🚀 자유로운 락 프리 상태에서 안전한 내부 래퍼를 통해 추론!
-                                                    match model.generate(params, Some(cancel_flag), Some(record.id.clone()), Some("image".to_string())).await {
+                                                    
+                                                    // 🚀 기존 방식: 직접 릴레이 & 락을 걸고 제너레이터 호출
+                                                    let gen_result = {
+                                                        if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
+                                                            Err(format!("VRAM Relay Error: {}", e))
+                                                        } else {
+                                                            let _ = model.ensure_qwen3_5(true).await; // Vision 모드 탑재
+                                                            let mut gen_guard = model.qwen3_5_generator.lock().await;
+                                                            if let Some(gen) = gen_guard.as_mut() {
+                                                                gen.clear_kv_cache();
+                                                                gen.generate(params, Some(cancel_flag), Some(record.id.clone()), Some("image".to_string())).await.map_err(|e| e.to_string())
+                                                            } else {
+                                                                Err("Model missing".to_string())
+                                                            }
+                                                        }
+                                                    };
+
+                                                    match gen_result {
                                                         Ok(raw_ocr) => {
                                                             cleaned_ocr = raw_ocr.replace("```json", "").replace("```", "").trim().to_string();
                                                             ocr_success = true;
@@ -2936,7 +3044,24 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                         };
 
                                                         let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
-                                                        match model.generate(params, Some(cancel_flag), Some(record.id.clone()), Some("text".to_string())).await {
+                                                        
+                                                        // 🚀 기존 방식: 직접 릴레이 & 락을 걸고 제너레이터 호출
+                                                        let gen_result = {
+                                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
+                                                                Err(format!("VRAM Relay Error: {}", e))
+                                                            } else {
+                                                                let _ = model.ensure_qwen3_5(false).await; // 텍스트 모드 전용
+                                                                let mut gen_guard = model.qwen3_5_generator.lock().await;
+                                                                if let Some(gen) = gen_guard.as_mut() {
+                                                                    gen.clear_kv_cache();
+                                                                    gen.generate(params, Some(cancel_flag), Some(record.id.clone()), Some("text".to_string())).await.map_err(|e| e.to_string())
+                                                                } else {
+                                                                    Err("Model missing".to_string())
+                                                                }
+                                                            }
+                                                        };
+
+                                                        match gen_result {
                                                             Ok(json_res) => {
                                                                 let cleaned_json = json_res.replace("```json", "").replace("```", "").trim().to_string();
                                                                 
@@ -3234,7 +3359,24 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     ..Default::default()
                                 };
                                 let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
-                                match model.generate(params, Some(cancel_flag), Some("123".to_string()), Some("image".to_string())).await {
+                                
+                                // 🚀 기존 방식: 직접 릴레이 & 락을 걸고 제너레이터 호출
+                                let gen_result = {
+                                    if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
+                                        Err(format!("VRAM Relay Error: {}", e))
+                                    } else {
+                                        let _ = model.ensure_qwen3_5(true).await; // Vision 모드 탑재
+                                        let mut gen_guard = model.qwen3_5_generator.lock().await;
+                                        if let Some(gen) = gen_guard.as_mut() {
+                                            gen.clear_kv_cache();
+                                            gen.generate(params, Some(cancel_flag), Some("123".to_string()), Some("image".to_string())).await.map_err(|e| e.to_string())
+                                        } else {
+                                            Err("Model missing".to_string())
+                                        }
+                                    }
+                                };
+
+                                match gen_result {
                                     Ok(res) => {
                                         ocr_result = res;
                                         println!("[Qwen3.5] 단일 파일 생성된 텍스트 결과:\n{}", ocr_result);
@@ -3294,7 +3436,24 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         ..Default::default()
                                     };
                                     let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
-                                    match model.generate(params, Some(cancel_flag), Some("123123".to_string()), Some("text".to_string())).await {
+                                    
+                                    // 🚀 기존 방식: 직접 릴레이 & 락을 걸고 제너레이터 호출
+                                    let gen_result = {
+                                        if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
+                                            Err(format!("VRAM Relay Error: {}", e))
+                                        } else {
+                                            let _ = model.ensure_qwen3_5(false).await; // 텍스트 전용 모드
+                                            let mut gen_guard = model.qwen3_5_generator.lock().await;
+                                            if let Some(gen) = gen_guard.as_mut() {
+                                                gen.clear_kv_cache();
+                                                gen.generate(params, Some(cancel_flag), Some("123123".to_string()), Some("text".to_string())).await.map_err(|e| e.to_string())
+                                            } else {
+                                                Err("Model missing".to_string())
+                                            }
+                                        }
+                                    };
+
+                                    match gen_result {
                                         Ok(json_res) => {
                                             let cleaned_json = json_res.replace("```json", "").replace("```", "").trim().to_string();
                                             masked_result = ocr_result.clone();
