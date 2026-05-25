@@ -17,254 +17,795 @@ use tokio::sync::Mutex as TokioMutex;
 use terminal_logis_center_lib::models::qwen::generate::QwenVLGenerateModel;
 use terminal_logis_center_lib::models::qwen3::generate::Qwen3GenerateModel;
 use std::time::{Duration, Instant};
+use std::sync::Arc;
+use anyhow::anyhow;
+use terminal_logis_center_lib::utils;
+use candle_core::DType;
+use terminal_logis_center_lib::models::embedding::EmbeddingModel;
+use terminal_logis_center_lib::openai_types::ChatCompletionRequestSystemMessage;
+use image::DynamicImage;
+use std::io::Cursor;
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ModelSize {
-    Qwen,    // 0.6B VLM
-    Qwen3,   // 0.6B Text
-    Qwen3_5, // 0.8B Vision/Text
+    Qwen,    // 0.6B for Ingestion (기존 Small)
+    Qwen3,   // Qwen3 Text Model (기존 Large, /qwen3/ 로직 전용)
+    Qwen3_5, // 0.8B Qwen 3.5 (Text Optimized)
 }
 
-// 🚀 NEW: aa.rs의 LogisModel을 cc.rs에 완벽하게 이식한 LogisModel (Qwen, Qwen3, Qwen3.5 멀티 모델 및 VRAM 릴레이 지원)
 #[derive(Clone)]
 pub struct LogisModel {
-    pub qwen_generator: Arc<TokioMutex<Option<QwenVLGenerateModel>>>,
-    pub qwen3_generator: Arc<TokioMutex<Option<Qwen3GenerateModel>>>,
+    pub generator: Arc<TokioMutex<Option<QwenVLGenerateModel>>>, 
+    // 🌟 [복구 완료] 사용자님이 원하시던 오리지널 Qwen3 텍스트 전용 로직을 띄웁니다!
+    pub qwen3_generator: Arc<TokioMutex<Option<Qwen3GenerateModel>>>, 
     pub qwen3_5_generator: Arc<TokioMutex<Option<Qwen3_5GenerateModel>>>,
-    pub current_size: Arc<TokioMutex<Option<ModelSize>>>,
-    pub device: Device,
-    pub is_cpu_mode: bool,
+    
+    pub embedding_model: Arc<TokioMutex<Option<EmbeddingModel>>>,
+
+    pub is_cpu_mode: bool, 
+    pub is_disk_swap: bool,
+    pub dual_mode_enabled: bool,
+    
+    // Config for Lazy Reloading
+    qwen_model_path: String,      // 🌟 (기존 small_model_path 대신 이름 맞춤)
+    qwen3_model_path: String,     // 🌟 Qwen3 모델 경로 추가
+    qwen3_5_model_path: String,
+    embedding_path: std::path::PathBuf,
+    pub device_config: utils::DeviceConfig,
+    max_tokens_limit: u32,
+    _dtype: Option<DType>, 
+    current_size: Arc<TokioMutex<Option<ModelSize>>>,
 }
 
 impl LogisModel {
-    pub async fn new(device: &Device) -> Result<Self, String> {
-        // aa.rs처럼 처음에는 모델을 로드하지 않고 껍데기만 준비하여 VRAM을 절약합니다.
-        Ok(Self {
-            qwen_generator: Arc::new(TokioMutex::new(None)),
-            qwen3_generator: Arc::new(TokioMutex::new(None)),
-            qwen3_5_generator: Arc::new(TokioMutex::new(None)),
-            current_size: Arc::new(TokioMutex::new(None)),
-            device: device.clone(),
-            is_cpu_mode: device.is_cpu(),
-        })
+    pub async fn unload_generator(&self) {
+        let mut gen = self.generator.lock().await;
+        *gen = None;
+        let mut q3_gen = self.qwen3_generator.lock().await; 
+        *q3_gen = None;
+        let mut q35_gen = self.qwen3_5_generator.lock().await;
+        *q35_gen = None;
+        
+        let mut size = self.current_size.lock().await;
+        *size = None;
+        println!("[MODEL] All generators (Active) destroyed."); 
     }
 
-    pub async fn deep_purge(&self) {
-        self.deep_purge_resources().await;
+    pub async fn unload_embedding(&self) {
+        let mut emb = self.embedding_model.lock().await;
+        if emb.is_some() {
+            *emb = None;
+            println!("[MODEL] Embedding Model unloaded to free VRAM.");
+        }
     }
 
+    /// [CLEANUP] Aggressive Factory Reset Purge (Reinforced with Diagnostics)
     pub async fn deep_purge_resources(&self) {
+        println!("[DIAG-PURGE] Step 0: Waiting for background IO to finish...");
+        terminal_logis_center_lib::models::qwen::generate::wait_for_global_io().await; // [cite: 254]
+
         println!("[DIAG-PURGE] Step 1: Clearing ALL Generation Slots...");
+        
         {
-            let mut gen = self.qwen_generator.lock().await;
+            let mut gen = self.generator.lock().await;
             if let Some(mut g) = gen.take() {
-                g.clear_kv_cache();
-                let _ = g.drop_kv_storage().await; 
+                println!("[DIAG-PURGE] Dropping Active Generator (0.6B)...");
+                let _ = g.clear_kv_cache();
+                let _ = g.qwen.drop_kv_storage(); 
+                drop(g); 
             }
         }
+        
+        // 🌟 [신규] Qwen3 (텍스트 전용) 슬롯 해제 추가
         {
-            let mut gen = self.qwen3_generator.lock().await;
-            if let Some(mut g) = gen.take() {
-                g.clear_kv_cache();
+            let mut q3_gen = self.qwen3_generator.lock().await;
+            if let Some(mut g) = q3_gen.take() {
+                println!("[DIAG-PURGE] Dropping Qwen3 Generator...");
+                g.clear_kv_cache(); // Qwen3 구조체에 구현된 캐시 클리어 호출
+                drop(g);
             }
-        }
-        {
-            let mut gen = self.qwen3_5_generator.lock().await;
-            if let Some(mut g) = gen.take() {
-                g.clear_kv_cache();
-            }
-        }
-        {
-            let mut size = self.current_size.lock().await;
-            *size = None;
         }
 
-        println!("[DIAG-PURGE] Step 2: Synchronizing CUDA Context...");
+        {
+            let mut q35_gen = self.qwen3_5_generator.lock().await;
+            if let Some(mut g) = q35_gen.take() {
+                println!("[DIAG-PURGE] Dropping Qwen 3.5 Generator..."); //
+                g.clear_kv_cache();
+                drop(g);
+            }
+        }
+        
+        println!("[DIAG-PURGE] Step 2: Clearing Embedding Model...");
+        {
+            let mut emb = self.embedding_model.lock().await;
+            if let Some(e) = emb.take() { 
+                drop(e); 
+            }
+        }
+        
+        println!("[DIAG-PURGE] Step 3: Synchronizing CUDA Context...");
         if !self.is_cpu_mode {
-            let dev = self.device.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                if dev.is_cuda() { let _ = dev.synchronize(); }
-            }).await;
+            let dev = self.device_config.device.clone();
+            let sync_res = tokio::time::timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || {
+                if dev.is_cuda() { 
+                    println!("[DIAG-PURGE] Executing dev.synchronize()...");
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        dev.synchronize()
+                    }))
+                } else { Ok(Ok(())) }
+            })).await;
+            
+            match sync_res {
+                Ok(Ok(Ok(Ok(_)))) => println!("[DIAG-PURGE] CUDA Synchronization Successful."),
+                Ok(Ok(Ok(Err(e)))) => println!("[DIAG-PURGE] CUDA Sync Error: {:?}", e),
+                Ok(Err(_)) => println!("[DIAG-PURGE] CUDA Sync Task Join Error."),
+                Err(_) => println!("[DIAG-PURGE] CUDA Sync Timeout! Continuing purge."),
+                _ => println!("[DIAG-PURGE] CUDA Sync Panicked or Failed."),
+            }
         }
 
-        println!("[DIAG-PURGE] Step 3: Flushing OS Memory...");
+        println!("[DIAG-PURGE] Step 4: Flushing OS Memory...");
         #[cfg(target_os = "windows")]
         unsafe {
-            use windows_sys::Win32::System::Threading::GetCurrentProcess;
-            use windows_sys::Win32::System::Memory::{SetProcessWorkingSetSizeEx, QUOTA_LIMITS_HARDWS_MIN_DISABLE, QUOTA_LIMITS_HARDWS_MAX_DISABLE};
-            let _ = SetProcessWorkingSetSizeEx(GetCurrentProcess(), usize::MAX, usize::MAX, QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE);
+            use windows_sys::Win32::System::Threading::*;
+            use windows_sys::Win32::System::Memory::*;
+            let current_process = GetCurrentProcess();
+            let _ = SetProcessWorkingSetSizeEx(current_process, usize::MAX, usize::MAX, QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE);
         }
         #[cfg(target_os = "linux")]
         unsafe { extern "C" { fn malloc_trim(pad: usize) -> i32; } malloc_trim(0); }
         #[cfg(target_os = "macos")]
-        unsafe { extern "C" { fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: usize) -> usize; } malloc_zone_pressure_relief(std::ptr::null_mut(), 0); }
-        
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        unsafe { extern "C" { fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize; } malloc_zone_pressure_relief(std::ptr::null_mut(), 0); }
+
         println!("[DIAG-PURGE] Aggressive Purge Complete.");
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
-    async fn wait_for_vram_settle(&self, target_free_mb: u64, timeout_sec: u64, cancel_token: Option<Arc<AtomicBool>>) -> Result<(), String> {
-        if self.is_cpu_mode { return Ok(()); }
+    // --- [NEW] VRAM Settlement Monitor (Smart Polling) ---
+    async fn wait_for_vram_settle(&self, target_free_mb: u64, timeout_sec: u64, cancel_token: Option<Arc<AtomicBool>>) -> anyhow::Result<()> {
+        if self.is_cpu_mode { return Ok(()); } 
+
         println!("[VRAM-WATCH] Monitoring VRAM (Target > {} MB)...", target_free_mb);
         let start = Instant::now();
         let target_bytes = target_free_mb * 1024 * 1024;
+        let mut last_free = 0;
         let mut stable_ticks = 0;
+        let mut increasing_ticks = 0;
+        let mut has_flushed_ram = false;
 
         loop {
+            // 1. Cancellation Check
             if let Some(token) = &cancel_token {
-                if token.load(Ordering::Relaxed) { return Err("Task cancelled during VRAM wait".to_string()); }
+                if token.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(anyhow::anyhow!("Task cancelled during VRAM wait"));
+                }
             }
 
+            // 2. Measure VRAM
             let mut current_free = 0;
-            if let Ok(nvml) = nvml_wrapper::Nvml::init() {
-                if let Ok(dev) = nvml.device_by_index(0) {
+            use nvml_wrapper::Nvml;
+            if let Ok(nvml) = Nvml::init() {
+                if let Ok(dev) = nvml.device_by_index(self.device_config.gpu_id as u32) {
                     if let Ok(mem) = dev.memory_info() {
                         current_free = mem.free;
                     }
                 }
             }
 
+            // [FAST-PATH] Immediate Success
             if current_free >= target_bytes {
-                if stable_ticks >= 2 { 
+                if stable_ticks >= 2 { // Confirm stability for 1 sec
                     println!("[VRAM-WATCH] Success! VRAM Secured: {:.2} GB", current_free as f64 / 1e9);
-                    break; 
+                    break;
                 }
                 stable_ticks += 1;
             } else {
                 stable_ticks = 0;
             }
 
+            // [ADAPTIVE-LOGIC] Analyze Trend (20MB sensitivity)
+            if current_free > last_free + (20 * 1024 * 1024) { 
+                increasing_ticks += 1;
+                println!("[VRAM-WATCH] Reclaiming... ({:.2} GB -> {:.2} GB)", last_free as f64/1e9, current_free as f64/1e9);
+            } else {
+                increasing_ticks = 0;
+            }
+
+            // [ACTIVE-FLUSH] If stuck for > 1.5s, trigger OS RAM cleanup
+            if start.elapsed().as_secs_f32() > 1.5 && !has_flushed_ram && current_free < target_bytes {
+                println!("[VRAM-WATCH] Triggering Aggressive OS Working Set Trim...");
+                #[cfg(target_os = "windows")]
+                unsafe {
+                    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+                    use windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx;
+                    use windows_sys::Win32::System::Memory::QUOTA_LIMITS_HARDWS_MIN_DISABLE;
+                    use windows_sys::Win32::System::Memory::QUOTA_LIMITS_HARDWS_MAX_DISABLE;
+                    let _ = SetProcessWorkingSetSizeEx(GetCurrentProcess(), usize::MAX, usize::MAX, QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE);
+                }
+                has_flushed_ram = true;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                continue;
+            }
+
+            // [TIMEOUT-HANDLER]
             if start.elapsed().as_secs() > timeout_sec {
+                if increasing_ticks > 0 {
+                    println!("[VRAM-WATCH] Timeout reached but memory is freeing up. Extending wait...");
+                    increasing_ticks = 0;
+                    continue; 
+                }
                 println!("[VRAM-WATCH] Timeout reached. Proceeding with {:.2} GB (Target: {:.2} GB)", current_free as f64/1e9, target_free_mb as f64/1024.0);
                 break;
             }
+
+            last_free = current_free;
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
         Ok(())
     }
 
-    pub async fn secure_vram_relay(&self, target_size: ModelSize, cancel_token: Option<Arc<AtomicBool>>) -> Result<(), String> {
+    // --- [NEW] SSD Bridge Operations ---
+    pub async fn save_kv_snapshot(&self, task_id: &str, kv_name: Option<String>, offset: usize) -> anyhow::Result<String> {
+        let current_size = *self.current_size.lock().await;
+        let is_q35 = current_size == Some(ModelSize::Qwen3_5);
+        let generator_arc = self.generator.clone();
+        let task_id_str = task_id.to_string();
+        
+        tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let path = terminal_logis_center_lib::utils::paths::get_kv_dir(None).join(format!("{}.safetensors", task_id_str));
+            if is_q35 {
+                // Qwen3.5는 자체 flush 매커니즘을 사용하므로 패스만 반환
+                Ok(path.to_string_lossy().to_string())
+            } else {
+                let mut gen_guard = generator_arc.blocking_lock();
+                if let Some(gen) = gen_guard.as_mut() {
+                    println!("[SSD-BRIDGE] Saving KV snapshot to {:?}", path);
+                    gen.save_kv_to_disk(&path, kv_name.as_deref(), offset)?;
+                    Ok(path.to_string_lossy().to_string())
+                } else {
+                    Err(anyhow::anyhow!("No active generator to save snapshot from"))
+                }
+            }
+        }).await?
+    }
+
+    pub async fn truncate_kv_cache(&self, len: usize) -> anyhow::Result<()> {
+        let current_size = *self.current_size.lock().await;
+        let is_q35 = current_size == Some(ModelSize::Qwen3_5);
+        let generator_arc = self.generator.clone();
+        let q35_arc = self.qwen3_5_generator.clone();
+
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            if is_q35 {
+                let mut gen_guard = q35_arc.blocking_lock();
+                if let Some(gen) = gen_guard.as_mut() {
+                    gen.qwen3_5.language_model.truncate_kv_cache(len).map_err(|e| anyhow::anyhow!("Truncate failed: {}", e))
+                } else {
+                    Ok(())
+                }
+            } else {
+                let mut gen_guard = generator_arc.blocking_lock();
+                if let Some(gen) = gen_guard.as_mut() {
+                    gen.truncate_kv_cache(len).map_err(|e| anyhow::anyhow!("Truncate failed: {}", e))
+                } else {
+                    Ok(())
+                }
+            }
+        }).await?
+    }
+
+    pub async fn load_kv_snapshot(&self, task_id: &str, kv_name: Option<String>) -> anyhow::Result<()> {
+        let current_size = *self.current_size.lock().await;
+        let is_q35 = current_size == Some(ModelSize::Qwen3_5);
+        
+        let generator_arc = self.generator.clone();
+        let q35_arc = self.qwen3_5_generator.clone();
+        let task_id_str = task_id.to_string();
+        let kv_name_str = kv_name.unwrap_or_else(|| "text".to_string());
+
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let kv_root = terminal_logis_center_lib::utils::paths::get_kv_dir(None).join(&task_id_str);
+            let kv_type = kv_name_str.split('/').last().unwrap_or("text");
+            let kv_type = if kv_type == "inference" || kv_type == "reference" || kv_type.is_empty() { "text" } else { kv_type };
+
+            // 🌟 [핵심 픽스] 현재 모델이 Qwen 3.5(0.8B)라면 0.8B 방(q35_arc)에 스냅샷을 로드합니다!
+            if is_q35 {
+                let mut q35_guard = q35_arc.blocking_lock();
+                if let Some(gen) = q35_guard.as_mut() {
+                    let target_kv_name = format!("{}/inference/{}", task_id_str, kv_type);
+                    let target_kv_name = if !terminal_logis_center_lib::utils::paths::get_kv_dir(None).join(&target_kv_name).exists() {
+                        format!("{}/reference/{}", task_id_str, kv_type)
+                    } else { target_kv_name };
+                    
+                    println!("[SSD-BRIDGE] Restoring Qwen 3.5 Registry from {}", target_kv_name);
+                    gen.qwen3_5.language_model.restore_kv_registry(&target_kv_name)?;
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("No active Qwen 3.5 generator to load snapshot into"))
+                }
+            } else {
+                // 0.6B / 2B 로직은 그대로 유지
+                let paths_to_try = vec![
+                    kv_root.join("inference").join(kv_type),
+                    kv_root.join("reference").join(kv_type),
+                    kv_root.clone(),
+                ];
+
+                let mut target_path = None;
+                for p in paths_to_try {
+                    if p.exists() && std::fs::read_dir(&p).map(|mut d| d.next().is_some()).unwrap_or(false) {
+                        target_path = Some(p);
+                        break;
+                    }
+                }
+
+                if let Some(p) = target_path {
+                    let mut gen_guard = generator_arc.blocking_lock();
+                    if let Some(gen) = gen_guard.as_mut() {
+                        println!("[SSD-BRIDGE] Loading Directory-based KV snapshot from {:?}", p);
+                        gen.load_kv_from_disk(&p, None)?;
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("No active generator to load snapshot into"))
+                    }
+                } else {
+                    println!("[SSD-BRIDGE] No snapshot found for {} (Checked deep paths)", task_id_str);
+                    Ok(())
+                }
+            }
+        }).await?
+    }
+
+    // --- File: src/model.rs ---
+    
+    pub async fn secure_vram_relay(&self, target_size: ModelSize, task_id: Option<&str>, cancel_token: Option<Arc<AtomicBool>>, is_baking: bool, kv_name: Option<String>) -> anyhow::Result<()> {
         let start_time = Instant::now();
-        println!("[RELAY] Performing Deep Purge before loading {:?}...", target_size);
-        self.deep_purge_resources().await;
+        
+        println!("[RELAY] Performing Deep Purge before loading {:?} (Baking: {})...", target_size, is_baking);
+        self.deep_purge_resources().await; //
         
         if !self.is_cpu_mode {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let _ = self.wait_for_vram_settle(2000, 5, cancel_token.clone()).await;
+            self.wait_for_vram_settle(2000, 5, cancel_token.clone()).await?;
         }
 
+        // 🌟 [핵심 변경] Enum 타입에 따라 완벽하게 독립된 로더를 타도록 분기
         match target_size {
-            ModelSize::Qwen => self.ensure_qwen().await?,
-            ModelSize::Qwen3 => self.ensure_qwen3().await?,
-            ModelSize::Qwen3_5 => self.ensure_qwen3_5(false).await?, // 기본은 Text 모드
+            ModelSize::Qwen => {
+                // 기존 0.6B VLM 로직 (Small)
+                self.ensure_generator_ext(ModelSize::Qwen, false, is_baking).await?;
+                if let Some(tid) = task_id {
+                    self.load_kv_snapshot(tid, kv_name).await?;
+                }
+            },
+            ModelSize::Qwen3 => {
+                // 🌟 신규 0.8B 텍스트 전용 로직 (기존 Large 위치 대체)
+                // Part 1에서 만든 ensure_qwen3()를 호출하여 /qwen3/ 로직만 타게 합니다.
+                self.ensure_qwen3().await?;
+            },
+            ModelSize::Qwen3_5 => {
+                // 0.8B Qwen 3.5 로직
+                self.ensure_qwen3_5(false).await?; // 🌟 ModelSize::Qwen3_5 대신 false 로 변경
+            }
         }
 
         println!("[RELAY] Transition to {:?} complete in {:.2}s", target_size, start_time.elapsed().as_secs_f32());
         Ok(())
     }
 
-    pub async fn ensure_qwen(&self) -> Result<(), String> {
-        let needs_load = { self.qwen_generator.lock().await.is_none() };
-        if needs_load {
-            println!("[MODEL] Loading Qwen VL (0.6B)...");
-            self.deep_purge_resources().await;
-            *self.current_size.lock().await = Some(ModelSize::Qwen);
-            
-            // Qwen VL (0.6B) 로드 로직 (aa.rs 아키텍처 호환용 껍데기)
-            // 현재 cc.rs는 Qwen3.5를 메인으로 쓰므로 실제 로드는 생략 또는 에러 핸들링
+    // --- [NEW] Base Context Baking (One-time Heavy Lifting) ---
+    pub async fn ingest_pug_to_ssd(&self, task_id: &str, pug_content: &str, cancel_token: Option<Arc<AtomicBool>>, kv_name: Option<String>) -> anyhow::Result<()> {
+        let base_session = format!("{}_base", task_id);
+        
+        // 1. Load Small Model Isolated (Full layers, no baking)
+        self.secure_vram_relay(ModelSize::Qwen, None, cancel_token.clone(), false, None).await?; // 🌟 Small -> Qwen
+
+        // 2. Ingest PUG content
+        {
+            let prompt = format!("{}\n\n[SYSTEM] Analyze the document structure.", pug_content);
+            let mut gen_guard = self.generator.lock().await;
+            if let Some(gen) = gen_guard.as_mut() {
+                // Just prefill, no generation needed for base context
+                gen.prefill_chunk(prompt, cancel_token.clone(), None).await?;
+            }
         }
+
+        // 3. Save Base Snapshot
+        self.save_kv_snapshot(&base_session, kv_name, 0).await?;
+        
+        // [FIX] 베이킹 직후 모델을 파괴하지 않고 그대로 유지하여 컨텍스트 오류를 방지합니다.
+        // self.unload_generator().await; 제거됨
+        
         Ok(())
     }
 
-    pub async fn ensure_qwen3(&self) -> Result<(), String> {
+    // --- File: src/model.rs (LogisModel 내부) ---
+    
+    pub async fn ensure_qwen3(&self) -> anyhow::Result<()> {
         let needs_load = { self.qwen3_generator.lock().await.is_none() };
         if needs_load {
-            println!("[MODEL] Loading Qwen3 Text Model (0.6B)...");
-            self.deep_purge_resources().await;
-            *self.current_size.lock().await = Some(ModelSize::Qwen3);
+            println!("[MODEL] Loading Qwen3 Text Model (0.6B GGUF) exclusively via NATIVE /qwen3/ logic...");
+            self.unload_generator().await;
+            {
+                *self.current_size.lock().await = Some(ModelSize::Qwen3);
+            }
+            
+            let path = self.qwen3_model_path.clone();
+            let dev = self.device_config.device.clone();
+            let dtype = if self.is_cpu_mode { Some(candle_core::DType::F32) } else { Some(candle_core::DType::BF16) };
+            
+            // 🌟 방금 만든 init_from_gguf 를 호출합니다!
+            let gen_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Qwen3GenerateModel> {
+                Qwen3GenerateModel::init_from_gguf(&path, Some(&dev), dtype)
+            }).await?;
 
-            let app_dir = terminal_logis_center_lib::utils::get_app_dir();
-            let model_path = app_dir.join("models").join("Qwen3-0.6B-Instruct-gguf");
-            let model_path_str = model_path.to_string_lossy().to_string();
-            let dev = self.device.clone();
-
-            let gen = tokio::task::spawn_blocking(move || {
-                Qwen3GenerateModel::init_from_gguf(&model_path_str, Some(&dev), None)
-            }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-
-            *self.qwen3_generator.lock().await = Some(gen);
+            match gen_result {
+                Ok(gen) => {
+                    println!("[MODEL] 🎉 Qwen3 (0.6B GGUF) Native Model loaded successfully!");
+                    *self.qwen3_generator.lock().await = Some(gen);
+                },
+                Err(e) => {
+                    println!("\n==================================================");
+                    println!("🚨 [CRITICAL ERROR] 0.6B GGUF 로딩 실패!");
+                    println!("원인: {:?}", e);
+                    println!("==================================================\n");
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }
 
-    pub async fn ensure_qwen3_5(&self, needs_vision: bool) -> Result<(), String> {
-        let needs_load = { 
+    pub async fn ensure_generator(&self, size: ModelSize) -> anyhow::Result<()> {
+        self.ensure_generator_ext(size, false, false).await
+    }
+
+    pub async fn ensure_generator_ext(&self, size: ModelSize, force_text_only: bool, baking_only: bool) -> anyhow::Result<()> {
+        if size == ModelSize::Qwen3_5 {
+            return self.ensure_qwen3_5(false).await; 
+        }
+        if size == ModelSize::Qwen3 {
+            return self.ensure_qwen3().await; 
+        }
+
+        // 오직 ModelSize::Qwen 만 이 아래 로직을 탐
+        let mut current_size_guard = self.current_size.lock().await; // 🌟 첫 번째 자물쇠 획득!
+        let mut gen_guard = self.generator.lock().await;
+
+        if *current_size_guard == Some(size) && gen_guard.is_some() && !baking_only {
+            return Ok(());
+        }
+
+        println!("[LOAD] Fresh loading {:?} from disk...", size);
+        let path = &self.qwen_model_path; 
+        
+        // 🌟 [CRITICAL FIX] 이중 자물쇠(Deadlock) 유발 코드 제거! 
+        // 이미 가지고 있는 current_size_guard 에 직접 값을 할당합니다.
+        *current_size_guard = Some(size); 
+        
+        let target_device = self.device_config.device.clone();
+        let is_disk_swap = self.is_disk_swap;
+        let dev_id = self.device_config.gpu_id;
+        let dtype = if target_device.is_cpu() { Some(candle_core::DType::F32) } else { Some(candle_core::DType::BF16) };
+        let limit = self.max_tokens_limit;
+        let path_clone = path.to_string();
+
+        let gen = match tokio::time::timeout(
+            std::time::Duration::from_secs(60), 
+            tokio::task::spawn_blocking(move || {
+                let kv_root = crate::utils::paths::get_kv_dir(None);
+                QwenVLGenerateModel::init_with_config(
+                    &path_clone, None, None,
+                    Some(&target_device), dev_id, Some(&target_device), dev_id, dtype, Some(limit as usize),
+                    force_text_only, baking_only, is_disk_swap, kv_root
+                )
+            })
+        ).await {
+            Ok(Ok(Ok(generator))) => generator,
+            Ok(Ok(Err(e))) => {
+                println!("🚨 [MODEL-ERROR] 모델 초기화 실패 (로직 에러): {:?}", e);
+                return Err(e);
+            },
+            Ok(Err(e)) => {
+                println!("🚨 [MODEL-ERROR] Spawn Blocking 실패 (스레드 에러): {:?}", e);
+                return Err(e.into());
+            },
+            Err(_) => {
+                println!("🚨 [CRITICAL] 60초 타임아웃 발생! 모델 로딩 내부에서 무한 대기에 빠졌습니다!");
+                return Err(anyhow::anyhow!("Model Loading Timeout"));
+            }
+        };
+
+        *gen_guard = Some(gen);
+        // *current_size_guard = Some(size); // 위에서 미리 등록했으므로 생략 가능
+        
+        Ok(())
+    }
+
+    pub async fn ensure_qwen3_5(&self, needs_vision: bool) -> anyhow::Result<()> {
+        let needs_load = {
             let guard = self.qwen3_5_generator.lock().await;
             if let Some(gen) = guard.as_ref() {
-                let is_vision_loaded = gen.pre_processor.is_some();
-                is_vision_loaded != needs_vision
+                let is_large = gen.pre_processor.is_some();
+                is_large != needs_vision // 🌟 wants_large 대신 needs_vision 직접 사용
             } else {
                 true
             }
         };
-        
-        if needs_load {
-            println!("[MODEL] Loading Qwen 3.5 (0.8B) (Vision: {})...", needs_vision);
-            self.deep_purge_resources().await;
-            *self.current_size.lock().await = Some(ModelSize::Qwen3_5);
-            
-            let app_dir = terminal_logis_center_lib::utils::get_app_dir();
-            let model_path_str = app_dir.join("models").join("Qwen3.5-0.8B-Instruct-gguf").join("Qwen3.5-0.8B-Q8_0.gguf").to_string_lossy().to_string();
-            
-            let mmproj_path = if needs_vision {
-                Some(app_dir.join("models").join("Qwen3.5-0.8B-Instruct-gguf").join("mmproj-BF16.gguf").to_string_lossy().to_string())
-            } else { None };
 
-            let dev = self.device.clone();
-            let mmproj_ref = mmproj_path.clone();
+        if needs_load {
+            println!("[MODEL] Loading Qwen 3.5 Generator (0.8B) (Vision: {})...", needs_vision);
+            self.unload_generator().await; 
+            
+            // 🌟 [핵심 픽스] 여기서도 로딩 전에 미리 방주인 등록!
+            {
+                *self.current_size.lock().await = Some(ModelSize::Qwen3_5);
+            }
+            
+            let path = self.qwen3_5_model_path.clone();
+            let dev = self.device_config.device.clone();
             
             let gen = tokio::task::spawn_blocking(move || {
-                Qwen3_5GenerateModel::init_from_gguf(&model_path_str, mmproj_ref.as_deref(), Some(&dev))
-            }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-
-            *self.qwen3_5_generator.lock().await = Some(gen);
+                let gguf_files = terminal_logis_center_lib::utils::find_type_files(&path, "gguf").unwrap_or_default();
+                let model_gguf = gguf_files.iter().find(|f| !f.contains("mmproj")).cloned().ok_or_else(|| anyhow::anyhow!("No model GGUF found"))?;
+                
+                // 🌟 [수정]
+                let mmproj_gguf = if needs_vision {
+                    gguf_files.iter().find(|f| f.contains("mmproj")).cloned()
+                } else {
+                    None
+                };
+                
+                Qwen3_5GenerateModel::init_from_gguf(&model_gguf, mmproj_gguf.as_deref(), Some(&dev))
+            }).await??;
+            
+            let mut q35_gen_guard = self.qwen3_5_generator.lock().await;
+            *q35_gen_guard = Some(gen);
+            
+            // 🌟 [CRITICAL FIX] 시스템 장부에 Qwen3.5가 켜졌음을 명시하여 스냅샷 미아 발생 방지!
+            let mut current_size_guard = self.current_size.lock().await;
+            *current_size_guard = Some(ModelSize::Qwen3_5);
         }
         Ok(())
     }
 
-    pub async fn generate(
-        &self, 
-        params: ChatCompletionParameters, 
-        cancel_flag: Option<Arc<AtomicBool>>, 
-        session_id: Option<String>, 
-        kv_name: Option<String>
-    ) -> Result<String, String> {
-        // 입력 파라미터에서 이미지 URL이 포함되어 있는지 확인하여 Vision 모델 탑재 여부를 결정합니다.
-        let needs_vision = params.messages.iter().any(|m| {
-            if let ChatCompletionRequestMessage::User(u) = m {
-                if let ChatCompletionRequestUserMessageContent::Array(parts) = &u.content {
-                    parts.iter().any(|p| matches!(p, ChatCompletionRequestMessageContentPart::ImageURL(_)))
-                } else { false }
-            } else { false }
-        });
+    pub async fn ensure_embedding(&self) -> anyhow::Result<()> {
+        let mut emb_guard = self.embedding_model.lock().await;
+        if emb_guard.is_none() {
+            let self_clone = self.embedding_path.clone();
+            
+            // 🌟 [수정] 핸드오버 단계에서 이미 VRAM이 확보되었거나 모델이 충분히 가벼우므로, 
+            // 강제 CPU(RAM) 우회 로직을 제거하고 항상 기본 디바이스(GPU)를 사용하도록 직결합니다.
+            let target_device = self.device_config.device.clone();
+            
+            println!("[MODEL] Loading Embedding Model on {:?}...", if target_device.is_cpu() { "CPU" } else { "GPU" });
+            
+            let target_device_clone = target_device.clone();
+            let emb = tokio::task::spawn_blocking(move || {
+                EmbeddingModel::new_with_device(&self_clone, &target_device_clone)
+            }).await??;
+            
+            *emb_guard = Some(emb);
+        }
+        Ok(())
+    }
 
-        // VRAM을 확보하고 Qwen3.5 모델을 로드합니다.
-        self.secure_vram_relay(ModelSize::Qwen3_5, cancel_flag.clone()).await?;
-        if needs_vision {
-            self.ensure_qwen3_5(true).await?;
+    // 🌟 [CRITICAL FIX] config.json의 물리적 텐서 크기와 실제 훈련된 Context Length를 완벽히 분리합니다.
+    pub async fn truncate_pug_context(&self, pug: &str, is_detail: bool, margin_tokens: usize, bottom_drop_tokens: Option<usize>) -> String {
+        let current_size = *self.current_size.lock().await;
+        
+        let max_context_length: usize = if is_detail { 60_000 } else { 9_000 };
+        let tokenizer_path = &self.qwen_model_path;
+
+        // 🌟 한도(최대 토큰)를 계산하고, 버릴 하단 토큰(bottom_drop_tokens)을 파서에 함께 전달합니다.
+        let final_max = max_context_length.saturating_sub(margin_tokens);
+
+        // 2. 이미 활성화된 제너레이터가 있다면 그 안에 탑재된 토크나이저를 즉시 재사용합니다.
+        if let Some(gen) = self.qwen3_5_generator.lock().await.as_ref() {
+            return terminal_logis_center_lib::parsing::truncate_pug_by_tokens(pug, final_max, &gen.tokenizer, bottom_drop_tokens);
+        }
+        if let Some(gen) = self.qwen3_generator.lock().await.as_ref() {
+            return terminal_logis_center_lib::parsing::truncate_pug_by_tokens(pug, final_max, &gen.tokenizer, bottom_drop_tokens);
+        }
+        if let Some(gen) = self.generator.lock().await.as_ref() {
+            return terminal_logis_center_lib::parsing::truncate_pug_by_tokens(pug, final_max, &gen.tokenizer, bottom_drop_tokens);
         }
 
-        let mut gen_guard = self.qwen3_5_generator.lock().await;
-        if let Some(model) = gen_guard.as_mut() {
-            model.clear_kv_cache(); // 🚀 항상 캐시를 초기화하여 문맥 오염 방지
-            model.generate(params, cancel_flag, session_id, kv_name)
-                 .await
-                 .map_err(|e| format!("Inference Error: {:?}", e))
+        // 3. 모델이 VRAM에 없을 경우, 디스크에서 가볍게 토크나이저만 읽어와서 정확한 토큰 수 기반으로 절단합니다.
+        if let Ok(tokenizer) = terminal_logis_center_lib::tokenizer::TokenizerModel::init(tokenizer_path) {
+            terminal_logis_center_lib::parsing::truncate_pug_by_tokens(pug, final_max, &tokenizer, bottom_drop_tokens)
         } else {
-            Err("Model is currently unloaded.".to_string())
+            pug.to_string()
         }
     }
+
+    pub async fn new(device_preference: Option<&str>) -> anyhow::Result<Self> {
+        let _app_handle = terminal_logis_center_lib::utils::get_app_dir();
+        // Default to true for SSD-Swap unless user explicitly wants pure CPU
+        let is_disk_swap = match device_preference {
+            Some("cpu") => false,
+            _ => true,
+        };
+        
+        println!("[MODEL-00] Initializing LogisModel (Preference: {:?}, DiskSwap: {})", device_preference, is_disk_swap);
+
+        let mut config = utils::get_optimal_device_config();
+        
+        if device_preference == Some("cpu") {
+            println!("⚠️ [MODEL] EXPLICIT CPU MODE FORCED by user/system preference.");
+            config = utils::DeviceConfig {
+                device: Device::Cpu,
+                is_cpu: true,
+                classify_chunk_size: 12000,
+                extract_chunk_size: 12000,
+                name: "CPU-Forced".to_string(),
+                gpu_id: 0,
+            };
+        } else {
+            // [STABILITY] Use persistent global CUDA device (Synchronous Singleton)
+            let persistent_dev = utils::get_cuda_device(config.gpu_id);
+            config.device = persistent_dev;
+            println!("🚀 [MODEL] Running in default mode ({})", config.name);
+        }
+
+        let app_dir = utils::get_app_dir();
+        let base_path = app_dir.join("models");
+        
+        // [FIX] Normalize UNC paths for Windows to prevent "builder error" in model loaders
+        let normalize_path = |path: std::path::PathBuf| -> String {
+            let s = path.to_string_lossy().to_string();
+            if s.starts_with(r"\\?\") {
+                s[4..].to_string()
+            } else {
+                s
+            }
+        };
+
+        let qwen_model_path = normalize_path(base_path.join("Qwen3-0.6B-Instruct-gguf")); 
+        let qwen3_model_path = normalize_path(base_path.join("Qwen3-0.6B-Instruct-gguf")); 
+        let qwen3_5_model_path = normalize_path(base_path.join("Qwen3.5-0.8B-Instruct-gguf"));
+        let embedding_path = base_path.join("embeddinggemma-300m");
+
+        let max_tokens_limit = 65536; 
+
+        Ok(Self {
+            generator: Arc::new(TokioMutex::new(None)),
+            qwen3_generator: Arc::new(TokioMutex::new(None)), // 🌟 추가
+            qwen3_5_generator: Arc::new(TokioMutex::new(None)),
+            embedding_model: Arc::new(TokioMutex::new(None)),
+            is_cpu_mode: config.is_cpu,
+            is_disk_swap,
+            dual_mode_enabled: true, 
+            qwen_model_path,    // 🌟 교체
+            qwen3_model_path,   // 🌟 교체
+            qwen3_5_model_path,
+            embedding_path,
+            device_config: config.clone(),
+            max_tokens_limit: max_tokens_limit as u32,
+            _dtype: None, 
+            current_size: Arc::new(TokioMutex::new(None)),
+        })
+    }
+
+    pub fn is_cpu(&self) -> bool {
+        self.is_cpu_mode
+    }
+
+    pub async fn chat(&self, system: &str, user_input: &str, cancel_token: Option<Arc<AtomicBool>>, session_id: Option<String>, kv_name: Option<String>) -> anyhow::Result<String> {
+        // [FIX] Default to Qwen (0.6B) for all chat tasks
+        {
+            let gen_guard = self.generator.lock().await;
+            if gen_guard.is_none() {
+                drop(gen_guard);
+                self.ensure_generator(ModelSize::Qwen).await?; // 🌟 Small -> Qwen
+            }
+        }
+        
+        let _self_clone = self.generator.clone();
+        let system_text = system.to_string();
+        let user_text = user_input.to_string();
+        let max_tok = self.max_tokens_limit;
+        
+        println!("[MODEL-CHAT] Sending Chat Request...");
+        
+        {
+            let mut gen_guard = self.generator.lock().await;
+            let gen = gen_guard.as_mut().ok_or_else(|| anyhow!("Generator is unloaded"))?;
+            
+            let system_message = ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                content: system_text,
+                name: None,
+            });
+
+            let content_parts = vec![
+                ChatCompletionRequestMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText { text: user_text }
+                )
+            ];
+
+            let user_message = ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Array(content_parts),
+                name: None,
+            };
+
+            let params = ChatCompletionParameters {
+                messages: vec![system_message, ChatCompletionRequestMessage::User(user_message)],
+                model: "qwen".to_string(),
+                max_tokens: Some(max_tok),
+                temperature: Some(0.1),
+                top_p: Some(0.9),
+                ..Default::default()
+            };
+            
+            let response = gen.generate(params, cancel_token, session_id, kv_name).await.map_err(|e: anyhow::Error| anyhow!("Inference failed: {}", e))?;
+            println!("[MODEL-CHAT] Raw Response: {}", response);
+            Ok(response)
+        }
+    }
+
+    async fn run_inference_text(&self, prompt: String, image: Option<DynamicImage>, cancel_token: Option<Arc<AtomicBool>>, session_id: Option<String>, kv_name: Option<String>) -> anyhow::Result<String> {
+        // [VISION-DYNAMIC]
+        self.ensure_generator(ModelSize::Qwen).await?; // 🌟 무조건 Qwen으로 로드
+        
+        let mut gen_guard = self.generator.lock().await;
+        let gen = gen_guard.as_mut().ok_or_else(|| anyhow!("Generator is unloaded"))?;
+        
+        let mut content_parts = Vec::new();
+        
+        if let Some(img) = image {
+            let mut buf = Cursor::<Vec<u8>>::new(Vec::new());
+            img.write_to(&mut buf, image::ImageFormat::Png)?;
+            let b64 = BASE64_STANDARD.encode(buf.into_inner());
+            let url = format!("data:image/png;base64,{}", b64);
+            
+            content_parts.push(ChatCompletionRequestMessageContentPart::ImageURL(
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: ImageURL { url, detail: None }
+                }
+            ));
+        }
+
+        content_parts.push(ChatCompletionRequestMessageContentPart::Text(
+            ChatCompletionRequestMessageContentPartText { text: prompt }
+        ));
+
+        let message = ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(content_parts),
+            name: None,
+        };
+
+        let params = ChatCompletionParameters {
+            messages: vec![ChatCompletionRequestMessage::User(message)],
+            model: "qwen".to_string(),
+            max_tokens: Some(self.max_tokens_limit),
+            temperature: Some(0.1),
+            top_p: Some(0.9),
+            ..Default::default()
+        };
+        
+        gen.generate(params, cancel_token, session_id, kv_name).await.map_err(|e: anyhow::Error| anyhow!("Inference failed: {}", e))
+    }
+
+    pub async fn get_embedding(&self, text: String) -> anyhow::Result<Vec<f32>> {
+        // Ensure embedding model is loaded (and generator is unloaded)
+        self.ensure_embedding().await?;
+
+        let embedding_model_arc = self.embedding_model.clone();
+        
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<f32>> {
+            let guard = embedding_model_arc.blocking_lock();
+            if let Some(model) = guard.as_ref() {
+                model.embed(&text).map_err(|e: anyhow::Error| anyhow::anyhow!("Embedding error: {}", e))
+            } else {
+                // Fallback to zeros if model failed to load
+                Ok(vec![0.0; 768])
+            }
+        }).await?
+    }    
 }
+
 
 lazy_static! {
     static ref QWEN_MODEL: TokioMutex<Option<LogisModel>> = TokioMutex::new(None);
@@ -308,7 +849,7 @@ use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
 use chromiumoxide::cdp::js_protocol::runtime::{AddBindingParams, EventBindingCalled};
 use futures::StreamExt;
 use serde_json::json;
-use std::sync::Arc;
+// use std::sync::Arc; // 중복 임포트 제거됨
 
 // 🚀 OS 커널 레벨에서 가비지 컬렉터 강제 호출하여 RAM/VRAM 캐시를 즉시 반환하는 헬퍼 함수
 fn force_memory_cleanup() {
@@ -2544,12 +3085,9 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
     let dest_models_dir = app_dir.join("models");
 
     let src_models_dir1 = std::env::current_dir().unwrap_or_default().join("models");
-    let src_models_dir2 = std::env::current_dir().unwrap_or_default().join("src-tauri").join("models");
     
     let src_dir = if src_models_dir1.exists() {
         Some(src_models_dir1)
-    } else if src_models_dir2.exists() {
-        Some(src_models_dir2)
     } else {
         None
     };
@@ -2627,8 +3165,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         let model_wrapper = {
                                             let mut model_guard = QWEN_MODEL.lock().await;
                                             if model_guard.is_none() {
-                                                let ocr_device = terminal_logis_center_lib::utils::get_cuda_device(0); 
-                                                if let Ok(model) = LogisModel::new(&ocr_device).await {
+                                                let _ocr_device = terminal_logis_center_lib::utils::get_cuda_device(0); 
+                                                if let Ok(model) = LogisModel::new(None).await {
                                                     *model_guard = Some(model);
                                                 }
                                             }
@@ -2655,7 +3193,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             };
                                             
                                             // 🚀 기존 락 패턴으로 복구: 직접 릴레이 후 제너레이터 호출
-                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, None).await {
+                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, None, None, false, None).await {
                                                 println!("[Error] VRAM Relay failed: {}", e);
                                                 "OCR Model Load Error".to_string()
                                             } else {
@@ -2672,7 +3210,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         
                                         {
                                             let mut model_guard = QWEN_MODEL.lock().await;
-                                            if let Some(m) = model_guard.take() { m.deep_purge().await; }
+                                            if let Some(m) = model_guard.take() { m.deep_purge_resources().await; }
                                         }
                                         
                                         let display_ocr = ocr_result.replace("```json", "").replace("```", "").trim().to_string();
@@ -2705,8 +3243,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     let model_wrapper = {
                                         let mut model_guard = QWEN_MODEL.lock().await;
                                         if model_guard.is_none() {
-                                            let device = terminal_logis_center_lib::utils::get_cuda_device(0);
-                                            if let Ok(m) = LogisModel::new(&device).await {
+                                            let _device = terminal_logis_center_lib::utils::get_cuda_device(0);
+                                            if let Ok(m) = LogisModel::new(None).await {
                                                 *model_guard = Some(m);
                                             }
                                         }
@@ -2740,7 +3278,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         
                                         // 🚀 기존 락 패턴으로 복구: 직접 릴레이 후 제너레이터 호출
                                         let gen_result = {
-                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(dummy_cancel.clone())).await {
+                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, None, Some(dummy_cancel.clone()), false, None).await {
                                                 Err(format!("VRAM Relay Error: {}", e))
                                             } else {
                                                 let _ = model.ensure_qwen3_5(false).await; // 텍스트 전용 모드
@@ -2788,7 +3326,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         // 메모리 정리
                                         {
                                             let mut model_guard = QWEN_MODEL.lock().await;
-                                            if let Some(m) = model_guard.take() { m.deep_purge().await; }
+                                            if let Some(m) = model_guard.take() { m.deep_purge_resources().await; }
                                         }
                                         force_memory_cleanup();
                                     } else {
@@ -2855,8 +3393,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 }
                                 
                                 if let Ok(table) = db::get_or_create_table().await {
-                                    let mut has_error = None;
-                                    let device = terminal_logis_center_lib::utils::get_cuda_device(0);
+                                    let mut has_error: Option<String> = None;
+                                    let _device = terminal_logis_center_lib::utils::get_cuda_device(0);
 
                                     let total_items = target_records.len();
                                     let total_steps = total_items * 3;
@@ -2901,11 +3439,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         let model_wrapper = {
                                             let mut model_guard = QWEN_MODEL.lock().await;
                                             if model_guard.is_none() {
-                                                match LogisModel::new(&device).await {
+                                                match LogisModel::new(None).await {
                                                     Ok(m) => *model_guard = Some(m),
                                                     Err(e) => {
                                                         println!("[Error] {}", e);
-                                                        has_error = Some(e);
+                                                        has_error = Some(e.to_string());
                                                     }
                                                 }
                                             }
@@ -2916,7 +3454,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
                                             
                                             // 🚀 [CRITICAL FIX] 루프 밖에서 단 1번만 모델을 릴레이하고 락을 쥡니다. (매 루프 VRAM 파괴 방지)
-                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
+                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, None, Some(cancel_flag.clone()), false, None).await {
                                                 has_error = Some(format!("VRAM Relay Error: {}", e));
                                             } else {
                                                 let _ = model.ensure_qwen3_5(true).await; // Vision 모드 탑재
@@ -2989,7 +3527,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                                         {
                                             let mut model_guard = QWEN_MODEL.lock().await;
-                                            if let Some(m) = model_guard.take() { m.deep_purge().await; }
+                                            if let Some(m) = model_guard.take() { m.deep_purge_resources().await; }
                                         }
                                         force_memory_cleanup();
                                         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -3010,11 +3548,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             let model_wrapper = {
                                                 let mut model_guard = QWEN_MODEL.lock().await;
                                                 if model_guard.is_none() {
-                                                    match LogisModel::new(&device).await {
+                                                    match LogisModel::new(None).await {
                                                         Ok(m) => *model_guard = Some(m),
                                                         Err(e) => {
                                                             println!("[Error] {}", e);
-                                                            has_error = Some(e);
+                                                            has_error = Some(e.to_string());
                                                         }
                                                     }
                                                 }
@@ -3025,7 +3563,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
                                                 
                                                 // 🚀 [CRITICAL FIX] 루프 밖에서 단 1번만 모델을 릴레이하고 락을 쥡니다.
-                                                if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
+                                                if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, None, Some(cancel_flag.clone()), false, None).await {
                                                     has_error = Some(format!("VRAM Relay Error: {}", e));
                                                 } else {
                                                     let _ = model.ensure_qwen3_5(false).await; // 텍스트 전용 모드
@@ -3125,7 +3663,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 
                                                 {
                                                     let mut model_guard = QWEN_MODEL.lock().await;
-                                                    if let Some(m) = model_guard.take() { m.deep_purge().await; }
+                                                    if let Some(m) = model_guard.take() { m.deep_purge_resources().await; }
                                                 }
                                                 force_memory_cleanup();
                                             } else {
@@ -3290,7 +3828,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     // [CLEANUP] 작업 취소 시 VRAM 즉각 해제
                     {
                         let mut model_guard = QWEN_MODEL.lock().await;
-                        if let Some(m) = model_guard.take() { m.deep_purge().await; }
+                        if let Some(m) = model_guard.take() { m.deep_purge_resources().await; }
                     }
                     {
                         let mut emb_guard = EMBEDDING_MODEL.lock().unwrap();
@@ -3326,7 +3864,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                     tokio::task::spawn(async move {
                         let mut ocr_result = String::new();
                         let mut masked_result = String::new();
-                        let mut has_error = None;
+                        let mut has_error: Option<String> = None;
                         // 🚀 FIX: 하단 결과 반환부에서 접근할 수 있도록 스코프를 최상단으로 격상
                         let mut extracted_label = String::new();
 
@@ -3335,12 +3873,12 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             let model_wrapper = {
                                 let mut model_guard = QWEN_MODEL.lock().await;
                                 if model_guard.is_none() {
-                                    let ocr_device = terminal_logis_center_lib::utils::get_cuda_device(0);
-                                    match LogisModel::new(&ocr_device).await {
+                                    let _ocr_device = terminal_logis_center_lib::utils::get_cuda_device(0);
+                                    match LogisModel::new(None).await {
                                         Ok(m) => *model_guard = Some(m),
                                         Err(e) => {
                                             println!("[Error] {}", e);
-                                            has_error = Some(e);
+                                            has_error = Some(e.to_string());
                                         }
                                     }
                                 }
@@ -3369,7 +3907,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 
                                 // 🚀 기존 방식: 직접 릴레이 & 락을 걸고 제너레이터 호출
                                 let gen_result = {
-                                    if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
+                                    if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, None, Some(cancel_flag.clone()), false, None).await {
                                         Err(format!("VRAM Relay Error: {}", e))
                                     } else {
                                         let _ = model.ensure_qwen3_5(true).await; // Vision 모드 탑재
@@ -3399,7 +3937,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
 
                             {
                                 let mut model_guard = QWEN_MODEL.lock().await;
-                                if let Some(m) = model_guard.take() { m.deep_purge().await; }
+                                if let Some(m) = model_guard.take() { m.deep_purge_resources().await; }
                             }
 
                             force_memory_cleanup(); 
@@ -3413,12 +3951,12 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 let model_wrapper = {
                                     let mut model_guard = QWEN_MODEL.lock().await;
                                     if model_guard.is_none() {
-                                        let device = terminal_logis_center_lib::utils::get_cuda_device(0);
-                                        match LogisModel::new(&device).await {
+                                        let _device = terminal_logis_center_lib::utils::get_cuda_device(0);
+                                        match LogisModel::new(None).await {
                                             Ok(m) => *model_guard = Some(m),
                                             Err(e) => {
                                                 println!("[Error] {}", e);
-                                                has_error = Some(e);
+                                                has_error = Some(e.to_string());
                                             }
                                         }
                                     }
@@ -3446,7 +3984,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                     
                                     // 🚀 기존 방식: 직접 릴레이 & 락을 걸고 제너레이터 호출
                                     let gen_result = {
-                                        if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
+                                        if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, None, Some(cancel_flag.clone()), false, None).await {
                                             Err(format!("VRAM Relay Error: {}", e))
                                         } else {
                                             let _ = model.ensure_qwen3_5(false).await; // 텍스트 전용 모드
@@ -3506,7 +4044,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 
                                 {
                                     let mut model_guard = QWEN_MODEL.lock().await;
-                                    if let Some(m) = model_guard.take() { m.deep_purge().await; }
+                                    if let Some(m) = model_guard.take() { m.deep_purge_resources().await; }
                                 }
                                 force_memory_cleanup(); 
                             } else {
