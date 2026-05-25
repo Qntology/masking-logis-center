@@ -24,6 +24,7 @@ use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}, Mutex};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
+use safetensors;
 use once_cell::sync::Lazy;
 
 // [GLOBAL] 슬롯 관리자
