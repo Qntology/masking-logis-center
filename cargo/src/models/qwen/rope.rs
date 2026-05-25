@@ -321,10 +321,9 @@ pub fn get_xd_cos_sin(
 
     // 이후 로직은 동일 (메모리 이동 없이 메타데이터만 조작하므로 초고속)
     let xdrope_section: Vec<usize> = xdrope_section.iter().map(|&i| i * 2).collect();
-    let cos_rank = cos.rank();
-    let cos_select: Vec<Tensor> = split_tensor(&cos, &xdrope_section, cos_rank - 1)?
+    let cos_select: Vec<Tensor> = split_tensor(&cos, &xdrope_section, D::Minus1)?
         .iter().enumerate().map(|(i, m)| m.i((.., .., i % x_dim)).unwrap()).collect();
-    let sin_select: Vec<Tensor> = split_tensor(&sin, &xdrope_section, cos_rank - 1)?
+    let sin_select: Vec<Tensor> = split_tensor(&sin, &xdrope_section, D::Minus1)?
         .iter().enumerate().map(|(i, m)| m.i((.., .., i % x_dim)).unwrap()).collect();
 
     let cos = Tensor::cat(&cos_select, D::Minus1)?;

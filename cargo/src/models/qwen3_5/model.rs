@@ -513,7 +513,7 @@ impl Qwen3_5GatedDeltaNet {
         Ok(core_attn_out)
     }
 
-    pub fn forward(&mut self, xs: &Tensor, _attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    pub fn forward(&mut self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
         let dev = xs.device();
         let dtype = xs.dtype();
         
@@ -576,11 +576,10 @@ impl Qwen3_5GatedDeltaNet {
             mixed_qkv = mixed_qkv.silu()?;
         }
         let mixed_qkv = mixed_qkv.transpose(1, 2)?;
-        let qkv_rank = mixed_qkv.rank();
         let qkv_split = split_tensor(
             &mixed_qkv,
             &[self.key_dim, self.key_dim, self.value_dim],
-            qkv_rank - 1, // 🚀 D::Minus1 대신 실제 usize 계산
+            D::Minus1,
         )?;
         
         
@@ -832,8 +831,8 @@ impl Qwen3_5Attention {
                     let take = tokens_to_process.min(free_space);
                     
                     
-                    let k_piece: Tensor = key_states.narrow(2, chunk_offset, take)?.contiguous()?;
-                    let v_piece: Tensor = value_states.narrow(2, chunk_offset, take)?.contiguous()?;
+                    let k_piece = key_states.narrow(2, chunk_offset, take)?.contiguous()?;
+                    let v_piece = value_states.narrow(2, chunk_offset, take)?.contiguous()?;
 
                     if let (Some(pk), Some(pv)) = (inner.k_cache.take(), inner.v_cache.take()) {
                         let pk = if !pk.device().same_device(dev) { pk.to_device(dev)? } else { pk };
@@ -856,7 +855,7 @@ impl Qwen3_5Attention {
                 let take = tokens_to_process.min(1024);
                 
                 
-                let k_piece: Tensor = key_states.narrow(2, chunk_offset, take)?.contiguous()?;
+                let k_piece = key_states.narrow(2, chunk_offset, take)?.contiguous()?;
                 let v_piece = value_states.narrow(2, chunk_offset, take)?.contiguous()?;
                 let index = self.kv_blocks.len();
                 let current_total = seqlen_offset + chunk_offset;
@@ -888,7 +887,7 @@ impl Qwen3_5Attention {
         let mut m_n: Option<Tensor> = None;
         let mut l_n: Option<Tensor> = None;
         
-        let q_aligned: Tensor = (query_states * self.scaling)?;
+        let q_aligned = (query_states * self.scaling)?;
 
         for block in &self.kv_blocks {
             let (index, b_off, b_len) = {
@@ -948,12 +947,12 @@ impl Qwen3_5Attention {
                                 if block_file.exists() {
                                     if let Ok(encrypted_content) = crate::utils::direct_loader::load_kv_block(&block_file) {
                                         if let Ok(content) = crate::utils::crypto::decrypt_data(&encrypted_content) {
-                                            if let Ok(st) = safetensors::tensor::SafeTensors::deserialize(&content) {
+                                            if let Ok(st) = safetensors::SafeTensors::deserialize(&content) {
                                                 let prefix = format!("b{}_l{}_", b_off, self.layer_idx);
-                                                let get_t = |s: &str| { st.tensor(&format!("{}{}", prefix, s)).or_else(|_| st.tensor(s)).ok() };
+                                                let get_t = |s: &str| st.tensor(&format!("{}{}", prefix, s)).or_else(|_| st.tensor(s)).ok();
                                                 
                                                 if let (Some(kd), Some(vd), Some(sh)) = (get_t("k_data"), get_t("v_data"), get_t("k_shape")) {
-                                                    let sh_u32: Vec<u32> = sh.data().chunks_exact(4).map(|c: &[u8]| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+                                                    let sh_u32: Vec<u32> = sh.data().chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
                                                     let meta_os: Vec<usize> = sh_u32.iter().map(|&x| x as usize).collect();
                                                     
                                                     let mut kd_t = Tensor::from_raw_buffer(kd.data(), DType::BF16, &meta_os, &Device::Cpu).unwrap();
@@ -1580,9 +1579,8 @@ impl Qwen3_5TextModel {
 
         let (cos, sin) = self.rotary_emb.forward(position_ids, self.dtype, self.mrope_section.clone())?;
         
-        let dev_cos = cos.device();
-        let mut xs: Tensor = if !inputs_embeds.device().same_device(dev_cos) { 
-            inputs_embeds.to_device(dev_cos)? 
+        let mut xs = if !inputs_embeds.device().same_device(&cos.device()) { 
+            inputs_embeds.to_device(&cos.device())? 
         } else { 
             inputs_embeds.clone() 
         };
@@ -1597,11 +1595,6 @@ impl Qwen3_5TextModel {
         let total_layers = self.layers.len();
 
         for l_idx in 0..total_layers {
-            // 🚀 [CRITICAL] 레이어 로딩 및 연산 전 취소 신호 발생 시 즉시 중단합니다.
-            if crate::utils::is_extraction_stopped() {
-                return Err(anyhow::anyhow!("Inference cancelled during layer processing"));
-            }
-
             // 가중치가 비워져 있을 때만 Mmap 로드! 
             if self.layers[l_idx].is_cleared() {
                 self.reload_layer(l_idx, xs.device())?;
@@ -2161,7 +2154,7 @@ impl Qwen3_5Model {
     ) -> Result<(Tensor, Tensor, Vec<i64>)> {
         let spatial_merge_size = self.spatial_merge_size;
         let image_token_id = self.image_token_id;
-        let _vision_start_token_id = self.vision_start_token_id;
+        let vision_start_token_id = self.vision_start_token_id;
         
         let (b_sz, seq_len) = input_ids.dims2()?;
         let mut mrope_position_deltas = Vec::new();
@@ -2244,7 +2237,7 @@ impl Qwen3_5Model {
         video_grid_thw: Option<&Tensor>,
         seqlen_offset: usize,
     ) -> Result<Tensor> {
-        let (bs, _seq_len, _) = inputs_embeds.dims3()?;
+        let (bs, seq_len, _) = inputs_embeds.dims3()?;
 
         
         // 디코딩 중에는 절대 재계산하지 않고, 저장해둔 오프셋(delta)을 유지하여 위치 연속성을 100% 보장합니다.

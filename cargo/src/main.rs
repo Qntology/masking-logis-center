@@ -2768,7 +2768,7 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             
                                             {
                                                 let mut model_guard = QWEN_MODEL.lock().unwrap();
-                                                *model_guard = None; // VRAM 확보를 위해 생성 직후 모델 해제
+                                                *model_guard = None;
                                             }
                                             force_memory_cleanup();
                                         } else {

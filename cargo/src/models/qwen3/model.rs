@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use candle_core::Tensor;
 use candle_nn::{
     Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_b, linear_no_bias, rms_norm,
@@ -7,9 +7,9 @@ use candle_nn::{
 use crate::{
     models::{
         common::{GateUpDownMLP, QKNormAttention, eager_attention_forward},
-        qwen::rope::{RoPE, apply_rotary_pos_emb},
         qwen3::config::Qwen3Config,
     },
+    position_embed::rope::{RoPE, apply_rotary_pos_emb},
     utils::tensor_utils::prepare_causal_attention_mask,
 };
 

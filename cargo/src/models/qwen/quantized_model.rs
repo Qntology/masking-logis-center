@@ -596,7 +596,7 @@ impl QuantizedQwenVLTextAttention {
         seqlen_offset: usize,
         session_id: Option<String>,
         kv_name: Option<String>,
-        _baking_only: bool,
+        baking_only: bool,
     ) -> Result<Tensor> {
         self.active_session_id = session_id.clone(); 
         self.active_kv_name = kv_name;
@@ -716,7 +716,7 @@ impl QuantizedQwenVLTextAttention {
             if b_off >= total_tokens_now { continue; }
 
             // [STEP A] Load Block to VRAM
-            let (k_block, v_block, _is_temporary) = {
+            let (k_block, v_block, is_temporary) = {
                 let mut inner = block.inner.write().unwrap();
                 if let (Some(k), Some(v)) = (&inner.k_cache, &inner.v_cache) {
                     if inner.location == KVLocation::VRAM {
@@ -763,12 +763,12 @@ impl QuantizedQwenVLTextAttention {
                                 if block_file.exists() {
                                     if let Ok(encrypted_content) = crate::utils::direct_loader::load_kv_block(&block_file) {
                                         if let Ok(content) = crate::utils::crypto::decrypt_data(&encrypted_content) {
-                                            if let Ok(st) = safetensors::tensor::SafeTensors::deserialize(&content) {
+                                            if let Ok(st) = safetensors::SafeTensors::deserialize(&content) {
                                                 let prefix = format!("b{}_l{}_", b_off, self.layer_idx);
-                                                let get_t = |s: &str| { st.tensor(&format!("{}{}", prefix, s)).or_else(|_| st.tensor(s)).ok() };
+                                                let get_t = |s: &str| st.tensor(&format!("{}{}", prefix, s)).or_else(|_| st.tensor(s)).ok();
                                                 
                                                 if let (Some(kd), Some(vd), Some(sh)) = (get_t("k_data"), get_t("v_data"), get_t("k_shape")) {
-                                                    let sh_u32: Vec<u32> = sh.data().chunks_exact(4).map(|c: &[u8]| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+                                                    let sh_u32: Vec<u32> = sh.data().chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
                                                     let meta_os: Vec<usize> = sh_u32.iter().map(|&x| x as usize).collect();
                                                     
                                                     
@@ -1092,13 +1092,13 @@ impl QuantizedQwenVLTextAttention {
             
             if let Ok(encrypted_content) = crate::utils::direct_loader::load_kv_block(&file_path) {
                 if let Ok(content) = crate::utils::crypto::decrypt_data(&encrypted_content) {
-                    if let Ok(st) = safetensors::tensor::SafeTensors::deserialize(&content) {
+                    if let Ok(st) = safetensors::SafeTensors::deserialize(&content) {
                         let is_l0 = file_path.to_string_lossy().contains("l0.st");
                         let prefix = if is_l0 { format!("b{}_l0_", block_info.offset) } else { format!("b{}_l{}_", block_info.offset, self.layer_idx) };
-                        let get_t = |s: &str| { st.tensor(&format!("{}{}", prefix, s)).or_else(|_| st.tensor(s)).ok() };
+                        let get_t = |s: &str| st.tensor(&format!("{}{}", prefix, s)).or_else(|_| st.tensor(s)).ok();
 
                         if let (Some(kd), Some(vd), Some(sh)) = (get_t("k_data"), get_t("v_data"), get_t("k_shape")) {
-                            let sh_u32: Vec<u32> = sh.data().chunks_exact(4).map(|c: &[u8]| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+                            let sh_u32: Vec<u32> = sh.data().chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
                             let meta_os: Vec<usize> = sh_u32.iter().map(|&x| x as usize).collect();
                             
                             let dev = &Device::Cpu;
@@ -2801,7 +2801,7 @@ impl QuantizedQwenVLTextModel {
         let (_, last_st_path) = fragments.last().unwrap();
         if let Ok(encrypted_content) = crate::utils::direct_loader::load_kv_block(&last_st_path.join("l0.st")) {
             if let Ok(content) = crate::utils::crypto::decrypt_data(&encrypted_content) {
-                if let Ok(st) = safetensors::tensor::SafeTensors::deserialize(&content) {
+                if let Ok(st) = safetensors::SafeTensors::deserialize(&content) {
                     if let Some(name) = st.names().iter().find(|n| n.contains("k_shape")) {
                         if let Ok(view) = st.tensor(name) {
                             let data = view.data();
@@ -3114,7 +3114,7 @@ impl QuantizedQwenVLModel {
         }
 
         let input_ids = if !input_ids_in.device().same_device(&self.text_device) { input_ids_in.to_device(&self.text_device)? } else { input_ids_in.clone() };
-        let (b_sz, _seq_len) = input_ids.dims2()?;
+        let (b_sz, seq_len) = input_ids.dims2()?;
 
         
         let mut inputs_embeds = self.language_model.embed_tokens.forward(&input_ids)?;
