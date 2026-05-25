@@ -2654,13 +2654,14 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 ..Default::default()
                                             };
                                             
-                                            // 🚀 기존 방식: 직접 릴레이 & 락을 걸고 제너레이터 호출
+                                            // 🚀 기존 락 패턴으로 복구: 직접 릴레이 후 제너레이터 호출
                                             if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, None).await {
                                                 println!("[Error] VRAM Relay failed: {}", e);
                                                 "OCR Model Load Error".to_string()
                                             } else {
                                                 let _ = model.ensure_qwen3_5(true).await; // Vision 모드 탑재
-                                                if let Some(gen) = model.qwen3_5_generator.lock().await.as_mut() {
+                                                let mut gen_guard = model.qwen3_5_generator.lock().await;
+                                                if let Some(gen) = gen_guard.as_mut() {
                                                     gen.clear_kv_cache();
                                                     gen.generate(params, None, Some(record.id.clone()), Some("image".to_string())).await.unwrap_or_default()
                                                 } else {
@@ -2737,7 +2738,23 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         let dummy_cancel = Arc::new(AtomicBool::new(false));
                                         let snapshot_id = format!("{}_detail", record.id);
                                         
-                                        match model.generate(params, Some(dummy_cancel), Some(snapshot_id), Some("text".to_string())).await {
+                                        // 🚀 기존 락 패턴으로 복구: 직접 릴레이 후 제너레이터 호출
+                                        let gen_result = {
+                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(dummy_cancel.clone())).await {
+                                                Err(format!("VRAM Relay Error: {}", e))
+                                            } else {
+                                                let _ = model.ensure_qwen3_5(false).await; // 텍스트 전용 모드
+                                                let mut gen_guard = model.qwen3_5_generator.lock().await;
+                                                if let Some(gen) = gen_guard.as_mut() {
+                                                    gen.clear_kv_cache();
+                                                    gen.generate(params, Some(dummy_cancel), Some(snapshot_id), Some("text".to_string())).await.map_err(|e| e.to_string())
+                                                } else {
+                                                    Err("Model missing".to_string())
+                                                }
+                                            }
+                                        };
+
+                                        match gen_result {
                                             Ok(res_text) => {
                                                 println!("[DEBUG-SCHED] Step C Raw Response: '{}'", res_text);
                                                 let cleaned_json = res_text.replace("```json", "").replace("```", "").trim().to_string();
@@ -2896,81 +2913,77 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                         };
 
                                         if let Some(model) = model_wrapper {
-                                            for (idx, record) in target_records.iter_mut().enumerate() {
-                                                if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
-                                                    has_error = Some("Push operation cancelled by user.".to_string());
-                                                    break;
-                                                }
+                                            let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
+                                            
+                                            // 🚀 [CRITICAL FIX] 루프 밖에서 단 1번만 모델을 릴레이하고 락을 쥡니다. (매 루프 VRAM 파괴 방지)
+                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
+                                                has_error = Some(format!("VRAM Relay Error: {}", e));
+                                            } else {
+                                                let _ = model.ensure_qwen3_5(true).await; // Vision 모드 탑재
+                                                let mut gen_guard = model.qwen3_5_generator.lock().await;
+                                                if let Some(gen) = gen_guard.as_mut() {
+                                                    for (idx, record) in target_records.iter_mut().enumerate() {
+                                                        if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                                            has_error = Some("Push operation cancelled by user.".to_string());
+                                                            break;
+                                                        }
 
-                                                let is_image = record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf");
-                                                if is_image && has_error.is_none() {
-                                                    let mut ocr_success = false;
-                                                    let mut cleaned_ocr = String::new();
-                                                    
-                                                    let lang = load_app_config().language.unwrap_or_else(|| "Korean".to_string());
-                                                    let ocr_prompt = format!("[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {{'language':'{}', 'image_text':'...'}} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think", lang);
+                                                        let is_image = record.context.starts_with("data:image/") || record.context.starts_with("data:application/pdf");
+                                                        if is_image && has_error.is_none() {
+                                                            let mut ocr_success = false;
+                                                            let mut cleaned_ocr = String::new();
+                                                            
+                                                            let lang = load_app_config().language.unwrap_or_else(|| "Korean".to_string());
+                                                            let ocr_prompt = format!("[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {{'language':'{}', 'image_text':'...'}} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think", lang);
 
-                                                    let params = ChatCompletionParameters {
-                                                        messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                                                            content: ChatCompletionRequestUserMessageContent::Array(vec![
-                                                                ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: ocr_prompt }),
-                                                                ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: record.context.clone(), detail: None } })
-                                                            ]),
-                                                            name: None,
-                                                        })],
-                                                        model: "qwen3.5".to_string(),
-                                                        max_tokens: Some(1024),
-                                                        temperature: Some(0.1),
-                                                        top_p: Some(0.95),
-                                                        ..Default::default()
-                                                    };
+                                                            let params = ChatCompletionParameters {
+                                                                messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                                                                    content: ChatCompletionRequestUserMessageContent::Array(vec![
+                                                                        ChatCompletionRequestMessageContentPart::Text(ChatCompletionRequestMessageContentPartText { text: ocr_prompt }),
+                                                                        ChatCompletionRequestMessageContentPart::ImageURL(ChatCompletionRequestMessageContentPartImage { image_url: ImageURL { url: record.context.clone(), detail: None } })
+                                                                    ]),
+                                                                    name: None,
+                                                                })],
+                                                                model: "qwen3.5".to_string(),
+                                                                max_tokens: Some(1024),
+                                                                temperature: Some(0.1),
+                                                                top_p: Some(0.95),
+                                                                ..Default::default()
+                                                            };
 
-                                                    let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
-                                                    
-                                                    // 🚀 기존 방식: 직접 릴레이 & 락을 걸고 제너레이터 호출
-                                                    let gen_result = {
-                                                        if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
-                                                            Err(format!("VRAM Relay Error: {}", e))
-                                                        } else {
-                                                            let _ = model.ensure_qwen3_5(true).await; // Vision 모드 탑재
-                                                            let mut gen_guard = model.qwen3_5_generator.lock().await;
-                                                            if let Some(gen) = gen_guard.as_mut() {
-                                                                gen.clear_kv_cache();
-                                                                gen.generate(params, Some(cancel_flag), Some(record.id.clone()), Some("image".to_string())).await.map_err(|e| e.to_string())
-                                                            } else {
-                                                                Err("Model missing".to_string())
+                                                            gen.clear_kv_cache();
+                                                            match gen.generate(params, Some(cancel_flag.clone()), Some(record.id.clone()), Some("image".to_string())).await {
+                                                                Ok(raw_ocr) => {
+                                                                    cleaned_ocr = raw_ocr.replace("```json", "").replace("```", "").trim().to_string();
+                                                                    ocr_success = true;
+                                                                },
+                                                                Err(e) => {
+                                                                    has_error = Some(e.to_string());
+                                                                }
+                                                            }
+
+                                                            if ocr_success {
+                                                                println!("[System] 이미지 OCR 완료 및 JSON 태그 정제됨. (ID: {})", record.id);
+                                                                println!("[Qwen3.5] 배치 작업 생성된 텍스트 결과:\n{}", cleaned_ocr);
+                                                                record.context = cleaned_ocr.clone();
                                                             }
                                                         }
-                                                    };
-
-                                                    match gen_result {
-                                                        Ok(raw_ocr) => {
-                                                            cleaned_ocr = raw_ocr.replace("```json", "").replace("```", "").trim().to_string();
-                                                            ocr_success = true;
-                                                        },
-                                                        Err(e) => {
-                                                            has_error = Some(e);
+                                                        
+                                                        current_step += 1;
+                                                        let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                                        let payload = serde_json::json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
+                                                        *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                                        
+                                                        // 🚀 진행 상황 브로드캐스트
+                                                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                                        if let Ok(pages) = browser_c.pages().await {
+                                                            for p in pages { let _ = p.evaluate(script.clone()).await; }
                                                         }
+                                                        tokio::task::yield_now().await; // 🚀 추가
                                                     }
-
-                                                    if ocr_success {
-                                                        println!("[System] 이미지 OCR 완료 및 JSON 태그 정제됨. (ID: {})", record.id);
-                                                        println!("[Qwen3.5] 배치 작업 생성된 텍스트 결과:\n{}", cleaned_ocr);
-                                                        record.context = cleaned_ocr.clone();
-                                                    }
+                                                } else {
+                                                    has_error = Some("Model missing".to_string());
                                                 }
-                                                
-                                                current_step += 1;
-                                                let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                                let payload = serde_json::json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
-                                                *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
-                                                
-                                                // 🚀 진행 상황 브로드캐스트
-                                                let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", serde_json::json!(serde_json::json!({"type": "push_progress", "payload": payload})));
-                                                if let Ok(pages) = browser_c.pages().await {
-                                                    for p in pages { let _ = p.evaluate(script.clone()).await; }
-                                                }
-                                                tokio::task::yield_now().await; // 🚀 추가
                                             }
                                         }
 
@@ -3009,130 +3022,123 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             };
 
                                             if let Some(model) = model_wrapper {
-                                                for (idx, record) in target_records.iter_mut().enumerate() {
-                                                    if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
-                                                        has_error = Some("Push operation cancelled by user.".to_string());
-                                                        break;
-                                                    }
+                                                let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
+                                                
+                                                // 🚀 [CRITICAL FIX] 루프 밖에서 단 1번만 모델을 릴레이하고 락을 쥡니다.
+                                                if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
+                                                    has_error = Some(format!("VRAM Relay Error: {}", e));
+                                                } else {
+                                                    let _ = model.ensure_qwen3_5(false).await; // 텍스트 전용 모드
+                                                    let mut gen_guard = model.qwen3_5_generator.lock().await;
+                                                    if let Some(gen) = gen_guard.as_mut() {
+                                                        for (idx, record) in target_records.iter_mut().enumerate() {
+                                                            if PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst) {
+                                                                has_error = Some("Push operation cancelled by user.".to_string());
+                                                                break;
+                                                            }
 
-                                                    // 🚀 DB의 masking 컬럼에도 이미지가 완전히 제거된 텍스트를 저장하도록 초기값을 변경합니다.
-                                                    let mut masked_text = if !record.context_for_llm.trim().is_empty() {
-                                                        record.context_for_llm.clone()
-                                                    } else {
-                                                        record.context.clone()
-                                                    };
-                                                    
-                                                    if has_error.is_none() && !masked_text.trim().is_empty() {
-                                                        let text_for_masking = masked_text.clone();
-                                                        // println!("[System] [LLM 실제 입력 텍스트 확인용 (ID: {})]\n{}", record.id, text_for_masking);
-
-                                                        let prompt = format!(
-                                                            "[TASK] Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think",
-                                                            text_for_masking
-                                                        );
-
-                                                        let params = ChatCompletionParameters {
-                                                            messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                                                                content: ChatCompletionRequestUserMessageContent::Text(prompt),
-                                                                name: None,
-                                                            })],
-                                                            model: "qwen3.5".to_string(),
-                                                            max_tokens: Some(1024),
-                                                            temperature: Some(0.0), // 마스킹은 결정론적이어야 하므로 0.0을 권장
-                                                            top_p: Some(0.9),
-                                                            ..Default::default()
-                                                        };
-
-                                                        let cancel_flag = Arc::new(AtomicBool::new(PUSH_CANCEL_SIGNAL.load(Ordering::SeqCst)));
-                                                        
-                                                        // 🚀 기존 방식: 직접 릴레이 & 락을 걸고 제너레이터 호출
-                                                        let gen_result = {
-                                                            if let Err(e) = model.secure_vram_relay(ModelSize::Qwen3_5, Some(cancel_flag.clone())).await {
-                                                                Err(format!("VRAM Relay Error: {}", e))
+                                                            // 🚀 DB의 masking 컬럼에도 이미지가 완전히 제거된 텍스트를 저장하도록 초기값을 변경합니다.
+                                                            let mut masked_text = if !record.context_for_llm.trim().is_empty() {
+                                                                record.context_for_llm.clone()
                                                             } else {
-                                                                let _ = model.ensure_qwen3_5(false).await; // 텍스트 모드 전용
-                                                                let mut gen_guard = model.qwen3_5_generator.lock().await;
-                                                                if let Some(gen) = gen_guard.as_mut() {
-                                                                    gen.clear_kv_cache();
-                                                                    gen.generate(params, Some(cancel_flag), Some(record.id.clone()), Some("text".to_string())).await.map_err(|e| e.to_string())
-                                                                } else {
-                                                                    Err("Model missing".to_string())
-                                                                }
-                                                            }
-                                                        };
+                                                                record.context.clone()
+                                                            };
+                                                            
+                                                            if has_error.is_none() && !masked_text.trim().is_empty() {
+                                                                let text_for_masking = masked_text.clone();
 
-                                                        match gen_result {
-                                                            Ok(json_res) => {
-                                                                let cleaned_json = json_res.replace("```json", "").replace("```", "").trim().to_string();
-                                                                
-                                                                #[derive(serde::Serialize, serde::Deserialize, Clone)]
-                                                                struct PiiItem { word: String, label: String }
-                                                                
-                                                                #[derive(serde::Deserialize)]
-                                                                struct PiiResponse { items: Vec<std::collections::HashMap<String, String>> }
-                                                                
-                                                                if let Ok(parsed_res) = serde_json::from_str::<PiiResponse>(&cleaned_json) {
-                                                                    let mut pii_list = Vec::new();
-                                                                    for map in parsed_res.items {
-                                                                        for (label, word) in map {
-                                                                            pii_list.push(PiiItem { word, label });
-                                                                        }
-                                                                    }
+                                                                let prompt = format!(
+                                                                    "[TASK] Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think",
+                                                                    text_for_masking
+                                                                );
+
+                                                                let params = ChatCompletionParameters {
+                                                                    messages: vec![ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                                                                        content: ChatCompletionRequestUserMessageContent::Text(prompt),
+                                                                        name: None,
+                                                                    })],
+                                                                    model: "qwen3.5".to_string(),
+                                                                    max_tokens: Some(1024),
+                                                                    temperature: Some(0.0), // 마스킹은 결정론적이어야 하므로 0.0을 권장
+                                                                    top_p: Some(0.9),
+                                                                    ..Default::default()
+                                                                };
+
+                                                                gen.clear_kv_cache();
+                                                                match gen.generate(params, Some(cancel_flag.clone()), Some(record.id.clone()), Some("text".to_string())).await {
+                                                                    Ok(json_res) => {
+                                                                        let cleaned_json = json_res.replace("```json", "").replace("```", "").trim().to_string();
                                                                     
-                                                                    let mut label_map = std::collections::HashMap::new();
-                                                                    let mut sorted_pii = pii_list;
-                                                                    
-                                                                    sorted_pii.sort_by(|a, b| b.word.len().cmp(&a.word.len()));
-                                                                    for pii in sorted_pii {
-                                                                        if pii.word.trim().chars().count() > 1 {
-                                                                            let mnemonic = generate_mnemonic(); // 예: @brave_apple@
-                                                                            label_map.insert(mnemonic.clone(), pii.clone());
-                                                                            masked_text = masked_text.replace(&pii.word, &mnemonic);
+                                                                        #[derive(serde::Serialize, serde::Deserialize, Clone)]
+                                                                        struct PiiItem { word: String, label: String }
+                                                                        
+                                                                        #[derive(serde::Deserialize)]
+                                                                        struct PiiResponse { items: Vec<std::collections::HashMap<String, String>> }
+                                                                        
+                                                                        if let Ok(parsed_res) = serde_json::from_str::<PiiResponse>(&cleaned_json) {
+                                                                            let mut pii_list = Vec::new();
+                                                                            for map in parsed_res.items {
+                                                                                for (label, word) in map {
+                                                                                    pii_list.push(PiiItem { word, label });
+                                                                                }
+                                                                            }
+                                                                            
+                                                                            let mut label_map = std::collections::HashMap::new();
+                                                                            let mut sorted_pii = pii_list;
+                                                                            
+                                                                            sorted_pii.sort_by(|a, b| b.word.len().cmp(&a.word.len()));
+                                                                            for pii in sorted_pii {
+                                                                                if pii.word.trim().chars().count() > 1 {
+                                                                                    let mnemonic = generate_mnemonic(); // 예: @brave_apple@
+                                                                                    label_map.insert(mnemonic.clone(), pii.clone());
+                                                                                    masked_text = masked_text.replace(&pii.word, &mnemonic);
+                                                                                }
+                                                                            }
+                                                                            record.label = serde_json::to_string(&label_map).unwrap_or_default();
+                                                                        } else {
+                                                                            println!("[Warning] Masking JSON parsing failed:\n{}", cleaned_json);
                                                                         }
+                                                                    },
+                                                                    Err(e) => {
+                                                                        has_error = Some(e);
                                                                     }
-                                                                    record.label = serde_json::to_string(&label_map).unwrap_or_default();
-                                                                } else {
-                                                                    println!("[Warning] Masking JSON parsing failed:\n{}", cleaned_json);
                                                                 }
-                                                            },
-                                                            Err(e) => {
-                                                                has_error = Some(e);
                                                             }
+
+                                                            record.masking = masked_text;
+                                                            println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
+
+                                                            current_step += 1;
+                                                            let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                                            let payload = serde_json::json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
+                                                            *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                                            
+                                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(json!({"type": "push_progress", "payload": payload})));
+                                                            if let Ok(pages) = browser_c.pages().await {
+                                                                for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                                            }
+                                                            tokio::task::yield_now().await;
                                                         }
                                                     }
-
-                                                    record.masking = masked_text;
-                                                    println!("[System] [Record ID: {}] 최종 전처리 결과:\n{}", record.id, record.masking);
-
-                                                    current_step += 1;
-                                                    let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                                    let payload = serde_json::json!({"item_display": idx + 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
-                                                    *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
-                                                    
-                                                    let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", serde_json::json!(serde_json::json!({"type": "push_progress", "payload": payload})));
-                                                    if let Ok(pages) = browser_c.pages().await {
-                                                        for p in pages { let _ = p.evaluate(script.clone()).await; }
-                                                    }
-                                                    tokio::task::yield_now().await;
                                                 }
-                                            }
-                                            
-                                            {
-                                                let mut model_guard = QWEN_MODEL.lock().await;
-                                                if let Some(m) = model_guard.take() { m.deep_purge().await; }
-                                            }
-                                            force_memory_cleanup();
-                                        } else {
-                                            for record in target_records.iter_mut() {
-                                                record.masking = record.context.clone();
-                                            }
-                                            current_step += total_items; 
-                                            let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
-                                            let payload = serde_json::json!({"item_display": 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
-                                            *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
-                                            let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", serde_json::json!(serde_json::json!({"type": "push_progress", "payload": payload})));
-                                            if let Ok(pages) = browser_c.pages().await {
-                                                for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                                
+                                                {
+                                                    let mut model_guard = QWEN_MODEL.lock().await;
+                                                    if let Some(m) = model_guard.take() { m.deep_purge().await; }
+                                                }
+                                                force_memory_cleanup();
+                                            } else {
+                                                for record in target_records.iter_mut() {
+                                                    record.masking = record.context.clone();
+                                                }
+                                                current_step += total_items; 
+                                                let percent = (current_step as f64 / total_steps as f64 * 100.0) as usize;
+                                                let payload = serde_json::json!({"item_display": 1, "total_items": total_items, "percent": percent, "processing_ids": active_processing_ids.clone()});
+                                                *GLOBAL_PROGRESS.lock().unwrap() = Some(payload.clone());
+                                                let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", serde_json::json!(serde_json::json!({"type": "push_progress", "payload": payload})));
+                                                if let Ok(pages) = browser_c.pages().await {
+                                                    for p in pages { let _ = p.evaluate(script.clone()).await; }
+                                                }
                                             }
                                         }
                                     } else {
