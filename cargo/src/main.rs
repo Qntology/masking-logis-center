@@ -3100,7 +3100,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                                         }
                                                                     },
                                                                     Err(e) => {
-                                                                        has_error = Some(e);
+                                                                        // 🚀 anyhow::Error 객체를 String 타입으로 변환하여 대입합니다.
+                                                                        has_error = Some(e.to_string());
                                                                     }
                                                                 }
                                                             }
