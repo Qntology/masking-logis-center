@@ -51,7 +51,7 @@ impl DefaultHarness {
             return;
         }
 
-        // 2. 입력 요소(input, select)의 경우 태그는 버리되 그 안에 담긴 '값'만 텍스트로 취급합니다.
+        // 2. 특정 요소(input, select, img)의 속성 및 값 추출 로직
         if tag == "input" {
             if let Some(val) = element.attr("value") {
                 output.push_str(val);
@@ -70,6 +70,18 @@ impl DefaultHarness {
                             output.push('\n');
                         }
                     }
+                }
+            }
+            return;
+        }
+
+        // 🚀 img 태그 처리: src 값을 추출하되 base64(data:) 형식은 제외
+        if tag == "img" {
+            if let Some(src) = element.attr("src") {
+                if !src.starts_with("data:") {
+                    output.push_str("[Image: ");
+                    output.push_str(src);
+                    output.push_str("]\n");
                 }
             }
             return;

@@ -20,6 +20,8 @@ pub struct CommerceRecord {
     pub context: String,
     #[serde(default)]
     pub masking: String,
+    #[serde(default)]
+    pub label: String, // 🚀 NEW: 추출된 라벨 JSON을 저장하는 필드
     pub status: String,
     pub track: String,
     pub version: i32,
@@ -48,6 +50,7 @@ pub async fn get_or_create_table() -> Result<lancedb::Table, lancedb::Error> {
                 Field::new("domain", DataType::Utf8, false),
                 Field::new("context", DataType::Utf8, false),
                 Field::new("masking", DataType::Utf8, false),
+                Field::new("label", DataType::Utf8, false), // 🚀 NEW
                 Field::new("status", DataType::Utf8, false),
                 Field::new("track", DataType::Utf8, false),
                 Field::new("version", DataType::Int32, false),
@@ -107,6 +110,7 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
     let domain_array = Arc::new(StringArray::from(records.iter().map(|r| r.domain.as_str()).collect::<Vec<&str>>())) as ArrayRef;
     let context_array = Arc::new(StringArray::from(records.iter().map(|r| r.context.as_str()).collect::<Vec<&str>>())) as ArrayRef;
     let masking_array = Arc::new(StringArray::from(records.iter().map(|r| r.masking.as_str()).collect::<Vec<&str>>())) as ArrayRef;
+    let label_array = Arc::new(StringArray::from(records.iter().map(|r| r.label.as_str()).collect::<Vec<&str>>())) as ArrayRef; // 🚀 NEW
     let status_array = Arc::new(StringArray::from(records.iter().map(|r| r.status.as_str()).collect::<Vec<&str>>())) as ArrayRef;
     let track_array = Arc::new(StringArray::from(records.iter().map(|r| r.track.as_str()).collect::<Vec<&str>>())) as ArrayRef;
     let version_array = Arc::new(Int32Array::from(records.iter().map(|r| r.version).collect::<Vec<i32>>())) as ArrayRef;
@@ -133,6 +137,7 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
         Field::new("domain", DataType::Utf8, false),
         Field::new("context", DataType::Utf8, false),
         Field::new("masking", DataType::Utf8, false),
+        Field::new("label", DataType::Utf8, false), // 🚀 NEW
         Field::new("status", DataType::Utf8, false),
         Field::new("track", DataType::Utf8, false),
         Field::new("version", DataType::Int32, false),
@@ -143,7 +148,7 @@ pub async fn save_records(records: Vec<CommerceRecord>, categorizer: Option<&cra
 
     let batch = RecordBatch::try_new(
         schema.clone(),
-        vec![id_array, host_array, url_array, title_array, domain_array, context_array, masking_array, status_array, track_array, version_array, created_at_array, updated_at_array, vector_array]
+        vec![id_array, host_array, url_array, title_array, domain_array, context_array, masking_array, label_array, status_array, track_array, version_array, created_at_array, updated_at_array, vector_array] // 🚀 NEW array added
     ).map_err(|e| lancedb::Error::Runtime { message: e.to_string() })?;
 
     table.add(vec![batch]).execute().await?;
@@ -208,12 +213,13 @@ fn extract_from_batch(batch: &RecordBatch, results: &mut Vec<CommerceRecord>) ->
     let domains = batch.column(4).as_string::<i32>();
     let contexts = batch.column(5).as_string::<i32>();
     let maskings = batch.column(6).as_string::<i32>();
-    let statuses = batch.column(7).as_string::<i32>();
-    let tracks = batch.column(8).as_string::<i32>();
-    let versions = batch.column(9).as_primitive::<Int32Type>();
-    let created_ats = batch.column(10).as_primitive::<Int64Type>();
-    let updated_ats = batch.column(11).as_primitive::<Int64Type>();
-    let vectors_list = batch.column(12).as_fixed_size_list();
+    let labels = batch.column(7).as_string::<i32>(); // 🚀 NEW
+    let statuses = batch.column(8).as_string::<i32>();
+    let tracks = batch.column(9).as_string::<i32>();
+    let versions = batch.column(10).as_primitive::<Int32Type>();
+    let created_ats = batch.column(11).as_primitive::<Int64Type>();
+    let updated_ats = batch.column(12).as_primitive::<Int64Type>();
+    let vectors_list = batch.column(13).as_fixed_size_list();
     let vectors_values = vectors_list.values().as_primitive::<Float32Type>();
 
     for i in 0..batch.num_rows() {
@@ -230,6 +236,7 @@ fn extract_from_batch(batch: &RecordBatch, results: &mut Vec<CommerceRecord>) ->
             domain: domains.value(i).to_string(),
             context: contexts.value(i).to_string(),
             masking: maskings.value(i).to_string(),
+            label: labels.value(i).to_string(), // 🚀 NEW
             status: statuses.value(i).to_string(),
             track: tracks.value(i).to_string(),
             version: versions.value(i),

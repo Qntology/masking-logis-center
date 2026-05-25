@@ -11,6 +11,8 @@ use lazy_static::lazy_static;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rand::RngCore; // 🚀 NEW: 랜덤 니모닉 생성을 위한 모듈 추가
+
 lazy_static! {
     static ref QWEN_MODEL: Mutex<Option<Qwen3_5GenerateModel>> = Mutex::new(None);
     // 🚀 EmbeddingModel의 이동된 경로(models::embedding)를 반영합니다.
@@ -18,6 +20,28 @@ lazy_static! {
     static ref GLOBAL_PROGRESS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
     // 🚀 Push 작업을 실시간으로 중단하기 위한 전역 플래그입니다.
     static ref PUSH_CANCEL_SIGNAL: AtomicBool = AtomicBool::new(false);
+
+    // 🚀 NEW: 니모닉 생성을 위한 형용사 및 명사 사전 데이터 메모리 로드
+    static ref ADJECTIVES: Vec<&'static str> = include_str!("../adjectives.txt")
+        .lines()
+        .filter_map(|l| l.split_whitespace().last())
+        .filter(|l| !l.is_empty())
+        .collect();
+    static ref NOUNS: Vec<&'static str> = include_str!("../nouns.txt")
+        .lines()
+        .filter_map(|l| l.split_whitespace().last())
+        .filter(|l| !l.is_empty())
+        .collect();
+}
+
+// 🚀 NEW: 임의의 사전 조합으로 @형용사_명사@ 형태의 고유 마스킹 텍스트 생성
+fn generate_mnemonic() -> String {
+    let mut rng = rand::thread_rng();
+    let adj_idx = (rng.next_u32() as usize) % ADJECTIVES.len().max(1);
+    let noun_idx = (rng.next_u32() as usize) % NOUNS.len().max(1);
+    let adj = ADJECTIVES.get(adj_idx).unwrap_or(&"brave");
+    let noun = NOUNS.get(noun_idx).unwrap_or(&"apple");
+    format!("@{}_{}@", adj.to_lowercase(), noun.to_lowercase())
 }
 
 // Simplified stub for chat completion
@@ -128,7 +152,9 @@ const OVERLAY_SCRIPT: &str = r#"
     }
 
     function extractVisibleText() {
-        return document.body.innerText || document.body.textContent || '';
+        // 🚀 텍스트뿐만 아니라 img 태그 정보가 포함된 전체 HTML을 전달하여 백엔드 harness에서 정제하도록 변경
+        // 성능과 노이즈 방지를 위해 불필요한 script, style 등을 제거한 body의 clone을 사용할 수도 있습니다.
+        return document.body.innerHTML || '';
     }
 
     function initUI() {
@@ -335,6 +361,7 @@ const OVERLAY_SCRIPT: &str = r#"
                 title: getPageMeta(), 
                 domain: currentTabFilter,
                 context: extractedText, 
+                label: '', // 🚀 NEW
                 status: 'DRAFT',
                 track: '',
                 version: 1,
@@ -516,6 +543,15 @@ const OVERLAY_SCRIPT: &str = r#"
                 confirmBtn.style.width = '100%';
                 confirmBtn.style.borderRadius = '4px';
                 confirmBtn.onclick = () => {
+                    // 🚀 중복 이름 검증 로직 추가
+                    const finalNames = tempDynamicTabs.map(t => t.current.trim().toUpperCase()).filter(t => t !== '');
+                    const uniqueNames = new Set(finalNames);
+                    
+                    if (finalNames.length !== uniqueNames.size) {
+                        alert('중복된 메뉴 이름이 존재합니다. 이름을 고유하게 수정해 주세요.');
+                        return;
+                    }
+
                     // 🚀 1. 삭제된 탭 검사: 원래 있던 탭인데 임시 배열에 없으면 TRASH로 이동
                     const deletedTabs = dynamicTabs.filter(t => !tempDynamicTabs.some(temp => temp.original === t));
                     deletedTabs.forEach(delTab => {
@@ -538,9 +574,8 @@ const OVERLAY_SCRIPT: &str = r#"
                     });
 
                     // 최종 메뉴 확정
-                    dynamicTabs = tempDynamicTabs.map(t => t.current.trim().toUpperCase()).filter(t => t !== '');
+                    dynamicTabs = finalNames;
                     if (dynamicTabs.length === 0) {
-                        // 🚀 하드코딩된 COMMERCE 대신, 기존 설정의 첫 번째 탭을 살리거나 GENERAL을 기본값으로 사용합니다.
                         dynamicTabs = window.custom_tabs && window.custom_tabs.length > 0 ? [window.custom_tabs[0]] : ['GENERAL'];
                     }
                     isEditMode = false;
@@ -595,7 +630,9 @@ const OVERLAY_SCRIPT: &str = r#"
                 const t = tabObj.current;
                 const domainCount = stagedItems.filter(i => i.domain === t).length;
                 const item = document.createElement('div');
-                item.className = 'gnb-item' + (!isEditMode && t === currentTabFilter ? ' active' : '');
+                // 🚀 편집 모드가 아닐 때만 정확히 이름이 일치하는 항목에 active 클래스 부여
+                const isActive = !isEditMode && t === currentTabFilter;
+                item.className = 'gnb-item' + (isActive ? ' active' : '');
                 
                 if (isEditMode) {
                     item.style.display = 'flex';
@@ -717,7 +754,21 @@ const OVERLAY_SCRIPT: &str = r#"
                 addBtn.style.textAlign = 'center';
                 addBtn.style.padding = '10px';
                 addBtn.onclick = () => {
-                    tempDynamicTabs.push({ original: null, current: 'NEW' });
+                    // 🚀 중복되지 않는 기본 이름 생성 로직 추가
+                    let newName = 'NEW';
+                    let counter = 1;
+                    const existingNames = [
+                        ...dynamicTabs, 
+                        ...tempDynamicTabs.map(t => t.current),
+                        ...fixedTabs
+                    ];
+                    
+                    while (existingNames.includes(newName)) {
+                        newName = `NEW_${counter}`;
+                        counter++;
+                    }
+                    
+                    tempDynamicTabs.push({ original: null, current: newName });
                     updateGnbUI();
                 };
                 gnbMenu.appendChild(addBtn);
@@ -883,6 +934,7 @@ const OVERLAY_SCRIPT: &str = r#"
                         title: `[File] ${file.name}`, 
                         domain: currentTabFilter,
                         context: textData, 
+                        label: '', // 🚀 NEW
                         status: 'DRAFT',
                         track: '',
                         version: 1,
@@ -1019,6 +1071,7 @@ const OVERLAY_SCRIPT: &str = r#"
                         title: `[File] ${file.name}`, 
                         domain: currentTabFilter,
                         context: content, // 이미지면 dataURL, 텍스트면 문자열이 담깁니다.
+                        label: '', // 🚀 NEW
                         status: 'DRAFT',
                         track: '',
                         version: 1,
@@ -1625,14 +1678,18 @@ const OVERLAY_SCRIPT: &str = r#"
                     // 🚀 처리 중인 아이템일 경우 제목 앞에 ⏳(모래시계) 이모지를 추가하여 직관성을 극대화합니다.
                     const processingBadge = processingIds.includes(item.id) ? '⏳ [처리중...] ' : '';
                     
+                    // 🚀 NEW: 마스킹 여부 판별 및 배지 추가
+                    const hasMasking = item.status === 'PUSHED' && item.masking && item.masking !== item.context;
+                    const maskBadge = hasMasking ? '🟢 ' : '';
+                    
                     // 🚀 현재 접속한 페이지 UI 텍스트 꾸미기
                     if (item.url === currentUrl) {
-                        titleSpan.textContent = `📌 [현재 페이지] ${processingBadge}${statusBadge}${mainTitle}`;
+                        titleSpan.textContent = `📌 [현재 페이지] ${processingBadge}${maskBadge}${statusBadge}${mainTitle}`;
                         titleSpan.style.fontSize = '14px';
                         titleSpan.style.fontWeight = '900';
                         titleSpan.style.textDecoration = 'underline';
                     } else {
-                        titleSpan.textContent = `${processingBadge}${statusBadge}${mainTitle}`;
+                        titleSpan.textContent = `${processingBadge}${maskBadge}${statusBadge}${mainTitle}`;
                         titleSpan.style.fontSize = '13px';
                         titleSpan.style.fontWeight = 'bold';
                         titleSpan.style.textDecoration = 'none';
@@ -1684,7 +1741,34 @@ const OVERLAY_SCRIPT: &str = r#"
                         tableStyle.textContent = `table th, table td { border: 1px solid #eee; padding: 4px; text-align: left; } table th { background: #f0f0f0; }`;
                         detailView.appendChild(tableStyle);
                     } else {
-                        detailView.textContent = rawContent || '전처리된 텍스트 결과가 없습니다.';
+                        // 🚀 NEW: 텍스트인 경우 마스킹 토글 버튼 및 컨테이너 추가
+                        const textContentContainer = document.createElement('div');
+                        textContentContainer.style.marginTop = '5px';
+                        textContentContainer.textContent = rawContent || '전처리된 텍스트 결과가 없습니다.';
+
+                        if (hasMasking) {
+                            const toggleBtn = document.createElement('button');
+                            toggleBtn.textContent = '원본 보기';
+                            toggleBtn.style.background = '#6c757d';
+                            toggleBtn.style.color = 'white';
+                            toggleBtn.style.padding = '4px 8px';
+                            toggleBtn.style.borderRadius = '3px';
+                            toggleBtn.style.fontSize = '11px';
+                            toggleBtn.style.cursor = 'pointer';
+                            toggleBtn.style.marginBottom = '5px';
+                            toggleBtn.style.border = 'none';
+                            
+                            let showMasking = true;
+                            toggleBtn.onclick = (e) => {
+                                e.stopPropagation(); // 🚀 버튼 클릭 시 아이템 전체 영역(row)이 닫히는 현상 방지
+                                showMasking = !showMasking;
+                                toggleBtn.textContent = showMasking ? '원본 보기' : '마스킹 보기';
+                                toggleBtn.style.background = showMasking ? '#6c757d' : '#28a745';
+                                textContentContainer.textContent = showMasking ? item.masking : item.context;
+                            };
+                            detailView.appendChild(toggleBtn);
+                        }
+                        detailView.appendChild(textContentContainer);
                     }
 
                     row.onclick = () => detailView.classList.toggle('open');
@@ -1723,6 +1807,7 @@ const OVERLAY_SCRIPT: &str = r#"
                     title: getPageMeta(), 
                     domain: targetDomain, 
                     context: extractedText, 
+                    label: '', // 🚀 NEW
                     status: 'DRAFT',
                     track: '',
                     version: 1,
@@ -1744,6 +1829,57 @@ const OVERLAY_SCRIPT: &str = r#"
             }
         }
         
+        // 🚀 NEW: Alt + 우클릭 시 화면의 니모닉 스캔 및 스피너 노출 로직
+        document.addEventListener('contextmenu', (e) => {
+            if (e.altKey) {
+                e.preventDefault();
+                
+                // 기존 스피너 제거
+                const existing = document.getElementById('mnemonic-spinner');
+                if (existing) existing.remove();
+
+                // 마우스 위치 기반 스피너 UI 생성
+                const spinnerBox = document.createElement('div');
+                spinnerBox.id = 'mnemonic-spinner';
+                spinnerBox.style.position = 'fixed';
+                spinnerBox.style.left = `${e.clientX + 10}px`;
+                spinnerBox.style.top = `${e.clientY + 10}px`;
+                spinnerBox.style.background = 'rgba(0, 0, 0, 0.8)';
+                spinnerBox.style.color = '#fff';
+                spinnerBox.style.padding = '10px 15px';
+                spinnerBox.style.borderRadius = '5px';
+                spinnerBox.style.zIndex = '2147483647';
+                spinnerBox.style.fontSize = '12px';
+                spinnerBox.style.boxShadow = '0 4px 6px rgba(0,0,0,0.3)';
+                spinnerBox.innerHTML = '⠋ 니모닉(Mnemonic) 스캔 중...';
+                document.body.appendChild(spinnerBox);
+
+                let sIdx = 0;
+                const sFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                const sInt = setInterval(() => {
+                    spinnerBox.innerHTML = `${sFrames[sIdx]} 페이지 니모닉 스캔 및 LanceDB 복구 중...`;
+                    sIdx = (sIdx + 1) % sFrames.length;
+                }, 100);
+                spinnerBox.dataset.interval = sInt;
+
+                // 정규식으로 현재 화면 텍스트 내의 니모닉 추출 (@형용사_명사@)
+                const regex = /@[a-z]+_[a-z]+@/g;
+                const textContent = document.body.innerText || "";
+                const found = textContent.match(regex) || [];
+                const uniqueMnemonics = [...new Set(found)];
+
+                if (uniqueMnemonics.length > 0) {
+                    if (window.rpc) {
+                        window.rpc("restore_mnemonics:" + JSON.stringify(uniqueMnemonics));
+                    }
+                } else {
+                    clearInterval(sInt);
+                    spinnerBox.innerHTML = '✅ 화면에서 니모닉 패턴이 발견되지 않았습니다.';
+                    setTimeout(() => spinnerBox.remove(), 2000);
+                }
+            }
+        });
+        
         window.addEventListener('focus', syncStateOnReturn);
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') syncStateOnReturn();
@@ -1752,6 +1888,37 @@ const OVERLAY_SCRIPT: &str = r#"
         window.addEventListener('rpc_response', (e) => {
             try {
                 const data = typeof e.detail === 'string' ? JSON.parse(e.detail) : e.detail;
+                
+                // 🚀 NEW: LanceDB 매칭 결과를 받아 실제 웹페이지 DOM을 레이아웃 파괴 없이 복구하는 로직
+                if (data.type === 'mnemonics_restored') {
+                    const restoreMap = data.payload;
+                    const spinnerBox = document.getElementById('mnemonic-spinner');
+                    
+                    if (spinnerBox) {
+                        clearInterval(spinnerBox.dataset.interval);
+                        const count = Object.keys(restoreMap).length;
+                        spinnerBox.innerHTML = `✅ LanceDB 매칭 성공! ${count}건 원복 완료.`;
+                        setTimeout(() => spinnerBox.remove(), 2000);
+                    }
+
+                    // TreeWalker를 사용하여 HTML 구조(레이아웃/스타일/스크립트)를 유지한 채 순수 텍스트(TextNode)만 안전하게 교체
+                    const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                    let node;
+                    while ((node = walk.nextNode())) {
+                        let text = node.nodeValue;
+                        let changed = false;
+                        for (const [mnemonic, originalWord] of Object.entries(restoreMap)) {
+                            if (text.includes(mnemonic)) {
+                                text = text.split(mnemonic).join(originalWord);
+                                changed = true;
+                            }
+                        }
+                        if (changed) {
+                            node.nodeValue = text;
+                        }
+                    }
+                    return;
+                }
                 
                 if (data.type === 'drafts_loaded') {
                     // 🚀 삭제 처리가 완료되지 않은 상태에서 서버 데이터를 가져오더라도, 로컬에서 삭제한 ID는 화면에 렌더링하지 않습니다.
@@ -2482,8 +2649,12 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                 let mut masked_text = record.context.clone();
                                                 
                                                 if has_error.is_none() && !masked_text.trim().is_empty() {
+                                                    // 🚀 NEW: 요구사항에 맞춘 구체적인 영문 프롬프트 카테고리
+                                                    // 🚀 FIX: 객체의 키를 라벨로, 값을 단어로 사용하도록 프롬프트 수정
+                                                    // 🚀 FIX: 할루시네이션 방지를 위해 Example 문구를 완전히 제거합니다.
+                                                    // 🚀 FIX: RETURN JSON ONLY 사용 시 강제되는 '{' 구조와 충돌하지 않도록 감싸는 객체(items) 형태로 지시합니다.
                                                     let prompt = format!(
-                                                        "Extract sensitive personal information from the text based on 54 categories including: Identity, Contact, Address, Dates & time, Government IDs, Financial, Crypto, Vehicle, Digital, Auth.\nRETURN JSON ONLY. The format must be a flat JSON array of objects containing the exact matched words and label. Example: [{{\"word\": \"John Doe\", \"label\": \"FIRSTNAME\"}}, {{\"word\": \"010-1234-5678\", \"label\": \"PHONE\"}}]. If none, return [].\n\nText: {}",
+                                                        "Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {}",
                                                         masked_text
                                                     );
 
@@ -2508,20 +2679,39 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                                             Ok(json_res) => {
                                                                 let cleaned_json = json_res.replace("```json", "").replace("```", "").trim().to_string();
                                                                 
-                                                                // JSON 파싱 구조체 선언
-                                                                #[derive(serde::Deserialize)]
+                                                                // JSON 파싱 구조체 선언 (Serialize 추가)
+                                                                // 🚀 FIX: clone 호출을 위해 Clone 트레이트 추가
+                                                                #[derive(serde::Serialize, serde::Deserialize, Clone)]
                                                                 struct PiiItem { word: String, label: String }
                                                                 
-                                                                if let Ok(pii_list) = serde_json::from_str::<Vec<PiiItem>>(&cleaned_json) {
-                                                                    // 🚀 길이가 긴 단어부터 순차적으로 치환하여 부분 매칭 오류를 방지합니다.
+                                                                #[derive(serde::Deserialize)]
+                                                                struct PiiResponse { items: Vec<std::collections::HashMap<String, String>> }
+                                                                
+                                                                // 🚀 FIX: 최상위 객체(items)로 파싱 후 내부 PiiItem 구조체로 재조립
+                                                                if let Ok(parsed_res) = serde_json::from_str::<PiiResponse>(&cleaned_json) {
+                                                                    let mut pii_list = Vec::new();
+                                                                    for map in parsed_res.items {
+                                                                        for (label, word) in map {
+                                                                            pii_list.push(PiiItem { word, label });
+                                                                        }
+                                                                    }
+                                                                    
+                                                                    // 🚀 NEW: 추출된 개인정보를 니모닉으로 변환하고 매핑 객체를 생성합니다.
+                                                                    let mut label_map = std::collections::HashMap::new();
                                                                     let mut sorted_pii = pii_list;
+                                                                    
+                                                                    // 🚀 길이가 긴 단어부터 순차적으로 치환하여 부분 매칭 오류를 방지합니다.
                                                                     sorted_pii.sort_by(|a, b| b.word.len().cmp(&a.word.len()));
                                                                     for pii in sorted_pii {
                                                                         if pii.word.trim().chars().count() > 1 {
-                                                                            let placeholder = format!("[{}]", pii.label.to_uppercase());
-                                                                            masked_text = masked_text.replace(&pii.word, &placeholder);
+                                                                            let mnemonic = generate_mnemonic(); // 예: @brave_apple@
+                                                                            label_map.insert(mnemonic.clone(), pii.clone());
+                                                                            masked_text = masked_text.replace(&pii.word, &mnemonic);
                                                                         }
                                                                     }
+                                                                    
+                                                                    // 매핑된 딕셔너리를 DB label 필드에 저장
+                                                                    record.label = serde_json::to_string(&label_map).unwrap_or_default();
                                                                 } else {
                                                                     println!("[Warning] Masking JSON parsing failed:\n{}", cleaned_json);
                                                                 }
@@ -2716,6 +2906,37 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                 } else if payload == "cancel_push" {
                     // 🚀 중단 신호를 켭니다. mask_and_push_batch의 각 Phase 진입 전후에 이 플래그를 체크하게 됩니다.
                     PUSH_CANCEL_SIGNAL.store(true, Ordering::SeqCst);
+                    
+                    // [CLEANUP] 작업 취소 시 VRAM 즉각 해제
+                    {
+                        let mut model_guard = QWEN_MODEL.lock().unwrap();
+                        *model_guard = None;
+                    }
+                    {
+                        let mut emb_guard = EMBEDDING_MODEL.lock().unwrap();
+                        *emb_guard = None;
+                    }
+                    force_memory_cleanup();
+
+                    // [CLEANUP] 현재 진행 중이던 아이템들의 임시 데이터(KV 캐시 등) 즉각 삭제하여 디스크 용량 확보
+                    if let Some(progress) = GLOBAL_PROGRESS.lock().unwrap().as_ref() {
+                        if let Some(ids) = progress.get("processing_ids").and_then(|v| v.as_array()) {
+                            for id_val in ids {
+                                if let Some(id_str) = id_val.as_str() {
+                                    let kv_dir = terminal_logis_center_lib::utils::paths::get_kv_dir(None).join(id_str);
+                                    let base_kv_dir = terminal_logis_center_lib::utils::paths::get_kv_dir(None).join(format!("{}_base", id_str));
+                                    let task_data_dir = terminal_logis_center_lib::utils::paths::get_task_specific_dir(None, id_str);
+                                    let pug_log_dir = terminal_logis_center_lib::utils::paths::get_pug_logs_dir(None, id_str);
+
+                                    let _ = std::fs::remove_dir_all(&kv_dir);
+                                    let _ = std::fs::remove_dir_all(&base_kv_dir);
+                                    let _ = std::fs::remove_dir_all(&task_data_dir);
+                                    let _ = std::fs::remove_dir_all(&pug_log_dir);
+                                }
+                            }
+                        }
+                    }
+
                     json!({"type": "push_idle"}).to_string()
                 } else if payload.starts_with("process_file:") {
                     let full_data_url = payload["process_file:".len()..].to_string();
@@ -2726,6 +2947,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         let mut ocr_result = String::new();
                         let mut masked_result = String::new();
                         let mut has_error = None;
+                        // 🚀 FIX: 하단 결과 반환부에서 접근할 수 있도록 스코프를 최상단으로 격상
+                        let mut extracted_label = String::new();
 
                         // 1. OCR Extract
                         {
@@ -2803,8 +3026,11 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                 }
                                 
                                 if let Some(model) = local_model.as_mut() {
+                                    // 🚀 FIX: 객체의 키를 라벨로, 값을 단어로 사용하도록 프롬프트 수정
+                                    // 🚀 FIX: 할루시네이션 방지를 위해 Example 문구를 완전히 제거합니다.
+                                    // 🚀 FIX: RETURN JSON ONLY 사용 시 강제되는 '{' 구조와 충돌하지 않도록 감싸는 객체(items) 형태로 지시합니다.
                                     let prompt = format!(
-                                        "Extract sensitive personal information from the text based on 54 categories including: Identity, Contact, Address, Dates & time, Government IDs, Financial, Crypto, Vehicle, Digital, Auth.\nRETURN JSON ONLY. The format must be a flat JSON array of objects containing the exact matched words and label. Example: [{{\"word\": \"John Doe\", \"label\": \"FIRSTNAME\"}}, {{\"word\": \"010-1234-5678\", \"label\": \"PHONE\"}}]. If none, return [].\n\nText: {}",
+                                        "Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {}",
                                         ocr_result
                                     );
                                     
@@ -2825,18 +3051,36 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                                             let cleaned_json = json_res.replace("```json", "").replace("```", "").trim().to_string();
                                             masked_result = ocr_result.clone();
                                             
-                                            #[derive(serde::Deserialize)]
+                                            // 🚀 NEW: Serialize 추가
+                                            // 🚀 FIX: clone 호출을 위해 Clone 트레이트 추가
+                                            #[derive(serde::Serialize, serde::Deserialize, Clone)]
                                             struct PiiItem { word: String, label: String }
                                             
-                                            if let Ok(pii_list) = serde_json::from_str::<Vec<PiiItem>>(&cleaned_json) {
-                                                let mut sorted_pii = pii_list;
-                                                sorted_pii.sort_by(|a, b| b.word.len().cmp(&a.word.len()));
-                                                for pii in sorted_pii {
-                                                    if pii.word.trim().chars().count() > 1 {
-                                                        let placeholder = format!("[{}]", pii.label.to_uppercase());
-                                                        masked_result = masked_result.replace(&pii.word, &placeholder);
+                                            #[derive(serde::Deserialize)]
+                                            struct PiiResponse { items: Vec<std::collections::HashMap<String, String>> }
+                                            
+                                            // 🚀 FIX: 최상위 객체(items)로 파싱 후 내부 PiiItem 구조체로 재조립하여 최상단 변수 업데이트
+                                            if let Ok(parsed_res) = serde_json::from_str::<PiiResponse>(&cleaned_json) {
+                                                let mut pii_list = Vec::new();
+                                                for map in parsed_res.items {
+                                                    for (label, word) in map {
+                                                        pii_list.push(PiiItem { word, label });
                                                     }
                                                 }
+                                                
+                                                let mut label_map = std::collections::HashMap::new();
+                                                let mut sorted_pii = pii_list;
+                                                sorted_pii.sort_by(|a, b| b.word.len().cmp(&a.word.len()));
+                                                
+                                                for pii in sorted_pii {
+                                                    if pii.word.trim().chars().count() > 1 {
+                                                        let mnemonic = generate_mnemonic(); // 예: @brave_apple@
+                                                        label_map.insert(mnemonic.clone(), pii.clone());
+                                                        masked_result = masked_result.replace(&pii.word, &mnemonic);
+                                                    }
+                                                }
+                                                // 매핑된 딕셔너리를 프론트엔드로 반환
+                                                extracted_label = serde_json::to_string(&label_map).unwrap_or_default();
                                             } else {
                                                 println!("[Warning] Masking JSON parsing failed:\n{}", cleaned_json);
                                             }
@@ -2861,7 +3105,8 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                             json!({"type": "error", "message": err_msg}).to_string()
                         } else {
                             println!("[System] [단일 파일 처리] 최종 전처리 결과:\n{}", masked_result);
-                            json!({"type": "file_processed", "payload": {"ocr": ocr_result, "masked": masked_result}}).to_string()
+                            // 🚀 빈 문자열 대신 추출된 라벨 JSON을 함께 반환합니다.
+                            json!({"type": "file_processed", "payload": {"ocr": ocr_result, "masked": masked_result, "label": extracted_label}}).to_string()
                         };
 
                         let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(result_str));
@@ -3019,6 +3264,38 @@ async fn setup_page(browser: Arc<Browser>, page: chromiumoxide::Page, is_authent
                         }
                     });
                     json!({"type": "fetch_started"}).to_string()
+                } else if payload.starts_with("restore_mnemonics:") {
+                    // 🚀 NEW: 화면에서 발견된 니모닉 배열을 받아 LanceDB에서 원본 데이터를 조회합니다.
+                    let data = payload["restore_mnemonics:".len()..].to_string();
+                    let browser_c = _browser_clone.clone();
+                    
+                    tokio::task::spawn(async move {
+                        let mut result_map = std::collections::HashMap::new();
+                        if let Ok(mnemonics) = serde_json::from_str::<Vec<String>>(&data) {
+                            if let Ok(drafts) = db::fetch_drafts().await {
+                                for record in drafts {
+                                    if record.label.is_empty() { continue; }
+                                    // DB에 저장된 매핑 딕셔너리 구조를 파싱
+                                    if let Ok(label_map) = serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(&record.label) {
+                                        for m in &mnemonics {
+                                            if let Some(pii) = label_map.get(m) {
+                                                if let Some(word) = pii.get("word").and_then(|v| v.as_str()) {
+                                                    result_map.insert(m.clone(), word.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        let res_str = json!({"type": "mnemonics_restored", "payload": result_map}).to_string();
+                        let script = format!("window.dispatchEvent(new CustomEvent('rpc_response', {{ detail: {} }}));", json!(res_str));
+                        if let Ok(pages) = browser_c.pages().await {
+                            for p in pages { let _ = p.evaluate(script.clone()).await; }
+                        }
+                    });
+                    json!({"type": "restore_started"}).to_string()
                 } else if payload.starts_with("download_model:") {
                     let model_name = payload["download_model:".len()..].to_string();
                     let page_c = page_clone.clone();
@@ -3252,6 +3529,9 @@ async fn run_mcp_server() -> Result<(), Box<dyn std::error::Error>> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--mcp") { return run_mcp_server().await; }
+
+    // 🚀 [INIT] 시작 시 AppData 임시 폴더(KV 캐시 등) 완벽 초기화
+    terminal_logis_center_lib::utils::paths::cleanup_temp_dirs(None);
 
     let _is_authenticated = true; // 언더바 추가하여 미사용 경고 해결
     let start_url = "about:blank";
