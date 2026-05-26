@@ -94,10 +94,15 @@ async fn start_file_drag(
                         // 🌟 [CRITICAL FIX 1] 마스킹이 안 된 이미지는 포함하지 않고 건너뜀
                         if !doc.is_masked { continue; }
 
-                        // 🌟 [CRITICAL FIX 2] 마스킹 된 이미지는 OCR 텍스트만 추출하여 yaml 필드 치환
-                        if let Some(ocr_text) = json_val.get("data").and_then(|d| d.get("image_text")).and_then(|v| v.as_str()) {
+                        // 🌟 [CRITICAL FIX 2] 소유권 분리: 불변 대여(ocr_text)를 독립된 데이터(String)로 변환하여 가변 대여 충돌을 피합니다.
+                        let ocr_text_owned = json_val.get("data")
+                            .and_then(|d| d.get("image_text"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        if let Some(text) = ocr_text_owned {
                             if let Some(obj) = json_val.as_object_mut() {
-                                obj.insert("yaml".to_string(), json!(format!("| {}", ocr_text)));
+                                obj.insert("yaml".to_string(), json!(format!("| {}", text)));
                             }
                         }
                     }
@@ -119,10 +124,15 @@ async fn start_file_drag(
                             // 🌟 [CRITICAL FIX 1] 마스킹이 안 된 이미지는 포함하지 않고 건너뜀
                             if !doc.is_masked { continue; }
 
-                            // 🌟 [CRITICAL FIX 2] 마스킹 된 이미지는 OCR 텍스트만 추출하여 yaml 필드 치환
-                            if let Some(ocr_text) = json_val.get("data").and_then(|d| d.get("image_text")).and_then(|v| v.as_str()) {
+                            // 🌟 [CRITICAL FIX 2] 소유권 분리: 불변 대여(ocr_text)를 독립된 데이터(String)로 변환하여 가변 대여 충돌을 피합니다.
+                            let ocr_text_owned = json_val.get("data")
+                                .and_then(|d| d.get("image_text"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+
+                            if let Some(text) = ocr_text_owned {
                                 if let Some(obj) = json_val.as_object_mut() {
-                                    obj.insert("yaml".to_string(), json!(format!("| {}", ocr_text)));
+                                    obj.insert("yaml".to_string(), json!(format!("| {}", text)));
                                 }
                             }
                         }
