@@ -357,7 +357,8 @@ function stepQrSpinner() {
 let activeContext = {
     cc: "",
     bcc: "",
-    ref: ""
+    ref: "",
+    pathname: "" // 🌟 URL pathname 분기를 위한 속성 추가
 };
 
 // --- UI Elements ---
@@ -818,14 +819,17 @@ function removeSearchTag(id: string) {
         // [FIX] Reset specific context when corresponding tags are removed
         if (tagToRemove.type === 'domain') activeContext.cc = "";
         if (tagToRemove.type === 'type') activeContext.ref = "";
-        if (tagToRemove.type === 'path') activeContext.ref = "";
+        if (tagToRemove.type === 'path') { 
+            activeContext.ref = ""; 
+            activeContext.pathname = ""; // 🌟 패스네임 태그 삭제 시 컨텍스트도 해제
+        }
     }
 
     activeTags = activeTags.filter(t => t.id !== id);
     
     // If no more tags left, clear the entire active context
     if (activeTags.length === 0) {
-        activeContext = { cc: "", bcc: "", ref: "" };
+        activeContext = { cc: "", bcc: "", ref: "", pathname: "" };
     }
 
     updateTagsUI();
@@ -861,20 +865,18 @@ async function renderAccordion(nodes: any[], level = 1): Promise<string> {
         var nodeId = node.id || node.uuid || `node-${level}-${n}`;
         var active = '';
         var host = '';
-        var type = 'page';
+        var type = node.type || 'page';
         var content = '';
         var name = '';
         var desc: string[] = [];
-        var _url: URL | null = null;
 
         // ONLY generate HTML if this node hasn't been rendered yet
         if (!navTmp[nodeId]) {
             navTmp[nodeId] = true;
 
-            if (node.name) {
-                type = node.type || "team";
+            if (type === "team" || type === "user" || type === "member") {
                 name = node.name;
-                if (node.type === "team") {
+                if (type === "team") {
                     var teamName = node.name;
                     if (node.from === currentSession.address && nodeId === node.to) {
                         teamName = "Members";
@@ -882,139 +884,35 @@ async function renderAccordion(nodes: any[], level = 1): Promise<string> {
                     host = `<strong>${teamName}</strong>`;
                 } else {
                     let cancelBtn = "";
-
-                    // 🌟 [수정] 본인 계정만 (owner), 초대된 멤버나 펜딩 상태는 (member)로 표시
                     if (node.id === currentSession.address) {
                         desc.push("(owner)");
-                        // 🌟 본인(Owner 또는 Self)일 경우 삭제/취소 버튼을 노출하지 않습니다.
                     } else {
                         desc.push("(member)");
-                        // 🌟 타인(Member)일 경우에만 삭제/취소 버튼을 노출합니다.
                         cancelBtn = `<button class="btn-cancel-member" data-id="${nodeId}" data-name="${name}" style="background:none; border:none; color:#ef4444; font-size:0.85rem; cursor:pointer; padding:0 5px; margin-left:auto; display:flex; align-items:center; justify-content:center;" title="Remove / Cancel Invite">✕</button>`;
                     }
-
-                    // 🌟 [수정] 버튼이 우측 끝에 붙도록 Flex 구조 적용
                     content = `<div style="display:flex; align-items:center; width:100%; gap:8px;">
                         <span>${name}${desc.length ? `<i>${desc.toString()}</i>` : ''}</span>
                         ${cancelBtn}
                     </div>`;
                 }
-                if (nodeId === activeContext.ref) active = "active";
-            } else if (node.data || node.type) {
-                type = 'page';
-                const data = node.data || {};
-                // 🌟 [CRITICAL FIX] DB 테이블명(pages)이 아닌 진짜 속성(goods, tracking)을 우선적으로 참조하도록 수정합니다.
-                const nodeType = data.type || node.type || 'unknown';
-                console.log("[DEBUG] renderAccordion Page Node:", { id: nodeId, type: nodeType, domain: node.domain, origin: data.origin, link: data.link });
-
-                if (data.origin) {
-                    _url = new URL(data.origin);
-                    const domain = node.domain || _url.hostname;
-                    if (!navTmp[domain] && data.item) {
-                        // 🌟 [CRITICAL FIX] bb.ts 패리티 완벽 복원: CSS 파괴를 막기 위해 불필요한 div 래핑을 모두 제거하고 원본 구조 유지
-                        host = `<strong>${domain}</strong>`;
-                        if (API_HOST.includes(domain)) {
-                            host += `<label for="membership">Edit</label>`;
-                        }
-                        navTmp[domain] = true;
-                    }
-
-                    // 🌟 [CRITICAL FIX] before.ts 패리티 완벽 복원: Hash ID 기반 매칭에 실패했을 경우를 대비해, 
-                    // 현재 브라우저 URL의 파라미터를 분석하여 리스트(부모)와 상세(자식) 활성화 대상을 100% 정확히 찾아냅니다.
-                    let isActive = nodeId === activeContext.ref;
-
-                    if (!isActive && currentDetectedUrl && data.link) {
-                        try {
-                            const currentUrl = new URL(currentDetectedUrl.toLowerCase());
-                            const targetUrl = new URL((data.origin + data.link).toLowerCase());
-
-                            if (currentUrl.pathname === targetUrl.pathname) {
-                                const currentParams = Object.fromEntries(currentUrl.searchParams.entries());
-                                const targetParams = Object.fromEntries(targetUrl.searchParams.entries());
-                                const currentKeys = Object.keys(currentParams);
-                                const targetKeys = Object.keys(targetParams);
-
-                                const isDetailMode = Object.values(currentParams).some(val => 
-                                    val === "form" || val === "view" || val === "detail" || val === "update" || val === "edit" || val === "read"
-                                ) || (currentKeys.length > targetKeys.length);
-
-                                if (data.detail) {
-                                    if (isDetailMode) isActive = true;
-                                } else {
-                                    if (!isDetailMode) {
-                                        let isExactMatch = true;
-                                        for (const key of targetKeys) {
-                                            if (currentParams[key] !== targetParams[key]) {
-                                                isExactMatch = false; break;
-                                            }
-                                        }
-                                        if (isExactMatch) isActive = true;
-                                    }
-                                }
-                            }
-                        } catch(e) {}
-                    }
-
-                    if (isActive) {
-                        active = "active";
-                    }
-                }
-                var total = { draft: 0, count: 0 };
-                const pagesStats = (currentSession as any).pages;
-                const cc = node.cc || data.cc;
+            } else if (type === "domain" || type === "pathname") {
+                // 🌟 [추가] Hostname 및 Pathname URL 기반 트리 렌더링
+                name = type === "domain" ? node.hostname : node.pathname;
+                if (type === "domain") host = `<strong>${name}</strong>`;
                 
-                // 🌟 [TRACKING LOG] Accordion 그릴 때 각 노드의 매칭 상태 확인
-                if (nodeType !== 'team' && nodeType !== 'user' && nodeType !== 'member') {
-                    console.log(`[TRACKING-4] 렌더링 노드 타입: ${nodeType}, 대상 CC: ${cc}`);
-                    if (pagesStats && cc && pagesStats[cc] && pagesStats[cc][nodeType]) {
-                        total = pagesStats[cc][nodeType];
-                        console.log(`[TRACKING-5] 매칭 성공! 적용될 카운트:`, total);
-                    } else {
-                        console.log(`[TRACKING-FAIL] 매칭 실패. pagesStats 존재여부: ${!!pagesStats}, CC 존재여부: ${!!cc}`);
-                    }
+                // 선택된 컨텍스트에 따라 액티브(하이라이트) 처리
+                if ((type === "domain" && activeContext.cc === node.cc && !activeContext.pathname) || 
+                    (type === "pathname" && activeContext.pathname === node.pathname && activeContext.cc === node.cc)) {
+                    active = "active";
                 }
 
-                var recent = '';
-                try {
-                    const bcc = node.bcc || data.bcc;
-                    if (bcc) {
-                        // 🌟 [CRITICAL FIX 1] AI 검색(Select)을 타격하여 무한 스피너가 도는 현상을 원천 차단합니다.
-                        const _items = await invoke<any[]>("get_all_documents", { limit: 1, offset: 0, filter: `bcc = '${bcc}'` });
-                        if (_items.length && _items[0].created_at) {
-                            // 🌟 bb.ts의 유저 이름 표기 로직과 동일하게 작성자 정보를 가져와 병합 표기
-                            const timeStr = time2text(Number(_items[0].created_at));
-                            const author = _items[0].from ? _items[0].from.substring(0,6) : "system";
-                            recent = `<strong>${timeStr} - ${author}</strong>`;
-                        }
-                    }
-                } catch (err) {}
-
-                // 🌟 [CRITICAL FIX] bb.ts 패리티 완벽 복원: 실제 타입(nodeType)을 최우선으로 출력하여 'pages'로 노출되는 버그를 고칩니다!
-                // Draft 텍스트는 아래 count 변수 조립 시 명시적으로 통합합니다.
-                name = `<span>${nodeType}</span>`;
-                
-                var count = '';
-                if (data.item) {
-                    // 🌟 전처리 중인 리스트 페이지일 경우, Draft 수량과 정식 처리된 Count 수량을 함께 노출합니다.
-                    count = `<span style="font-size: 0.9em; margin-left: 4px;"> Draft <u>(${total.draft || 0})</u></span>`;
-                } else {
-                    // 🌟 상세 페이지일 경우 기존처럼 Count만 노출합니다.
-                    count = `<u>(${total.count || 0})</u>`;
-                }
-                
-                // 🌟 [추가] 숨김 처리 상태 아이콘 및 스타일 적용
-                const isHidden = hiddenPages.includes(nodeId);
-                const visibilityIcon = isHidden ? "show" : "hide";
-                
-                // 🌟 [CRITICAL FIX] 기존 CSS 레이아웃을 파괴하지 않도록 절대 위치(absolute)를 사용하여 우측 상단에 버튼을 배치합니다.
-                const visibilityBtn = `<button class="btn-toggle-visibility" data-id="${nodeId}" style="position: absolute; right: 10px; top: 10px; background: none; border: none; cursor: pointer; font-size: 10px; text-decoration: underline; color: #888; z-index: 10;">${visibilityIcon}</button>`;
-
-                // 🌟 [CRITICAL FIX] 실수로 누락했던 visibilityBtn 변수를 content 문자열 맨 끝에 다시 포함시킵니다!
-                const opacityStyle = isHidden ? 'opacity: 0.3;' : 'opacity: 1;';
-                content = `<span style="${opacityStyle}">${name}\n${count}\n</span>\n${recent}\n${visibilityBtn}`;
+                const countStr = `<u>(${node.count})</u>`;
+                content = `<div style="display:flex; align-items:center; width:100%; justify-content:space-between;">
+                    <span>${name} ${countStr}</span>
+                </div>`;
             }
 
-            var hasChildren = node.children && node.children.length > 0;
+            var hasChildren = node.children && (Array.isArray(node.children) ? node.children.length > 0 : node.children.size > 0);
             const inputId = `${type}-${nodeId}`;
 
             html += `
@@ -1023,16 +921,18 @@ async function renderAccordion(nodes: any[], level = 1): Promise<string> {
                     ${host}
                     <label for="${inputId}" class="logis-label ${inputId} ${active}" 
                            data-id="${nodeId}" 
-                           data-cc="${node.cc || (node.data && node.data.cc) || ''}" 
-                           data-bcc="${node.bcc || (node.data && node.data.bcc) || ''}" 
-                           data-ref="${node.ref || node.ref_val || (node.data && node.data.ref) || ''}"
-                           data-domain="${node.domain || (_url ? _url.hostname : '')}" 
-                           data-type="${node.type || (node.data && node.data.type) || ''}">${content}</label>
+                           data-cc="${node.cc || ''}" 
+                           data-bcc="${node.bcc || ''}" 
+                           data-ref="${node.ref || ''}"
+                           data-domain="${node.hostname || ''}" 
+                           data-pathname="${node.pathname || ''}"
+                           data-type="${type}">${content}</label>
             `;
 
             if (hasChildren) {
                 html += `<div class="logis-child ${inputId}">`;
-                html += await renderAccordion(node.children, level + 1);
+                // Map 객체라면 배열로 치환해서 재귀 호출
+                html += await renderAccordion(Array.isArray(node.children) ? node.children : Array.from(node.children.values()), level + 1);
                 html += `</div>`;
             }
 
@@ -1072,288 +972,100 @@ async function renderNavigation() {
 
     try {
         navTmp = {}; // Reset for fresh render
-        let _pagesRaw = await Select["pages"]({});
         
-        // 🌟 [CRITICAL FIX] 백엔드(LanceDB)에서 가져온 TradeDocument는 알맹이가 json_data 문자열에 있으므로 반드시 파싱해 주어야 UI 필터링에서 증발하지 않습니다!
-        let _pages = _pagesRaw.map(p => {
-            if (!p.data && p.json_data && typeof p.json_data === "string") {
-                try { p.data = JSON.parse(p.json_data); } catch(e) {}
+        // 🌟 [추가] items 테이블에서 전체 데이터를 가져와 URL을 파싱하여 폴더링합니다.
+        let _itemsRaw = await invoke<any[]>("get_all_documents", { limit: 5000, offset: 0, filter: `mode = '${currentSearchMode}'` });
+        
+        const domainMap = new Map<string, any>();
+
+        for (const item of _itemsRaw) {
+            let data: any = {};
+            try { data = typeof item.json_data === "string" ? JSON.parse(item.json_data) : item.data || item; } catch(e) {}
+            
+            let fullUrl = data.link || item.link || data.url || item.url || "";
+            if (!fullUrl) continue;
+            if (!fullUrl.startsWith("http")) {
+                fullUrl = (data.origin || "https://unknown.com") + (fullUrl.startsWith('/') ? fullUrl : '/' + fullUrl);
             }
-            return p;
-        });
 
-        // 🌟 [CRITICAL FIX] 크롬 브라우저의 현재 접속 도메인과 일치하는 페이지만 남깁니다.
-        let currentDomain = "";
-        if (currentDetectedUrl) {
             try {
-                const footprint = new URL(currentDetectedUrl.toLowerCase());
-                currentDomain = footprint.hostname;
-                
-                // 🌟 [CRITICAL FIX] before.ts 패리티 완벽 복원: 해시 규칙 불일치로 못 찾던 문제를, 
-                // URL 문자열 직접 대조 및 상세/리스트 파라미터 판별을 통해 활성 컨텍스트(activeContext)를 100% 완벽히 복원합니다.
-                if (!activeContext.ref) {
-                    const currentParams = Object.fromEntries(footprint.searchParams.entries());
-                    const isDetailMode = Object.values(currentParams).some(val => 
-                        val === "form" || val === "view" || val === "detail" || val === "update" || val === "edit" || val === "read"
-                    );
+                const u = new URL(fullUrl.toLowerCase());
+                const hostname = u.hostname;
+                const pathname = u.pathname; 
 
-                    let matchedPage = null;
-                    
-                    const localPages = await Select["pages"]({});
-                    for (const p of localPages) {
-                        const d = p.data || p;
-                        if (d.origin && d.link) {
-                            try {
-                                const targetUrl = new URL((d.origin + d.link).toLowerCase());
-                                if (currentDomain === targetUrl.hostname && footprint.pathname === targetUrl.pathname) {
-                                    if (isDetailMode && d.detail) {
-                                        matchedPage = p;
-                                        break;
-                                    } else if (!isDetailMode && !d.detail) {
-                                        const targetParams = Object.fromEntries(targetUrl.searchParams.entries());
-                                        let isExactMatch = true;
-                                        for (const key of Object.keys(targetParams)) {
-                                            if (currentParams[key] !== targetParams[key]) {
-                                                isExactMatch = false;
-                                                break;
-                                            }
-                                        }
-                                        if (isExactMatch) {
-                                            matchedPage = p;
-                                        }
-                                    }
-                                }
-                            } catch(e) {}
-                        }
-                    }
-                    
-                    if (matchedPage) {
-                        activeContext.cc = matchedPage.cc || "";
-                        activeContext.bcc = matchedPage.bcc || "";
-                        activeContext.ref = matchedPage.id || "";
-                        console.log("[NAV] Restored activeContext from exact URL match:", activeContext);
-                    }
+                const cc = item.cc || data.cc || "";
+
+                if (!domainMap.has(hostname)) {
+                    domainMap.set(hostname, {
+                        id: `domain_${hostname}`,
+                        type: "domain",
+                        hostname: hostname,
+                        cc: cc, 
+                        count: 0,
+                        children: new Map<string, any>()
+                    });
                 }
+
+                const domainNode = domainMap.get(hostname);
+                domainNode.count++;
+
+                const pathKey = pathname;
+                if (!domainNode.children.has(pathKey)) {
+                    domainNode.children.set(pathKey, {
+                        id: `path_${hostname}_${pathKey.replace(/\//g, '')}`,
+                        type: "pathname",
+                        hostname: hostname,
+                        pathname: pathname,
+                        cc: cc,
+                        count: 0,
+                        children: []
+                    });
+                }
+
+                const pathNode = domainNode.children.get(pathKey);
+                pathNode.count++;
             } catch(e) {}
         }
 
-        if (currentDomain) {
-            _pages = _pages.filter(p => {
-                const data = p.data || p;
-                return data.origin && data.origin.toLowerCase().includes(currentDomain);
-            });
-        }
+        const tree = Array.from(domainMap.values()).map(d => {
+            return {
+                ...d,
+                children: Array.from(d.children.values())
+            };
+        });
         
         const navSection = pageList.closest('.nav-section') as HTMLElement;
-
         const isSettingsOpen = (document.getElementById("settings-toggle") as HTMLInputElement)?.checked;
 
-        if (_pages.length === 0) {
-            pageList.innerHTML = `<div class="empty">No shared pages found for this domain.</div>`;
-            // 🌟 [CRITICAL FIX] 데이터가 없더라도 Commerce/Analytic 모드이면 "비어있음" 문구가 노출되도록 통일
-            if (navSection) navSection.style.display = (isSettingsOpen || currentSearchMode === "shipping") ? "none" : "block";
+        if (tree.length === 0) {
+            pageList.innerHTML = `<div class="empty">No records found.</div>`;
+            if (navSection) navSection.style.display = isSettingsOpen ? "none" : "block";
         } else {
-            // 🌟 일치하는 데이터가 있으면 섹션을 화면에 표시하되, 세팅/Shipping 상태에 맞춰 제어합니다.
-            if (navSection) navSection.style.display = (isSettingsOpen || currentSearchMode === "shipping") ? "none" : "block";
+            if (navSection) navSection.style.display = isSettingsOpen ? "none" : "block";
             
-            // 🌟 [CRITICAL FIX] bb.ts의 페이지 트리(Branch) 조립 로직을 완벽히 복원하여 뎁스가 깨지는 현상을 해결합니다.
-            const branchs: Record<string, any> = {};
-
-            for (let p = 0; p < _pages.length; p++) {
-                let _page = _pages[p];
-                const data = _page.data || _page;
-                if (!data.origin) continue;
-
-                const domain = new URL(data.origin).hostname;
-                _page.domain = domain;
-                _page.id = _page.id || _page.uuid;
-
-                if (data.item) {
-                    branchs[`${data.origin}#${_page.type}`] = { ..._page, children: [] };
-                }
-                branchs[_page.id] = { ..._page, children: [] };
-            }
-
-            const temp: Record<string, any> = {};
-            for (let key in branchs) {
-                if (branchs.hasOwnProperty(key)) {
-                    let _page = safeClone(branchs[key]);
-                    const data = _page.data || _page;
-
-                    if (!temp[_page.id]) {
-                        temp[_page.id] = true;
-
-                        let parent = branchs[`${data.origin}#${_page.type}`];
-
-                        // 🌟 [CRITICAL FIX] before.ts 패리티 완벽 복원: 모순이 발생하는 복잡한 Splice 로직을 걷어내고 가장 간결하고 정확한 트리 조립을 수행합니다.
-                        if (parent) {
-                            if (data.item) {
-                                let children = safeClone(parent.children);
-                                branchs[`${data.origin}#${_page.type}`] = {
-                                    ..._page,
-                                    children: children
-                                };
-                            } else {
-                                branchs[`${data.origin}#${_page.type}`].children.push(_page);
-                            }
-                        } else {
-                            if (data.item) {
-                                if (!branchs[`${data.origin}#${_page.type}`]) {
-                                    branchs[`${data.origin}#${_page.type}`] = {
-                                        ..._page,
-                                        children: []
-                                    };
-                                }
-                            } else {
-                                if (!branchs[`${data.origin}#${_page.type}`]) {
-                                    branchs[`${data.origin}#${_page.type}`] = { children: [] };
-                                }
-                                branchs[`${data.origin}#${_page.type}`].children.push(_page);
-                            }
-                        }
-                    }
-                }
-            }
-
-            const tree: any[] = [];
-            for (let key in branchs) {
-                if (branchs.hasOwnProperty(key)) {
-                    if (key.includes('#')) {
-                        tree.push(branchs[key]);
-                    }
-                }
-            }
-
-            // 🌟 [CRITICAL FIX] 네비게이션(Accordion)을 렌더링하기 직전에, 
-            // 로컬 DB(users 테이블)에 저장된 AI의 최신 추출 통계(count)를 불러와 메모리에 덮어씌웁니다!
-            try {
-                const _usersForStats = await Select["users"]({});
-                const teamDoc = _usersForStats.find(u => u.type === "team" || (u.data && u.data.type === "team"));
-                if (teamDoc) {
-                    // 🌟 [CRITICAL FIX] LanceDB(TradeDocument)와 Server(JSON)의 포맷 차이 완벽 호환
-                    // TradeDocument의 경우 최신 데이터가 문자열 형태의 json_data에 들어있으므로 최우선으로 파싱합니다.
-                    let teamData: any = teamDoc;
-                    
-                    // 🌟 [CRITICAL FIX] 백엔드에서 이중, 삼중으로 인코딩된 json_data(Matryoshka 버그)를 완벽하게 벗겨냅니다.
-                    while (teamData && teamData.json_data && typeof teamData.json_data === "string") {
-                        try {
-                            const parsed = JSON.parse(teamData.json_data);
-                            if (parsed && typeof parsed === "object") {
-                                teamData = parsed;
-                            } else {
-                                break;
-                            }
-                        } catch(e) {
-                            break;
-                        }
-                    }
-                    
-                    if (teamData && !teamData.base && teamData.data) {
-                        teamData = typeof teamData.data === "string" ? JSON.parse(teamData.data) : teamData.data;
-                    }
-                    teamData = teamData || teamDoc;
-
-                    // 🌟 [로그 추가] 검색창 클릭 및 네비게이션 렌더링 시 Dexie에서 로드된 통계를 출력합니다.
-                    console.log("\n=====================================");
-                    console.log("[DEBUG-UI] Dexie에서 로드된 Team 데이터:", teamDoc);
-                    console.log("[DEBUG-UI] 화면에 렌더링될 Base 통계:", JSON.stringify(teamData.base, null, 2));
-                    console.log("=====================================\n");
-
-                    if (teamData.base && teamData.base.pages) {
-                        (currentSession as any).pages = teamData.base.pages;
-                    }
-                }
-            } catch(e) { 
-                console.warn("[Navigation] Failed to load local stats:", e); 
-            }
-
-            // 3. Render
             pageList.innerHTML = await renderAccordion(tree);
 
-            // 🌟 [추가] Show/Hide 토글 버튼 이벤트 바인딩
-            pageList.querySelectorAll(".btn-toggle-visibility").forEach((btn: any) => {
-                btn.onclick = async (e: Event) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const targetId = btn.dataset.id;
-                    if (!targetId) return;
-
-                    if (hiddenPages.includes(targetId)) {
-                        hiddenPages = hiddenPages.filter(id => id !== targetId);
-                    } else {
-                        hiddenPages.push(targetId);
-                    }
-                    await kvSet("hidden_pages", JSON.stringify(hiddenPages));
-                    await renderNavigation(); // UI 즉시 갱신
-                };
-            });
-
-            // 🌟 [추가] 숨겨진 항목이 있는 Host(도메인)의 Show 버튼 노출 및 일괄 해제 이벤트 바인딩
-            pageList.querySelectorAll(".logis-label").forEach((label: any) => {
-                const id = label.dataset.id;
-                const domain = label.dataset.domain;
-                // 해당 도메인에 속한 아이템 중 하나라도 숨김(hidden) 상태라면 Host의 Show 버튼을 노출합니다.
-                if (hiddenPages.includes(id)) {
-                    const hostShowBtn = pageList.querySelector(`.btn-show-domain-hidden[data-domain="${domain}"]`) as HTMLElement;
-                    if (hostShowBtn) hostShowBtn.style.display = "inline";
-                }
-            });
-
-            pageList.querySelectorAll(".btn-show-domain-hidden").forEach((btn: any) => {
-                btn.onclick = async (e: Event) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const domain = btn.dataset.domain;
-                    
-                    // 🌟 해당 도메인을 가진 모든 라벨을 찾아 hiddenPages 배열에서 전부 제거합니다.
-                    pageList.querySelectorAll(`.logis-label[data-domain="${domain}"]`).forEach((label: any) => {
-                        const id = label.dataset.id;
-                        if (hiddenPages.includes(id)) {
-                            hiddenPages = hiddenPages.filter(hId => hId !== id);
-                        }
-                    });
-                    
-                    await kvSet("hidden_pages", JSON.stringify(hiddenPages));
-                    await renderNavigation(); // UI 즉시 갱신하여 숨겨졌던 모든 항목을 표시
-                };
-            });
-
-            // 4. Bind Clicks manually to labels
+            // 🌟 [추가] 이벤트 바인딩 로직 단순화
             pageList.querySelectorAll(".logis-label").forEach((label: any) => {
                 label.onclick = async (e: Event) => {
                     const ds = label.dataset;
                     if (!ds.id) return;
 
-                    // 🌟 [기획 반영] 초대 패널이 열려있는지 확인
-                    const inviteContainer = document.getElementById("nav-cloud-invite-container");
-                    const isInviteMode = inviteContainer && !inviteContainer.classList.contains("hidden");
-
-                    if (isInviteMode) {
-                        // A. 초대 모드: 클래스 토글 및 이벤트 중단
-                        e.preventDefault();
-                        e.stopPropagation();
-                        label.classList.toggle("selected");
-                        console.log(`[INVITE-MODE] Page ${ds.id} selection toggled:`, label.classList.contains("selected"));
-                        return; // 필터링 로직 실행 방지
-                    }
-
-                    // B. 일반 모드: 기존 필터링 및 내비게이션 로직
-                    // 1. 컨텍스트 업데이트
                     activeContext.cc = ds.cc || "";
-                    activeContext.bcc = ds.bcc || "";
-                    activeContext.ref = ds.ref || "";
+                    activeContext.pathname = ds.pathname || "";
+                    activeContext.ref = "";
+                    activeContext.bcc = "";
                     
                     activeTags = activeTags.filter(t => t.type !== 'type' && t.type !== 'domain' && t.type !== 'path');
                     
-                    // 2. 검색 태그 추가
-                    addSearchTag(`@${ds.domain}`, 'domain', ds.domain);
-                    addSearchTag(`#${ds.type}`, 'type', ds.type);
-                    updateTagsUI();
+                    if (ds.type === "domain") {
+                        addSearchTag(`@${ds.domain}`, 'domain', ds.domain);
+                    } else if (ds.type === "pathname") {
+                        addSearchTag(`@${ds.domain}`, 'domain', ds.domain);
+                        addSearchTag(`${ds.pathname}`, 'path', ds.pathname);
+                    }
                     
-                    // 3. 버튼(#btn-extract) 강제 업데이트 호출
                     await updateExtractButtonVisibility();
-
-                    // 4. UI 갱신 및 닫기
                     fetchChatHistory(true);
                     hideNavigation();
                 };
@@ -3614,13 +3326,12 @@ async function loadMoreDocs(reset: boolean = false, isSync: boolean = false) {
         // 🌟 [피벗 반영] 과거의 복잡한 type 리스트를 제거하고 updated_at 시간 값을 기준으로 쿼리를 재정의합니다.
         let baseFilter = `mode = '${currentSearchMode}' AND updated_at >= 0`;
 
-        // 기존 내비게이션 필터가 있다면 안전하게 괄호로 묶어서 AND 조건 추가
+        // 🌟 [수정] pathname 속성을 이용해 LanceDB의 data(JSON 텍스트)를 LIKE 검색하여 해당 경로 폴더의 데이터를 가져옵니다.
         if (activeContext.ref) baseFilter = `(${baseFilter}) AND ref = '${activeContext.ref}'`;
         else if (activeContext.bcc) baseFilter = `(${baseFilter}) AND bcc = '${activeContext.bcc}'`;
+        else if (activeContext.pathname && activeContext.cc) baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}' AND data LIKE '%${activeContext.pathname}%'`;
         else if (activeContext.cc) baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}'`;
 
-        // 🌟 [CRITICAL FIX 4] 사이드바 태그(domain, type)는 위의 activeContext를 통해 SQL 필터로 100% 적용되었습니다.
-        // 이 태그들을 텍스트로 엮어서 억지로 AI 검색에 던지면 검색 결과가 0건이 되고 VRAM이 폭발합니다. 삭제합니다!
         const textQuery = searchInput?.value.trim() || "";
 
         let finalFilter = baseFilter;
