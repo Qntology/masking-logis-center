@@ -559,8 +559,10 @@ async fn process_task(
                 let raw_html = json_data.get("html").and_then(|v| v.as_str()).unwrap_or("");
                 let is_image = raw_html.starts_with("data:image") || raw_html.starts_with("file://");
 
+                let mut target_text = String::new();
                 let mut extracted_json = json!({});
 
+                // 🌟 [STEP 1] 이미지인 경우 OCR을 선행하여 텍스트를 먼저 추출합니다.
                 if is_image {
                     model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
                     
@@ -574,27 +576,36 @@ async fn process_task(
                         None
                     };
 
-                    let prompt = "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {\"language\":\"korean\", \"image_text\":\"...\"} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string();
+                    let ocr_prompt = "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {\"language\":\"korean\", \"image_text\":\"...\"} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string();
 
-                    let res_text = model.chat_with_qwen3_5_image_spinner(
+                    let res_ocr = model.chat_with_qwen3_5_image_spinner(
                         "You are a helpful extraction assistant.",
-                        &prompt,
+                        &ocr_prompt,
                         dynamic_image,
                         app_handle,
                         "extraction-progress",
-                        json!({ "category": format!("Vision Analysis ({}/{})", idx + 1, total), "summary": "Extracting text from image..." }),
+                        json!({ "category": format!("Vision OCR ({}/{})", idx + 1, total), "summary": "Extracting text from image..." }),
                         1024,
                         Some(cancellation_token.clone()),
-                        Some(format!("{}_{}", task.id, doc_id)) // 🌟 [CRITICAL FIX] 텍스트 마스킹과 동일하게 개별 문서(doc_id) 단위로 고유 세션을 생성하여 KV Cache를 디스크에 안전하게 격리 보존합니다.
+                        Some(format!("{}_{}_ocr", task.id, doc_id))
                     ).await?;
 
-                    extracted_json = crate::parsing::parse_json_from_llm(&res_text);
+                    let ocr_json = crate::parsing::parse_json_from_llm(&res_ocr);
+                    target_text = ocr_json.get("image_text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    
+                    // OCR 된 원본 텍스트를 json_data에 먼저 보존합니다.
+                    if let Some(obj) = json_data.as_object_mut() {
+                        obj.insert("image_text".to_string(), json!(target_text));
+                    }
                 } else {
+                    target_text = json_data.get("yaml").and_then(|v| v.as_str()).unwrap_or(&doc.text).to_string();
+                }
+
+                // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
+                if !target_text.is_empty() {
                     model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
 
-                    let target_text = json_data.get("yaml").and_then(|v| v.as_str()).unwrap_or(&doc.text);
-
-                    let prompt = format!(
+                    let mask_prompt = format!(
                         "[TASK] Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {}\n[ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think", 
                         target_text
                     );
@@ -602,7 +613,7 @@ async fn process_task(
                     let params = crate::openai_types::ChatCompletionParameters {
                         messages: vec![
                             crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage {
-                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(prompt),
+                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(mask_prompt),
                                 name: None,
                             })
                         ],
@@ -612,21 +623,22 @@ async fn process_task(
                         ..Default::default()
                     };
 
-                    let res_text = if let Some(gen) = model.qwen3_5_generator.lock().await.as_mut() {
-                        // 🌟 [CRITICAL FIX] 마스킹 작업에서도 KV Cache가 디스크(SSD)에 물리적으로 저장되도록 세션 ID와 캐시 이름을 명시적으로 부여합니다.
-                        // 여러 문서를 일괄 마스킹할 때 이전 문서의 내용이 환각(Hallucination)으로 섞이지 않도록 task_id와 doc_id를 결합하여 고유 세션으로 격리합니다.
-                        let session_id = format!("{}_{}", task.id, doc_id);
+                    let res_mask = if let Some(gen) = model.qwen3_5_generator.lock().await.as_mut() {
+                        let session_id = format!("{}_{}_mask", task.id, doc_id);
                         gen.generate(params, Some(cancellation_token.clone()), Some(session_id), Some("inference".to_string())).await?
                     } else {
                         "".to_string()
                     };
 
-                    extracted_json = crate::parsing::parse_json_from_llm(&res_text);
+                    extracted_json = crate::parsing::parse_json_from_llm(&res_mask);
                 }
 
+                // 🌟 [STEP 3] 최종 결과물(마스킹 정보)을 DB에 업데이트합니다.
                 if !extracted_json.is_null() && !extracted_json.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                    json_data.as_object_mut().unwrap().insert("data".to_string(), extracted_json);
-                    json_data.as_object_mut().unwrap().insert("is_masked".to_string(), json!(true));
+                    if let Some(obj) = json_data.as_object_mut() {
+                        obj.insert("data".to_string(), extracted_json);
+                        obj.insert("is_masked".to_string(), json!(true));
+                    }
 
                     let _ = store.upsert_item(
                         "items", &doc.id, &doc.r#type, json_data, Some(doc.vector.clone()),

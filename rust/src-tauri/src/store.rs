@@ -592,7 +592,14 @@ impl VectorStore {
              }
          }
          let json_str = final_data.to_string();
-         let text_content = final_data.get("text").and_then(|s| s.as_str()).unwrap_or("").to_string();
+         
+         // 🌟 [CRITICAL FIX 1] 검색 가능한 모든 내용을 text 컬럼으로 몰아넣습니다.
+         // FTS 검색 시 이 컬럼 하나만 훑으면 모든 정보(제목, 설명, 본문)를 찾을 수 있게 됩니다.
+         let title_part = final_data.get("title").and_then(|v| v.as_str()).unwrap_or("");
+         let desc_part = final_data.get("description").and_then(|v| v.as_str()).unwrap_or("");
+         let body_part = final_data.get("text").and_then(|v| v.as_str()).unwrap_or("");
+         let text_content = format!("{} {} {}", title_part, desc_part, body_part).trim().to_string();
+
          let masked_text_content = final_data.get("masked_text").and_then(|s| s.as_str()).unwrap_or("").to_string();
          let status = data_val.get("status").and_then(|v| v.as_str()).map(|s| crate::logic::parse_status(s)).unwrap_or(0);
          let amount = data_val.get("total_amount").or_else(|| data_val.get("sale_price")).or_else(|| data_val.get("supply_price")).or_else(|| data_val.get("price")).or_else(|| data_val.get("shipping_fee")).or_else(|| data_val.get("discount")).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))).unwrap_or(0.0) as f32;
@@ -747,7 +754,7 @@ impl VectorStore {
         }))
     }
     
-    pub async fn search_items(&self, _table_name: &str, query_text: &str, query_vec: Vec<f32>, limit: usize, offset: usize, filter: Option<String>, use_fts: bool) -> Result<Vec<(String, String, f32)>> {
+    pub async fn search_items(&self, _table_name: &str, query_text: &str, query_vec: Vec<f32>, limit: usize, offset: usize, filter: Option<String>, _use_fts: bool) -> Result<Vec<(String, String, f32)>> {
          let target = "items";
          let table = self.conn.open_table(target).execute().await?;
          let fetch_limit = limit + offset;
@@ -755,21 +762,13 @@ impl VectorStore {
          let mut q = table.query();
 
          if !query_text.is_empty() {
-             if use_fts {
-                 let fts_query_str = format!("\"{}\"", query_text.replace("\"", "\\\""));
-                 q = q.full_text_search(lancedb::index::scalar::FullTextSearchQuery::new(fts_query_str));
-                 if let Some(ref f) = filter {
-                     q = q.only_if(f);
-                 }
-             } else {
-                 let sql_clean = query_text.replace("'", "''");
-                 let text_filter = format!("(masked_text ILIKE '%{}%' OR text ILIKE '%{}%' OR data ILIKE '%{}%')", sql_clean, sql_clean, sql_clean);
-                 let final_filter = if let Some(ref f) = filter {
-                     format!("({}) AND {}", f, text_filter)
-                 } else {
-                     text_filter
-                 };
-                 q = q.only_if(final_filter);
+             // 🌟 [CRITICAL FIX 2] ILIKE 방식을 완전히 제거하고 FullTextSearchQuery로 전면 교체합니다.
+             // 이 방식은 N-gram 인덱스를 사용하여 부분 일치 검색을 매우 빠르게 수행하며 점수(Score) 기반 정렬을 지원합니다.
+             q = q.full_text_search(lancedb::index::scalar::FullTextSearchQuery::new(query_text.to_string()));
+             
+             // 도메인 필터나 기타 SQL 조건이 있다면 FTS 결과에 추가로 적용합니다.
+             if let Some(ref f) = filter {
+                 q = q.only_if(f);
              }
          } else if let Some(ref f) = filter {
              q = q.only_if(f);
