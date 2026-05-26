@@ -777,12 +777,15 @@ async fn process_task(
                     let pathname = parsed_url.path().to_string();
                     let cc_val = task.cc.clone();
                     
-                    let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}", hostname, pathname));
+                    // 🌟 [CRITICAL FIX] 중복 저장 및 카운트 관리 기준을 '선택된 카테고리(모드)' 포함으로 변경합니다.
+                    // 기존: hostname + pathname -> 변경: search_mode + hostname + pathname
+                    let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}_{}", search_mode, hostname, pathname));
                     
                     let mut page_count = 1;
                     let mut existing_page_data = json!({
                         "id": page_id.clone(),
                         "type": "pages",
+                        "mode": search_mode.clone(), // 🌟 카테고리(모드) 정보 저장
                         "hostname": hostname.clone(),
                         "pathname": pathname.clone(),
                         "cc": cc_val.clone(),
