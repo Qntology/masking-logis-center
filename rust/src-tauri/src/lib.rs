@@ -1712,133 +1712,6 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
     Ok("Started".to_string())
 }
 
-// 🌟 [추가] 선택된 문서들의 YAML 텍스트 내에서 PII를 식별하고 마스킹하는 신규 커맨드
-#[tauri::command]
-async fn mask_draft_documents(
-    state: State<'_, AppState>,
-    app_handle: tauri::AppHandle,
-    uuids: Vec<String>
-) -> Result<String, String> {
-    let store_arc = state.store.clone();
-    let model_arc = state.model.clone();
-    let cancel_arc = state.cancellation_token.clone();
-    
-    tokio::spawn(async move {
-        use tauri::Emitter;
-        
-        let model = {
-            let mut m_guard = model_arc.lock().await;
-            if m_guard.is_none() {
-                if let Ok(m) = LogisModel::new(app_handle.clone(), None).await {
-                    *m_guard = Some(m);
-                }
-            }
-            m_guard.as_ref().unwrap().clone()
-        };
-
-        let _ = app_handle.emit("extraction-progress", serde_json::json!({
-            "task_id": "masking_job",
-            "category": "Loading Model",
-            "summary": "Loading Qwen3.5 for PII Masking...",
-            "spinner": "⠋"
-        }));
-
-        if let Err(e) = model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancel_arc.clone()), false, None).await {
-            let _ = app_handle.emit("extraction-progress", serde_json::json!({
-                "task_id": "masking_job", "category": "Error", "summary": format!("Model load failed: {}", e), "spinner": "❌"
-            }));
-            return;
-        }
-
-        let store = {
-            let s_guard = store_arc.lock().await;
-            s_guard.as_ref().unwrap().clone()
-        };
-
-        let total = uuids.len();
-        for (idx, uuid) in uuids.iter().enumerate() {
-            if cancel_arc.load(Ordering::Relaxed) { break; }
-
-            if let Ok(Some(doc)) = store.get_item_by_id("items", uuid).await {
-                let mut data_obj: serde_json::Value = serde_json::from_str(&doc.json_data).unwrap_or(serde_json::json!({}));
-                let yaml_text = data_obj.get("yaml").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                
-                if yaml_text.is_empty() { continue; }
-
-                let _ = app_handle.emit("extraction-progress", serde_json::json!({
-                    "task_id": "masking_job",
-                    "category": format!("Masking ({}/{})", idx+1, total),
-                    "summary": format!("Extracting PII for {}", uuid),
-                    "spinner": "⠋"
-                }));
-
-                let prompt = format!(
-                    "[TASK] Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think",
-                    yaml_text
-                );
-
-                let params = crate::openai_types::ChatCompletionParameters {
-                    messages: vec![crate::openai_types::ChatCompletionRequestMessage::User(
-                        crate::openai_types::ChatCompletionRequestUserMessage {
-                            content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(prompt),
-                            name: None,
-                        }
-                    )],
-                    model: "qwen3.5".to_string(),
-                    max_tokens: Some(1024),
-                    temperature: Some(0.0),
-                    top_p: Some(0.9),
-                    ..Default::default()
-                };
-
-                let mut masked_yaml = yaml_text.clone();
-
-                if let Some(gen) = model.qwen3_5_generator.lock().await.as_mut() {
-                    if let Ok(res_str) = gen.generate(params, Some(cancel_arc.clone()), None, None).await {
-                        let cleaned_json = res_str.replace("```json", "").replace("```", "").trim().to_string();
-                        
-                        #[derive(serde::Deserialize)]
-                        struct PiiResponse { items: Vec<std::collections::HashMap<String, String>> }
-                        
-                        if let Ok(parsed_res) = serde_json::from_str::<PiiResponse>(&cleaned_json) {
-                            let mut pii_list = Vec::new();
-                            for map in parsed_res.items {
-                                for (_, word) in map {
-                                    if word.trim().chars().count() > 1 {
-                                        pii_list.push(word);
-                                    }
-                                }
-                            }
-                            
-                            // 긴 문자열부터 치환되도록 길이순으로 내림차순 정렬 (부분 문자열 충돌 파괴 방지)
-                            pii_list.sort_by(|a, b| b.len().cmp(&a.len()));
-                            
-                            for word in pii_list {
-                                masked_yaml = masked_yaml.replace(&word, "[MASKED_PII]");
-                            }
-                        }
-                    }
-                }
-                
-                // 🌟 마스킹된 결과물을 원본 데이터(yaml) 필드에 덮어쓰고 DB 갱신
-                data_obj.as_object_mut().unwrap().insert("yaml".to_string(), serde_json::json!(masked_yaml));
-                let _ = store.upsert_item("items", &doc.id, &doc.r#type, data_obj, None, None, None, None, None, None, None).await;
-            }
-        }
-
-        model.deep_purge_resources().await;
-
-        let _ = app_handle.emit("extraction-progress", serde_json::json!({
-            "task_id": "masking_job",
-            "category": "Done",
-            "summary": "Masking Complete.",
-            "spinner": "✅"
-        }));
-    });
-    
-    Ok("Masking task dispatched".to_string())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let model = Arc::new(TokioMutex::new(None));
@@ -2053,7 +1926,7 @@ pub fn run() {
             upsert_items, set_ignore_cursor_events, mark_ui_ready, delete_document, delete_documents, delete_message, check_gpu_availability,
             save_mobile_temp_file, crate::utils::network::get_local_network_prefix, crate::utils::network::get_my_full_ip, connect_with_seed, start_listener_command, send_signal_offer, submit_signal_answer,
             get_active_task_context, check_model_status, download_model, delete_all_models,
-            rename_search_mode, mask_draft_documents
+            rename_search_mode
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

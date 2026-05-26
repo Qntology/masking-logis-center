@@ -1704,6 +1704,30 @@ searchInput?.addEventListener("keydown", (e) => {
     }
 });
 
+// 전체 선택 버튼 이벤트 바인딩
+document.getElementById("btn-all-selected")?.addEventListener("click", () => {
+    const allCheckboxes = document.querySelectorAll('.item-select-checkbox') as NodeListOf<HTMLInputElement>;
+    if (allCheckboxes.length === 0) return;
+
+    // 현재 화면에 있는 아이템이 모두 선택되었는지 확인
+    const isAllSelected = selectedUuids.size > 0 && selectedUuids.size === allCheckboxes.length;
+    const targetState = !isAllSelected; // 모두 선택되어 있으면 해제, 아니면 전체 선택
+
+    allCheckboxes.forEach(cb => {
+        cb.checked = targetState;
+        const docId = cb.dataset.id;
+        if (docId) {
+            if (targetState) {
+                selectedUuids.add(docId);
+            } else {
+                selectedUuids.delete(docId);
+            }
+        }
+    });
+    // 하단 액션 버튼(삭제, 마스킹) 상태 갱신
+    updateListActionButtons();
+});
+
 // --- main.ts 소스 ---
 
 btnSubmit?.addEventListener("click", async () => {
@@ -2513,21 +2537,7 @@ btnDeleteSelected?.addEventListener("click", async () => {
     }
 });
 
-// 🌟 [추가] 전체 선택 체크박스 이벤트 바인딩
-document.getElementById("check-all-items")?.addEventListener("change", (e) => {
-    const isChecked = (e.target as HTMLInputElement).checked;
-    const allCheckboxes = document.querySelectorAll('.item-select-checkbox') as NodeListOf<HTMLInputElement>;
-    
-    allCheckboxes.forEach(cb => {
-        cb.checked = isChecked;
-        const docId = cb.dataset.id;
-        if (docId) {
-            if (isChecked) selectedUuids.add(docId);
-            else selectedUuids.delete(docId);
-        }
-    });
-    updateListActionButtons();
-});
+
 
 // 🌟 [추가] Masking 버튼 클릭 시 백엔드 태스크 호출 이벤트 바인딩
 document.getElementById("btn-mask-selected")?.addEventListener("click", async () => {
@@ -2540,11 +2550,17 @@ document.getElementById("btn-mask-selected")?.addEventListener("click", async ()
             // 작업 진행 상황 확인을 위해 채팅/로그 패널로 자동 이동
             openWidget("settings");
             
-            await invoke("mask_draft_documents", { uuids: Array.from(selectedUuids) });
+            const taskId = `mask_${Date.now()}`;
+            await GlobalTaskManager.addToQueue(taskId, "mask_documents", {
+                id: taskId,
+                type: "mask_documents",
+                uuids: Array.from(selectedUuids),
+                link: "Batch PII Masking",
+                ref: "mask_documents"
+            });
             
             selectedUuids.clear();
             updateListActionButtons();
-            refreshList();
         } catch (e) {
             console.error(e);
         } finally {
@@ -3533,11 +3549,11 @@ function injectItemSelectCheckbox(card: HTMLElement, docId: string) {
     };
 }
 
-// 🌟 [추가] 선택된 아이템 개수에 따라 삭제 및 마스킹 버튼을 제어하는 헬퍼 함수
+// 🌟 [수정] 선택된 아이템 개수에 따라 삭제 및 마스킹 버튼을 제어하는 헬퍼 함수
 function updateListActionButtons() {
     const btnDelete = document.getElementById("btn-delete-selected");
     const btnMask = document.getElementById("btn-mask-selected");
-    const checkAll = document.getElementById("check-all-items") as HTMLInputElement;
+    const btnAll = document.getElementById("btn-all-selected");
     
     if (selectedUuids.size > 0) {
         if (btnDelete) btnDelete.style.display = "flex";
@@ -3547,10 +3563,14 @@ function updateListActionButtons() {
         if (btnMask) btnMask.style.display = "none";
     }
     
-    // 전체 선택 체크박스 상태 동기화
+    // 전체 선택 버튼 텍스트 상태 동기화 (All / None)
     const allCheckboxes = document.querySelectorAll('.item-select-checkbox');
-    if (checkAll && allCheckboxes.length > 0) {
-        checkAll.checked = selectedUuids.size === allCheckboxes.length;
+    if (btnAll && allCheckboxes.length > 0) {
+        if (selectedUuids.size === allCheckboxes.length) {
+            btnAll.innerText = "None";
+        } else {
+            btnAll.innerText = "All";
+        }
     }
 }
 
@@ -3681,7 +3701,11 @@ async function showDetail(uuid: string) {
             let prettyJson = doc.json_data;
             try { 
                 docData = JSON.parse(doc.json_data);
-                prettyJson = JSON.stringify(docData, null, 2); 
+                // JSON 문자열 내의 HTML/SVG 태그가 DOM으로 파싱되지 않도록 이스케이프 처리
+                prettyJson = JSON.stringify(docData, null, 2)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;'); 
             } catch(e) {}
 
             // 🌟 [추가] 타이틀과 설명이 있으면 우선적으로 노출합니다.
