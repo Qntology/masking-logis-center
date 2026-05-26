@@ -377,48 +377,10 @@ async fn process_task(
     
     let language = "english"; 
 
-    // [LOCK] Acquire Model Access
-    let model = {
-        println!("[Scheduler] 🛡️ Attempting to acquire Model Lock...");
-        let mut model_lock = model_mutex.lock().await;
-        println!("[Scheduler] ✅ Model Lock acquired.");
-        
-        if cancellation_token.load(Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
-
-        // [FIX] If current model doesn't match preference, unload it to force switch (CPU <-> GPU)
-        if let Some(m) = model_lock.as_ref() {
-            let wants_cpu = effective_device_pref == Some("cpu");
-            if m.is_cpu_mode != wants_cpu {
-                println!("[Scheduler] Device preference mismatch (Current CPU: {}, Wants CPU: {}). Reloading model...", m.is_cpu_mode, wants_cpu);
-                m.deep_purge_resources().await;
-                *model_lock = None;
-            }
-        }
-
-        if model_lock.is_none() {
-            println!("[Scheduler] Model not initialized. Starting LogisModel::new...");
-            // [LOG-ONLY] No emit here to keep UI clean
-            log_task_progress(app_handle, &task.id, &json!({ "category": "Loading Model", "summary": "Initializing AI Core..." }));
-            
-            match LogisModel::new(app_handle.clone(), effective_device_pref).await {
-                Ok(m) => {
-                    println!("[Scheduler] LogisModel::new successful.");
-                    *model_lock = Some(m);
-                },
-                Err(e) => {
-                    println!("[Scheduler] ❌ LogisModel::new failed: {}", e);
-                    return Err(anyhow::anyhow!("Model Load Failed: {}", e));
-                }
-            }
-        }
-        model_lock.as_ref().unwrap().clone()
-    };
-
     // --- Image Extraction Logic (Qwen 3.5 Pipeline) ---
     if task.r#type == "image_extraction" {
         let image_path = task_data.get("image_path").and_then(|s| s.as_str()).unwrap_or("").to_string();
         
-
         if !image_path.is_empty() {
             emit_term(&format!("[PROCESS] Task type is 'image_extraction'. Bypassing Vision LLM inference and staging raw image."));
             
@@ -439,17 +401,20 @@ async fn process_task(
             let extracted_title = format!("[Image] {}", filename);
             let extracted_desc = "Staged Image content".to_string();
 
-            // 🌟 Draft 형식으로 구조화하여 즉시 저장합니다.
+            // 🌟 [CRITICAL FIX] Base64가 아닌 원본 이미지의 파일 시스템 경로를 Pug의 img 태그 형태로 만듭니다.
+            let safe_image_path = image_path.replace("\\", "/");
+            let pug_image_tag = format!("img(src=\"file://{}\", alt=\"{}\")", safe_image_path, filename);
+
             let draft_data = json!({
                 "id": task.id.clone(),
                 "type": "draft",
                 "link": format!("file://{}", filename),
                 "html": b64_img.clone(),
-                "yaml": b64_img.clone(), // 이미지를 보존하기 위해 포함
+                "yaml": pug_image_tag, 
                 "title": extracted_title.clone(),
                 "description": extracted_desc.clone(),
                 "text": "Staged Image content",
-                "masked_text": b64_img, // 프론트엔드가 목록/상세 화면에서 렌더링할 때 사용하는 속성
+                "masked_text": b64_img,
                 "updated_at": chrono::Utc::now().timestamp_millis()
             });
 
@@ -480,6 +445,42 @@ async fn process_task(
     }
 
     if task.r#type == "mask_documents" {
+        // 🌟 [CRITICAL FIX] 모델 로딩 락(Model Lock)을 마스킹 작업 내부로 강등 이동시켜, 
+        // 무거운 AI 연산을 쓰지 않는 Draft(웹/이미지 스테이징) 작업들이 큐에서 막히는 병목을 원천 차단합니다!
+        let model = {
+            println!("[Scheduler] 🛡️ Attempting to acquire Model Lock...");
+            let mut model_lock = model_mutex.lock().await;
+            println!("[Scheduler] ✅ Model Lock acquired.");
+            
+            if cancellation_token.load(Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
+
+            if let Some(m) = model_lock.as_ref() {
+                let wants_cpu = effective_device_pref == Some("cpu");
+                if m.is_cpu_mode != wants_cpu {
+                    println!("[Scheduler] Device preference mismatch (Current CPU: {}, Wants CPU: {}). Reloading model...", m.is_cpu_mode, wants_cpu);
+                    m.deep_purge_resources().await;
+                    *model_lock = None;
+                }
+            }
+
+            if model_lock.is_none() {
+                println!("[Scheduler] Model not initialized. Starting LogisModel::new...");
+                log_task_progress(app_handle, &task.id, &json!({ "category": "Loading Model", "summary": "Initializing AI Core..." }));
+                
+                match LogisModel::new(app_handle.clone(), effective_device_pref).await {
+                    Ok(m) => {
+                        println!("[Scheduler] LogisModel::new successful.");
+                        *model_lock = Some(m);
+                    },
+                    Err(e) => {
+                        println!("[Scheduler] ❌ LogisModel::new failed: {}", e);
+                        return Err(anyhow::anyhow!("Model Load Failed: {}", e));
+                    }
+                }
+            }
+            model_lock.as_ref().unwrap().clone()
+        };
+
         emit_term("[PROCESS] Starting batch masking for selected documents...");
         
         let uuids = task_data.get("uuids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
@@ -539,7 +540,7 @@ async fn process_task(
                         json!({ "category": format!("Vision Analysis ({}/{})", idx + 1, total), "summary": "Extracting text from image..." }),
                         1024,
                         Some(cancellation_token.clone()),
-                        Some(task.id.clone())
+                        Some(format!("{}_{}", task.id, doc_id)) // 🌟 [CRITICAL FIX] 텍스트 마스킹과 동일하게 개별 문서(doc_id) 단위로 고유 세션을 생성하여 KV Cache를 디스크에 안전하게 격리 보존합니다.
                     ).await?;
 
                     extracted_json = crate::parsing::parse_json_from_llm(&res_text);
@@ -567,7 +568,10 @@ async fn process_task(
                     };
 
                     let res_text = if let Some(gen) = model.qwen3_5_generator.lock().await.as_mut() {
-                        gen.generate(params, Some(cancellation_token.clone()), None, None).await?
+                        // 🌟 [CRITICAL FIX] 마스킹 작업에서도 KV Cache가 디스크(SSD)에 물리적으로 저장되도록 세션 ID와 캐시 이름을 명시적으로 부여합니다.
+                        // 여러 문서를 일괄 마스킹할 때 이전 문서의 내용이 환각(Hallucination)으로 섞이지 않도록 task_id와 doc_id를 결합하여 고유 세션으로 격리합니다.
+                        let session_id = format!("{}_{}", task.id, doc_id);
+                        gen.generate(params, Some(cancellation_token.clone()), Some(session_id), Some("inference".to_string())).await?
                     } else {
                         "".to_string()
                     };

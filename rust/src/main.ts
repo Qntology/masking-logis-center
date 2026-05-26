@@ -168,7 +168,10 @@ class GlobalTaskManager {
         await this.saveQueue(); // 🌟 즉시 저장 (Dexie)
         
         // 🌟 [추가] 큐에 담기자마자 사용자에게 시각적 피드백 제공 (DB 등록 전 선행 렌더링)
-        const startTime = parseInt(taskId.split('_')[1]) || Date.now();
+        // 🌟 [CRITICAL FIX] 이미지 해시(img_0x...)를 Timestamp로 파싱하다가 Invalid Date(RangeError)가 터져 UI가 먹통이 되는 버그 방어
+        let startTime = Date.now();
+        const match = taskId.match(/_(\d+)$/);
+        if (match) startTime = parseInt(match[1], 10);
         
         // 1. 사용자 질문 선행 렌더링 (검색인 경우)
         if (payload.query) {
@@ -3909,6 +3912,7 @@ const timezoneOffset = new Date().getTimezoneOffset() * 60 * 1000;
 
 async function checkAuthStatus() {
     if (!currentSession.hash) return;
+    /* 🌟 [주석 처리] 로그인 및 서버 통신(fetch) 로직 비활성화
     const origin = "https://commerce.logis.center"; 
     const now = Date.now();
     const createdAt = now - timezoneOffset; 
@@ -3944,6 +3948,7 @@ async function checkAuthStatus() {
     } catch (e) { 
         console.warn("Auth check failed:", e); 
     }
+    */
 }
 
 function updateAuthUI() {
@@ -3991,6 +3996,7 @@ function updateAuthUI() {
 }
 
 async function performQrAuth() {
+    /* 🌟 [주석 처리] QR 로그인 UI 생성 로직 비활성화
     if (!chatTalks || !currentSession.hash) return;
     const existing = document.getElementById("msg-qr-auth");
     if (existing) existing.remove();
@@ -4003,6 +4009,7 @@ async function performQrAuth() {
         const scroll = document.getElementById("chat-scroll");
         if (scroll) scroll.scrollTop = scroll.scrollHeight;
     }
+    */
 }
 
 // 🌟 [PARITY] Window Focus/Blur 이벤트 리스너 추가
@@ -5312,14 +5319,21 @@ async function loadMoreChat(isHistory: boolean = false, silent: boolean = false)
             const activeTasks = await invoke<any[]>("get_active_tasks");
             
             // 🌟 2. [수정] 프론트엔드 큐 작업 병합 시, DB에서 이미 종료/중단된 ID는 제외합니다.
-            const queuedTasks = GlobalTaskManager.queue.map(q => ({
-                id: q.taskId,
-                task_id: q.taskId,
-                status: 10, // Pending
-                created_at: parseInt(q.taskId.split('_')[1]) || Date.now(),
-                data_json: q.payload,
-                ref: q.payload.link || q.payload.image_path || "Queued Task"
-            }));
+            const queuedTasks = GlobalTaskManager.queue.map(q => {
+                // 🌟 [CRITICAL FIX] 이미지 해시(img_0x...)를 Timestamp로 파싱하다가 Invalid Date(RangeError)가 터져 UI가 먹통이 되는 버그 방어
+                let ts = Date.now();
+                const m = q.taskId.match(/_(\d+)$/);
+                if (m) ts = parseInt(m[1], 10);
+                
+                return {
+                    id: q.taskId,
+                    task_id: q.taskId,
+                    status: 10, // Pending
+                    created_at: ts,
+                    data_json: q.payload,
+                    ref: q.payload.link || q.payload.image_path || "Queued Task"
+                };
+            });
 
             // 🌟 [핵심 로직] DB(activeTasks)에 있는 녀석이 10번이 아니라면(이미 2번 등으로 변했다면) 큐에서 부활시키지 않습니다.
             const combinedTasks = [...activeTasks];
