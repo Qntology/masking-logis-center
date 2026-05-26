@@ -910,6 +910,9 @@ async function renderAccordion(nodes: any[], level = 1): Promise<string> {
                 // 🌟 [추가] Hostname 및 Pathname URL 기반 트리 렌더링
                 name = type === "domain" ? node.hostname : node.pathname;
                 
+                // 🌟 [추가] 이미지 타입 식별
+                const isLocalImage = node.hostname === "Local Image";
+                
                 // 🌟 [추가] 현재 브라우저에서 감지된 URL 파싱
                 let currentDomain = "";
                 let currentPath = "";
@@ -921,16 +924,27 @@ async function renderAccordion(nodes: any[], level = 1): Promise<string> {
                     } catch(e) {}
                 }
 
-                // 🌟 [CRITICAL FIX] 선택된 컨텍스트(수동 클릭) 또는 현재 브라우저 활성 URL(자동 감지)에 따라 액티브(하이라이트) 처리
-                if ((type === "domain" && activeContext.cc === node.cc && !activeContext.pathname) || 
-                    (type === "pathname" && activeContext.pathname === node.pathname && activeContext.cc === node.cc) ||
-                    (type === "domain" && currentDomain === node.hostname && (currentPath === "/" || currentPath === "")) ||
-                    (type === "pathname" && currentDomain === node.hostname && currentPath === node.pathname)) {
-                    active = "active";
+                // 🌟 [CRITICAL FIX] 이미지 노드와 일반 노드의 활성화 조건을 분리합니다.
+                if (isLocalImage) {
+                    // 이미지 노드: 오직 확장자(pathname)를 직접 클릭했을 때만 active 처리 (도메인은 제외)
+                    if (type === "pathname" && activeContext.pathname === node.pathname && activeContext.cc === node.cc) {
+                        active = "active";
+                    }
+                } else {
+                    // 일반 웹페이지 노드: 수동 클릭 또는 현재 브라우저 URL 일치 시 active 처리
+                    if ((type === "domain" && activeContext.cc === node.cc && !activeContext.pathname) || 
+                        (type === "pathname" && activeContext.pathname === node.pathname && activeContext.cc === node.cc) ||
+                        (type === "domain" && currentDomain === node.hostname && (currentPath === "/" || currentPath === "")) ||
+                        (type === "pathname" && currentDomain === node.hostname && currentPath === node.pathname)) {
+                        active = "active";
+                    }
                 }
 
                 const countStr = `<u>(${node.count})</u>`;
-                const displayName = type === "domain" ? `<strong>${name}</strong>` : name;
+                // 이미지 카테고리일 경우 아이콘 추가
+                const displayName = type === "domain" 
+                    ? `<strong>${isLocalImage ? '🖼️ ' : ''}${name}</strong>` 
+                    : name;
                 
                 content = `<div style="display:flex; align-items:center; width:100%; justify-content:space-between;">
                     <span>${displayName} ${countStr}</span>

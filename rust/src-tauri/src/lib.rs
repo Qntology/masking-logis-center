@@ -86,7 +86,22 @@ async fn start_file_drag(
             // 전체 선택 상태면 현재 필터에 맞는 모든 데이터 10,000건까지 추출
             let docs = store.get_all_items("items", 10000, 0, filter).await.unwrap_or_default();
             for doc in docs {
-                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
+                if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
+                    // 🌟 [추가] 이미지 타입 판별
+                    let is_image = doc.r#type == "draft" && (doc.text.contains("[Image]") || doc.json_data.contains("file://"));
+
+                    if is_image {
+                        // 🌟 [CRITICAL FIX 1] 마스킹이 안 된 이미지는 포함하지 않고 건너뜀
+                        if !doc.is_masked { continue; }
+
+                        // 🌟 [CRITICAL FIX 2] 마스킹 된 이미지는 OCR 텍스트만 추출하여 yaml 필드 치환
+                        if let Some(ocr_text) = json_val.get("data").and_then(|d| d.get("image_text")).and_then(|v| v.as_str()) {
+                            if let Some(obj) = json_val.as_object_mut() {
+                                obj.insert("yaml".to_string(), json!(format!("| {}", ocr_text)));
+                            }
+                        }
+                    }
+
                     if let Some(combined_pug) = process_pug_meta(&json_val) {
                         yaml_contents.push(combined_pug);
                     }
@@ -96,7 +111,22 @@ async fn start_file_drag(
             // 일부 선택 상태면 화면에 체크된 문서의 데이터만 추출
             for uuid in uuids {
                 if let Ok(Some(doc)) = store.get_item_by_id("items", &uuid).await {
-                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
+                    if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
+                        // 🌟 [추가] 이미지 타입 판별
+                        let is_image = doc.r#type == "draft" && (doc.text.contains("[Image]") || doc.json_data.contains("file://"));
+
+                        if is_image {
+                            // 🌟 [CRITICAL FIX 1] 마스킹이 안 된 이미지는 포함하지 않고 건너뜀
+                            if !doc.is_masked { continue; }
+
+                            // 🌟 [CRITICAL FIX 2] 마스킹 된 이미지는 OCR 텍스트만 추출하여 yaml 필드 치환
+                            if let Some(ocr_text) = json_val.get("data").and_then(|d| d.get("image_text")).and_then(|v| v.as_str()) {
+                                if let Some(obj) = json_val.as_object_mut() {
+                                    obj.insert("yaml".to_string(), json!(format!("| {}", ocr_text)));
+                                }
+                            }
+                        }
+
                         if let Some(combined_pug) = process_pug_meta(&json_val) {
                             yaml_contents.push(combined_pug);
                         }
