@@ -1092,7 +1092,8 @@ async fn ai_search_complex(
                 let final_results = match search_result {
                     Ok(res) => res,
                     Err(_) => {
-                        store.search_items(target_table, text, emb, 5, 0, None, use_fts).await.unwrap_or_default()
+                        // 🌟 [CRITICAL FIX] 정의되지 않은 use_fts 변수 대신 명시적으로 true를 전달하여 컴파일 에러를 해결합니다.
+                        store.search_items(target_table, text, emb, 5, 0, None, true).await.unwrap_or_default()
                     }
                 };
 
