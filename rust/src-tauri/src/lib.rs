@@ -56,13 +56,39 @@ async fn start_file_drag(
     if let Some(store) = store_guard.as_ref() {
         let mut yaml_contents = Vec::new();
 
+        // [추가] JSON 데이터에서 title, link, description을 추출하여 Pug 메타 태그로 주입하는 클로저
+        let process_pug_meta = |json_val: &serde_json::Value| -> Option<String> {
+            if let Some(yaml) = json_val.get("yaml").and_then(|v| v.as_str()) {
+                let title = json_val.get("title").and_then(|v| v.as_str()).unwrap_or("").replace("\"", "\\\"");
+                let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("").replace("\"", "\\\"");
+                let desc = json_val.get("description").and_then(|v| v.as_str()).unwrap_or("").replace("\"", "\\\"");
+                
+                // 🌟 meta 태그들의 들여쓰기 공백을 4칸에서 8칸으로 늘려 탭 한 번을 더 적용했습니다.
+                let meta_tags = format!(
+                    "        meta(property=\"og:title\", content=\"{}\")\n        meta(property=\"og:url\", content=\"{}\")\n        meta(property=\"og:description\", content=\"{}\")\n",
+                    title, url, desc
+                );
+                
+                // 기존 pug 텍스트에 이미 head 태그가 있다면 그 아래에 주입하고, 없다면 최상단에 html > head 구조를 신규 생성
+                let final_yaml = if yaml.contains("  head\n") {
+                    yaml.replacen("  head\n", &format!("  head\n{}", meta_tags), 1)
+                } else {
+                    format!("html\n  head\n{}{}", meta_tags, yaml)
+                };
+                
+                Some(final_yaml)
+            } else {
+                None
+            }
+        };
+
         if fetch_all {
             // 전체 선택 상태면 현재 필터에 맞는 모든 데이터 10,000건까지 추출
             let docs = store.get_all_items("items", 10000, 0, filter).await.unwrap_or_default();
             for doc in docs {
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
-                    if let Some(yaml) = json_val.get("yaml").and_then(|v| v.as_str()) {
-                        yaml_contents.push(yaml.to_string());
+                    if let Some(combined_pug) = process_pug_meta(&json_val) {
+                        yaml_contents.push(combined_pug);
                     }
                 }
             }
@@ -71,8 +97,8 @@ async fn start_file_drag(
             for uuid in uuids {
                 if let Ok(Some(doc)) = store.get_item_by_id("items", &uuid).await {
                     if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
-                        if let Some(yaml) = json_val.get("yaml").and_then(|v| v.as_str()) {
-                            yaml_contents.push(yaml.to_string());
+                        if let Some(combined_pug) = process_pug_meta(&json_val) {
+                            yaml_contents.push(combined_pug);
                         }
                     }
                 }

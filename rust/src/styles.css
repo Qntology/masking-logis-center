@@ -108,9 +108,16 @@ body {
 
 .pill-nav:active { cursor: grabbing; }
 
-#search-mode-tabs{margin-bottom: 0.5em; padding: 0 0.7rem;}
+#search-mode-tabs{margin-bottom: 0.5em; padding: 0 1.4rem;}
+#search-mode-tabs .mode-tab{display: block;}
+#search-mode-tabs .mode-tab+.mode-tab{margin-top: 1.5em;}
 #search-mode-tabs .mode-tab:hover{font-style: italic;}
+#btn-edit-modes{vertical-align: middle; margin-left: 10px; border: 0; background: none;}
 
+
+#search-mode-edit-actions{margin-left: 10px;}
+
+.mode-edit-item+.mode-edit-item{margin-top: 0.5em;}
 .mode-edit-item {
     display: flex;
     align-items: center;
@@ -121,8 +128,9 @@ body {
     border: 1px solid rgba(0,0,0,0.1);
 }
 .mode-edit-item input {
-    width: 70px;
-    font-size: 0.75rem;
+    width: 140x;
+    height: 30px;
+    font-size: 1rem;
     padding: 2px 4px;
     border: 1px solid #ccc;
     border-radius: 2px;
@@ -248,6 +256,8 @@ body {
   gap: 4px;
 }
 
+#btn-drag-export{position: fixed; left: 0; right: 0; bottom: 0; line-height: 60px; height: 60px; border-radius: 0; background-color: #ddd; text-transform: uppercase; z-index: 9999;}
+
 .nav-btn {
   background: transparent;
   border: none;
@@ -255,7 +265,7 @@ body {
   width: 30px;
   height: 40px;
   border-radius: 50%;
-  display: flex;
+  display: inline-block;
   align-items: center;
   justify-content: center;
   cursor: pointer;
@@ -877,7 +887,7 @@ tr:hover { background: rgba(0,0,0,0.05); }
 #nav-qr-container button:hover{font-style: italic;}
 
 
-.tree-root {margin: 0 1.6rem 0.8rem;}
+.tree-root {margin: 0 0 0.8rem;}
 
 
 .btn-toggle-visibility{position: absolute; left: 100%; top: 0; margin-left: 2em; border:0; font-size: 1em; font-style: italic; text-decoration: none; background-color: transparent; cursor: pointer;}
@@ -954,10 +964,8 @@ tr:hover { background: rgba(0,0,0,0.05); }
 .logis-label strong {
     display: inline;
     margin-left: 10px;
-    font-size: 9px;
     font-weight: 300;
     font-style: italic;
-    opacity: 0.6;
     color: #666;
 }
 
@@ -966,14 +974,16 @@ tr:hover { background: rgba(0,0,0,0.05); }
     filter: none;
 }
 
-.logis-label.active > span {
+.logis-label.active > div > span {
     text-decoration: underline;
     background-color: #000;
     color: #fff;
     padding: 0 4px;
 }
 
-.logis-label.active > span:before {
+.logis-label.active > div > span > strong {color: #fff;}
+
+.logis-label.active > div > span:before {
     content: "▶";
     position: absolute;
     left: -1.5em;
@@ -982,7 +992,7 @@ tr:hover { background: rgba(0,0,0,0.05); }
     font-size: 8px;
 }
 
-.logis-label.active u{color: #fff;}
+.logis-label.active > div u{color: #fff;}
 
 /* Child Container / Accordion */
 .logis-child {

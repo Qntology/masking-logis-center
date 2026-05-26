@@ -680,8 +680,6 @@ async function updateExtractButtonVisibility() {
     try {
         if (currentImage) {
             const imageRefHash = await hashId(currentImage); 
-            const tId = `img_${imageRefHash}`;
-            const domExists = document.getElementById(tId) !== null; // 리스트에 이미 존재하는지 검사
 
             const isActive = await invoke<boolean>("check_active_task", { payload: { cc: activeContext.cc || "", ref: imageRefHash } });
             // 🌟 프론트엔드 대기 큐 및 백엔드 대기 큐(backendQueued) 동시 확인
@@ -691,18 +689,13 @@ async function updateExtractButtonVisibility() {
             const isCurrentExecuting = GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskPayload && 
                 GlobalTaskManager.currentTaskPayload.ref === imageRefHash;
 
-            if (isActive || isQueued || isCurrentExecuting || domExists) shouldHide = true;
+            // 🌟 [CRITICAL FIX] 이미 리스트에 존재하더라도 덮어쓰기(업데이트)를 위해 버튼을 숨기지 않습니다. (domExists 검사 제거)
+            if (isActive || isQueued || isCurrentExecuting) shouldHide = true;
         } else if (currentDetectedUrl) {
             const urlObj = new URL(currentDetectedUrl.toLowerCase());
             const link = (urlObj.pathname + urlObj.search).toLowerCase();
             const ccHash = await hashId(urlObj.hostname);
             const hashedRefId = await hashId((currentSession.team || "") + ccHash + link);
-            
-            const tId = `task_${hashedRefId}`;
-            const isAlreadyInPages = Array.from(document.querySelectorAll('.logis-label')).some(
-                (el: any) => el.dataset.pathname === urlObj.pathname && el.dataset.domain === urlObj.hostname
-            );
-            const domExists = document.getElementById(tId) !== null || isAlreadyInPages; // 🌟 리스트 및 Pages 트리에 이미 존재하는지 완벽 검사
 
             const currentRefToCheck = activeContext.ref || hashedRefId;
             
@@ -714,7 +707,8 @@ async function updateExtractButtonVisibility() {
             const isCurrentExecuting = GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskPayload && 
                 (GlobalTaskManager.currentTaskPayload.ref === currentRefToCheck || GlobalTaskManager.currentTaskPayload.link === link);
             
-            if (isActive || isQueued || isCurrentExecuting || domExists) shouldHide = true;
+            // 🌟 [CRITICAL FIX] 이미 Pages 트리에 존재하더라도 덮어쓰기(업데이트)를 위해 버튼을 숨기지 않습니다.
+            if (isActive || isQueued || isCurrentExecuting) shouldHide = true;
         }
     } catch (e) {
         // 통신 에러 발생 시 노출 유지
@@ -842,6 +836,11 @@ function removeSearchTag(id: string) {
     }
 
     updateTagsUI();
+    
+    // 🌟 [CRITICAL FIX] 태그가 삭제되어 activeContext가 초기화되었으므로, Pages 트리를 즉시 다시 렌더링합니다.
+    // 이 과정을 통해 현재 브라우저 URL과 일치하지 않는 라벨들의 active 클래스가 완벽히 제거됩니다.
+    renderNavigation();
+
     loadMoreDocs(true);
     
     // [FIX] Also refresh chat history to reflect cleared filters
@@ -907,17 +906,31 @@ async function renderAccordion(nodes: any[], level = 1): Promise<string> {
             } else if (type === "domain" || type === "pathname") {
                 // 🌟 [추가] Hostname 및 Pathname URL 기반 트리 렌더링
                 name = type === "domain" ? node.hostname : node.pathname;
-                if (type === "domain") host = `<strong>${name}</strong>`;
                 
-                // 선택된 컨텍스트에 따라 액티브(하이라이트) 처리
+                // 🌟 [추가] 현재 브라우저에서 감지된 URL 파싱
+                let currentDomain = "";
+                let currentPath = "";
+                if (currentDetectedUrl && currentDetectedUrl.startsWith("http")) {
+                    try {
+                        const u = new URL(currentDetectedUrl.toLowerCase());
+                        currentDomain = u.hostname;
+                        currentPath = u.pathname;
+                    } catch(e) {}
+                }
+
+                // 🌟 [CRITICAL FIX] 선택된 컨텍스트(수동 클릭) 또는 현재 브라우저 활성 URL(자동 감지)에 따라 액티브(하이라이트) 처리
                 if ((type === "domain" && activeContext.cc === node.cc && !activeContext.pathname) || 
-                    (type === "pathname" && activeContext.pathname === node.pathname && activeContext.cc === node.cc)) {
+                    (type === "pathname" && activeContext.pathname === node.pathname && activeContext.cc === node.cc) ||
+                    (type === "domain" && currentDomain === node.hostname && (currentPath === "/" || currentPath === "")) ||
+                    (type === "pathname" && currentDomain === node.hostname && currentPath === node.pathname)) {
                     active = "active";
                 }
 
                 const countStr = `<u>(${node.count})</u>`;
+                const displayName = type === "domain" ? `<strong>${name}</strong>` : name;
+                
                 content = `<div style="display:flex; align-items:center; width:100%; justify-content:space-between;">
-                    <span>${name} ${countStr}</span>
+                    <span>${displayName} ${countStr}</span>
                 </div>`;
             }
 
@@ -961,7 +974,9 @@ async function renderNavigation() {
     const btnSignin = document.getElementById("nav-signin");
     const btnSignout = document.getElementById("nav-signout");
 
-    if (!pageList || !userList) return;
+    // 🌟 [CRITICAL FIX] index.html에서 userList 관련 영역이 주석 처리되어 null을 반환하더라도,
+    // pageList가 존재한다면 함수가 종료(return)되지 않고 끝까지 렌더링을 수행하도록 조건을 (&&)로 변경합니다.
+    if (!pageList && !userList) return;
 
     // [FIX] Show spinner only on the very first navigation render
     if (isFirstNavRender) {
@@ -1465,6 +1480,7 @@ let currentSearchMode = "commerce";
 let customModes: string[] = ["shipping", "commerce", "analytic"];
 let isModeEdit = false;
 let tempModes: { original: string | null, current: string }[] = [];
+let draggedModeIndex: number | null = null; // 🌟 [CRITICAL FIX] 드래그 앤 드롭 안정성을 위한 인덱스 추적 변수 추가
 
 // 🌟 앱 시작 및 탭 UI 동적 렌더링 함수
 async function renderModeTabs() {
@@ -1476,7 +1492,7 @@ async function renderModeTabs() {
     container.innerHTML = "";
 
     if (isModeEdit) {
-        actions.style.display = "flex";
+        actions.style.display = "inline-block";
         editBtn.style.display = "none";
 
         tempModes.forEach((modeObj, index) => {
@@ -1485,16 +1501,35 @@ async function renderModeTabs() {
             item.draggable = true;
 
             item.ondragstart = (e) => {
-                e.dataTransfer?.setData('text/plain', index.toString());
-                e.dataTransfer!.effectAllowed = 'move';
+                draggedModeIndex = index; // 🌟 브라우저 dataTransfer 유실을 방지하기 위해 전역 변수에 직접 캐싱
+                if (e.dataTransfer) {
+                    e.dataTransfer.setData('text/plain', index.toString());
+                    e.dataTransfer.effectAllowed = 'move';
+                }
                 item.style.opacity = '0.5';
             };
-            item.ondragend = () => { item.style.opacity = '1'; };
-            item.ondragover = (e) => { e.preventDefault(); e.dataTransfer!.dropEffect = 'move'; };
+            item.ondragend = () => { 
+                item.style.opacity = '1'; 
+                draggedModeIndex = null; 
+            };
+            // 🌟 [CRITICAL FIX] HTML5 Drag & Drop 스펙에 따라 dragenter에서도 preventDefault를 걸어야 drop이 작동합니다.
+            item.ondragenter = (e) => { 
+                e.preventDefault(); 
+            };
+            item.ondragover = (e) => { 
+                e.preventDefault(); 
+                if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; 
+            };
             item.ondrop = (e) => {
                 e.preventDefault();
-                const fromIndex = parseInt(e.dataTransfer!.getData('text/plain'), 10);
-                if (fromIndex !== index && !isNaN(fromIndex)) {
+                
+                // 🌟 변수를 최우선으로 사용하고, 없으면 dataTransfer를 참조합니다.
+                let fromIndex = draggedModeIndex;
+                if (fromIndex === null && e.dataTransfer) {
+                    fromIndex = parseInt(e.dataTransfer.getData('text/plain'), 10);
+                }
+                
+                if (fromIndex !== null && fromIndex !== index && !isNaN(fromIndex)) {
                     const movedItem = tempModes.splice(fromIndex, 1)[0];
                     tempModes.splice(index, 0, movedItem);
                     renderModeTabs();
@@ -3582,9 +3617,9 @@ function updateListActionButtons() {
     const allCheckboxes = document.querySelectorAll('.item-select-checkbox');
     
     if (selectedUuids.size > 0) {
-        if (btnDelete) btnDelete.style.display = "flex";
-        if (btnMask) btnMask.style.display = "flex";
-        if (btnDrag) btnDrag.style.display = "flex";
+        if (btnDelete) btnDelete.style.display = "inline-block";
+        if (btnMask) btnMask.style.display = "inline-block";
+        if (btnDrag) btnDrag.style.display = "inline-block";
     } else {
         if (btnDelete) btnDelete.style.display = "none";
         if (btnMask) btnMask.style.display = "none";

@@ -393,10 +393,21 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                 }
             }
 
-            // --- base64 이미지를 포함하는 img 태그 제외 ---
+            // 🌟 [CRITICAL FIX 1] img 태그의 지연 로딩(Lazy-load) 실제 주소 추출 및 Base64 필터링
+            let mut lazy_src: Option<String> = None;
             if tag_name == "img" {
+                for attr in ["data-src", "data-original", "data-lazy-src", "lazy-src"] {
+                    if let Some(real_url) = element.attr(attr) {
+                        if !real_url.starts_with("data:image") && !real_url.contains("base64") {
+                            lazy_src = Some(real_url.to_string());
+                            break;
+                        }
+                    }
+                }
+
                 if let Some(src) = element.attr("src") {
-                    if src.contains("base64") {
+                    // 진짜 주소가 없는 base64 이미지는 용량 방지를 위해 태그 자체를 통째로 제외
+                    if src.contains("base64") && lazy_src.is_none() {
                         return;
                     }
                 }
@@ -527,11 +538,15 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
 
                 if name_str == "id" || name_str == "class" || name_str == "alt" { continue; }
 
-                
+                // 🌟 [추가] 추출된 지연 로딩 원본 주소 속성은 중복 출력을 방지하기 위해 스킵
+                if tag_name == "img" && ["data-src", "data-original", "data-lazy-src", "lazy-src"].contains(&name_str) {
+                    continue;
+                }
+
                 let should_include = ["colspan", "rowspan", "scope"].contains(&name_str) || if *mode == PugMode::TheadMode {
                     thead_include.contains(&name_str)
                 } else if *mode == PugMode::NoAttributesMode {
-                    false
+                    name_str == "src" || name_str == "href" // 🌟 [CRITICAL FIX 2] NoAttributesMode 라도 src 및 href 속성은 문서/이미지 참조를 위해 필수 허용합니다.
                 } else {
                     name_str.starts_with("data-") || always_include.contains(&name_str)
                 };
@@ -542,6 +557,13 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                     } else if !value.is_empty() {
                         let mut safe_value = value.replace("\"", "'");
                         
+                        // 🌟 [추가] img 태그의 src를 지연 로딩 실제 주소로 덮어씌웁니다.
+                        if tag_name == "img" && name_str == "src" {
+                            if let Some(ref real_url) = lazy_src {
+                                safe_value = real_url.replace("\"", "'");
+                            }
+                        }
+
                         if name_str == "href" || name_str == "src" {
                             if let Some(c) = ctx.as_ref() {
                                 if let Some(base) = &c.base_url {
@@ -554,9 +576,29 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                             }
                         }
 
+                        // base64 방어 코드 추가 (위에서 필터링되었지만 안전망)
+                        if name_str == "src" && safe_value.contains("base64") {
+                            continue;
+                        }
+
                         other_attributes.push(format!("{}=\"{}\"", name_str, safe_value));
                     }
                 }
+            }
+
+            // 🌟 [추가] 원래 문서에 src 속성이 없었지만 data-src(지연 로딩)만 있었던 경우 강제로 src 주입
+            if tag_name == "img" && lazy_src.is_some() && !element.attrs().any(|(k, _)| k.to_lowercase() == "src") {
+                let mut safe_value = lazy_src.as_ref().unwrap().replace("\"", "'");
+                if let Some(c) = ctx.as_ref() {
+                    if let Some(base) = &c.base_url {
+                        if let Ok(base_url_obj) = url::Url::parse(base) {
+                            if let Ok(resolved_url) = base_url_obj.join(safe_value.trim()) {
+                                safe_value = resolved_url.to_string();
+                            }
+                        }
+                    }
+                }
+                other_attributes.push(format!("src=\"{}\"", safe_value));
             }
 
             let mut attributes_string = String::new();
