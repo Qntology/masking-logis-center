@@ -699,7 +699,10 @@ async function updateExtractButtonVisibility() {
             const hashedRefId = await hashId((currentSession.team || "") + ccHash + link);
             
             const tId = `task_${hashedRefId}`;
-            const domExists = document.getElementById(tId) !== null; // 리스트에 이미 존재하는지 검사
+            const isAlreadyInPages = Array.from(document.querySelectorAll('.logis-label')).some(
+                (el: any) => el.dataset.pathname === urlObj.pathname && el.dataset.domain === urlObj.hostname
+            );
+            const domExists = document.getElementById(tId) !== null || isAlreadyInPages; // 🌟 리스트 및 Pages 트리에 이미 존재하는지 완벽 검사
 
             const currentRefToCheck = activeContext.ref || hashedRefId;
             

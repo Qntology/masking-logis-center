@@ -81,18 +81,19 @@ async fn start_file_drag(
 
         let combined_yaml = yaml_contents.join("\n---\n");
         
-        // AppData/.../tmp/con.txt 에 기록
-        let file_path = crate::utils::paths::get_app_tmp_root(None).join("con.txt");
+        // 🌟 [CRITICAL FIX 1] Windows OS 예약어(CON) 사용 금지!
+        // Windows에서 'con.txt'는 예약된 시스템 장치 이름이므로 정상적인 파일로 취급되지 않습니다.
+        // 이로 인해 drag 2.1.1이 파일의 절대 경로(canonicalize)를 찾다 None을 뱉고 unwrap() 패닉을 일으켰습니다.
+        let file_path = crate::utils::paths::get_app_tmp_root(None).join("kon.txt");
         std::fs::write(&file_path, combined_yaml).map_err(|e| e.to_string())?;
 
         // 🌟 Rust 백엔드에서 OS 네이티브 드래그 앤 드랍 트리거 (파일 물리적 이동 지원)
-        // 주의: 이 코드가 정상 작동하려면 프로젝트의 Cargo.toml 에 `drag = "2.1.1"` 크레이트가 추가되어 있어야 합니다.
         let app_handle_clone = app_handle.clone();
         let _ = app_handle.run_on_main_thread(move || {
             if let Some(window) = app_handle_clone.get_webview_window("main") {
                 let item = vec![file_path.clone()];
                 
-                // 🌟 [CRITICAL FIX] Windows에서 빈 배열 파싱 중 발생하는 unwrap() 패닉을 막기 위해 1x1 투명 PNG를 주입합니다.
+                // 🌟 [CRITICAL FIX 2] 이미지 디코딩 패닉을 막기 위한 1x1 PNG 유지 (사용자님의 훌륭한 우회책)
                 let transparent_png = vec![
                     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 
                     0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 
@@ -102,14 +103,36 @@ async fn start_file_drag(
                     0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
                 ];
 
-                // drag 2.1.1 버전부터는 Tauri v2의 윈도우 핸들을 전 OS에서 완벽하게 단일 지원합니다.
+                // 🌟 [CRITICAL FIX 3] 운영체제별 윈도우 핸들 추출 방식 복원
+                // drag 2.1.1이라도 Linux 등에서는 여전히 네이티브 윈도우 객체(GTK 등)를 분기하여 넘겨야 안전합니다.
+                #[cfg(windows)]
                 let _ = drag::start_drag(
                     &window,
-                    drag::DragItem::Files(item),
-                    drag::Image::Raw(transparent_png),
+                    drag::DragItem::Files(item.clone()),
+                    drag::Image::Raw(transparent_png.clone()),
                     |_, _| {},
                     drag::Options::default()
                 );
+
+                #[cfg(target_os = "macos")]
+                let _ = drag::start_drag(
+                    &window,
+                    drag::DragItem::Files(item.clone()),
+                    drag::Image::Raw(transparent_png.clone()),
+                    |_, _| {},
+                    drag::Options::default()
+                );
+                
+                #[cfg(target_os = "linux")]
+                if let Ok(gtk_window) = window.gtk_window() {
+                    let _ = drag::start_drag(
+                        &gtk_window,
+                        drag::DragItem::Files(item.clone()),
+                        drag::Image::Raw(transparent_png),
+                        |_, _| {},
+                        drag::Options::default()
+                    );
+                }
             }
         });
 
