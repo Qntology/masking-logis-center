@@ -92,11 +92,21 @@ async fn start_file_drag(
             if let Some(window) = app_handle_clone.get_webview_window("main") {
                 let item = vec![file_path.clone()];
                 
+                // 🌟 [CRITICAL FIX] Windows에서 빈 배열 파싱 중 발생하는 unwrap() 패닉을 막기 위해 1x1 투명 PNG를 주입합니다.
+                let transparent_png = vec![
+                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 
+                    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 
+                    0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 
+                    0x0b, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0x60, 0x00, 0x02, 0x00, 
+                    0x00, 0x05, 0x00, 0x01, 0xe2, 0x26, 0x05, 0x9b, 0x00, 0x00, 0x00, 0x00, 
+                    0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+                ];
+
                 // drag 2.1.1 버전부터는 Tauri v2의 윈도우 핸들을 전 OS에서 완벽하게 단일 지원합니다.
                 let _ = drag::start_drag(
                     &window,
                     drag::DragItem::Files(item),
-                    drag::Image::Raw(vec![]),
+                    drag::Image::Raw(transparent_png),
                     |_, _| {},
                     drag::Options::default()
                 );
@@ -677,6 +687,39 @@ async fn delete_document(
 ) -> Result<String, String> {
     let store_guard = state.store.lock().await;
     if let Some(store) = store_guard.as_ref() {
+        // 🌟 [추가] 삭제 전 문서를 조회하여 pages 테이블의 count를 차감(감소)합니다.
+        if let Ok(Some(doc)) = store.get_item_by_id("items", &uuid).await {
+            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
+                let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("");
+                if url.starts_with("http") {
+                    if let Ok(parsed_url) = url::Url::parse(url) {
+                        let hostname = parsed_url.host_str().unwrap_or("").to_string();
+                        let pathname = parsed_url.path().to_string();
+                        let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}", hostname, pathname));
+                        
+                        if let Ok(Some(existing_page)) = store.get_item_by_id("pages", &page_id).await {
+                            if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&existing_page.json_data) {
+                                let mut count = parsed.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+                                if count > 0 {
+                                    count -= 1;
+                                    parsed.as_object_mut().unwrap().insert("count".to_string(), serde_json::json!(count));
+                                    
+                                    if count == 0 {
+                                        let _ = store.delete_item("pages", &page_id).await;
+                                    } else {
+                                        let _ = store.upsert_item(
+                                            "pages", &page_id, "pages", parsed, None,
+                                            Some(&existing_page.from), Some(&existing_page.to), Some(&existing_page.cc), Some(&existing_page.bcc), Some(&existing_page.r#ref), None
+                                        ).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // [DETAIL] 'items' 테이블뿐만 아니라 다른 가능한 테이블에서도 삭제 시도
         let tables = vec!["items", "sales", "tracking", "event", "users", "pages"];
         for table in tables {
@@ -696,6 +739,41 @@ async fn delete_documents(
     let store_guard = state.store.lock().await;
     if let Some(store) = store_guard.as_ref() {
         if uuids.is_empty() { return Ok("No documents to delete.".to_string()); }
+        
+        // 🌟 [추가] 여러 문서 삭제 전 pages 테이블 카운트 일괄 차감 로직
+        for uuid in &uuids {
+            if let Ok(Some(doc)) = store.get_item_by_id("items", uuid).await {
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
+                    let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("");
+                    if url.starts_with("http") {
+                        if let Ok(parsed_url) = url::Url::parse(url) {
+                            let hostname = parsed_url.host_str().unwrap_or("").to_string();
+                            let pathname = parsed_url.path().to_string();
+                            let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}", hostname, pathname));
+                            
+                            if let Ok(Some(existing_page)) = store.get_item_by_id("pages", &page_id).await {
+                                if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&existing_page.json_data) {
+                                    let mut count = parsed.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    if count > 0 {
+                                        count -= 1;
+                                        parsed.as_object_mut().unwrap().insert("count".to_string(), serde_json::json!(count));
+                                        
+                                        if count == 0 {
+                                            let _ = store.delete_item("pages", &page_id).await;
+                                        } else {
+                                            let _ = store.upsert_item(
+                                                "pages", &page_id, "pages", parsed, None,
+                                                Some(&existing_page.from), Some(&existing_page.to), Some(&existing_page.cc), Some(&existing_page.bcc), Some(&existing_page.r#ref), None
+                                            ).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
         let tables = vec!["items", "sales", "tracking", "event", "users", "pages"];
         for table in tables {

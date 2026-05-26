@@ -680,6 +680,9 @@ async function updateExtractButtonVisibility() {
     try {
         if (currentImage) {
             const imageRefHash = await hashId(currentImage); 
+            const tId = `img_${imageRefHash}`;
+            const domExists = document.getElementById(tId) !== null; // 리스트에 이미 존재하는지 검사
+
             const isActive = await invoke<boolean>("check_active_task", { payload: { cc: activeContext.cc || "", ref: imageRefHash } });
             // 🌟 프론트엔드 대기 큐 및 백엔드 대기 큐(backendQueued) 동시 확인
             const isQueued = GlobalTaskManager.queue.some(q => q.payload && q.payload.ref === imageRefHash) ||
@@ -688,13 +691,16 @@ async function updateExtractButtonVisibility() {
             const isCurrentExecuting = GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskPayload && 
                 GlobalTaskManager.currentTaskPayload.ref === imageRefHash;
 
-            if (isActive || isQueued || isCurrentExecuting) shouldHide = true;
+            if (isActive || isQueued || isCurrentExecuting || domExists) shouldHide = true;
         } else if (currentDetectedUrl) {
             const urlObj = new URL(currentDetectedUrl.toLowerCase());
             const link = (urlObj.pathname + urlObj.search).toLowerCase();
             const ccHash = await hashId(urlObj.hostname);
             const hashedRefId = await hashId((currentSession.team || "") + ccHash + link);
             
+            const tId = `task_${hashedRefId}`;
+            const domExists = document.getElementById(tId) !== null; // 리스트에 이미 존재하는지 검사
+
             const currentRefToCheck = activeContext.ref || hashedRefId;
             
             const isActive = await invoke<boolean>("check_active_task", { payload: { cc: ccHash, ref: currentRefToCheck } });
@@ -705,7 +711,7 @@ async function updateExtractButtonVisibility() {
             const isCurrentExecuting = GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskPayload && 
                 (GlobalTaskManager.currentTaskPayload.ref === currentRefToCheck || GlobalTaskManager.currentTaskPayload.link === link);
             
-            if (isActive || isQueued || isCurrentExecuting) shouldHide = true;
+            if (isActive || isQueued || isCurrentExecuting || domExists) shouldHide = true;
         }
     } catch (e) {
         // 통신 에러 발생 시 노출 유지
@@ -973,58 +979,53 @@ async function renderNavigation() {
     try {
         navTmp = {}; // Reset for fresh render
         
-        // 🌟 [추가] items 테이블에서 전체 데이터를 가져와 URL을 파싱하여 폴더링합니다.
-        let _itemsRaw = await invoke<any[]>("get_all_documents", { limit: 5000, offset: 0, filter: `mode = '${currentSearchMode}'` });
+        // 🌟 [수정] 5000개의 items를 순회하지 않고, 백엔드에서 미리 카운트해둔 pages 테이블을 단순 조회하여 렌더링합니다.
+        let _pagesRaw = await invoke<any[]>("get_known_pages");
         
         const domainMap = new Map<string, any>();
 
-        for (const item of _itemsRaw) {
+        for (const item of _pagesRaw) {
             let data: any = {};
             try { data = typeof item.json_data === "string" ? JSON.parse(item.json_data) : item.data || item; } catch(e) {}
             
-            let fullUrl = data.link || item.link || data.url || item.url || "";
-            if (!fullUrl) continue;
-            if (!fullUrl.startsWith("http")) {
-                fullUrl = (data.origin || "https://unknown.com") + (fullUrl.startsWith('/') ? fullUrl : '/' + fullUrl);
+            const hostname = data.hostname;
+            const pathname = data.pathname;
+            const count = data.count || 1;
+            const cc = data.cc || item.cc || "";
+
+            if (!hostname) continue;
+
+            if (!domainMap.has(hostname)) {
+                domainMap.set(hostname, {
+                    id: `domain_${hostname}`,
+                    type: "domain",
+                    hostname: hostname,
+                    cc: cc, 
+                    count: 0,
+                    children: new Map<string, any>()
+                });
             }
 
-            try {
-                const u = new URL(fullUrl.toLowerCase());
-                const hostname = u.hostname;
-                const pathname = u.pathname; 
+            const domainNode = domainMap.get(hostname);
+            domainNode.count += count;
 
-                const cc = item.cc || data.cc || "";
+            const pathKey = pathname;
+            if (pathKey && !domainNode.children.has(pathKey)) {
+                domainNode.children.set(pathKey, {
+                    id: `path_${hostname}_${pathKey.replace(/\//g, '')}`,
+                    type: "pathname",
+                    hostname: hostname,
+                    pathname: pathname,
+                    cc: cc,
+                    count: 0,
+                    children: []
+                });
+            }
 
-                if (!domainMap.has(hostname)) {
-                    domainMap.set(hostname, {
-                        id: `domain_${hostname}`,
-                        type: "domain",
-                        hostname: hostname,
-                        cc: cc, 
-                        count: 0,
-                        children: new Map<string, any>()
-                    });
-                }
-
-                const domainNode = domainMap.get(hostname);
-                domainNode.count++;
-
-                const pathKey = pathname;
-                if (!domainNode.children.has(pathKey)) {
-                    domainNode.children.set(pathKey, {
-                        id: `path_${hostname}_${pathKey.replace(/\//g, '')}`,
-                        type: "pathname",
-                        hostname: hostname,
-                        pathname: pathname,
-                        cc: cc,
-                        count: 0,
-                        children: []
-                    });
-                }
-
+            if (pathKey) {
                 const pathNode = domainNode.children.get(pathKey);
-                pathNode.count++;
-            } catch(e) {}
+                pathNode.count += count;
+            }
         }
 
         const tree = Array.from(domainMap.values()).map(d => {
@@ -1849,7 +1850,26 @@ btnExtract?.addEventListener("click", async () => {
             // 🌟 [CRITICAL FIX] 추출(Extract) 시 채팅창(settings) 탭으로 자동 이동합니다.
             openWidget("settings"); 
 
-            const taskId = `task_${Date.now()}`;
+            // 🌟 중복 방지를 위해 Timestamp 대신 주소/이미지 기반의 고정 ID를 생성합니다.
+            let taskId = "";
+            if (currentImage) {
+                const imageRefHash = await hashId(currentImage);
+                taskId = `img_${imageRefHash}`;
+            } else {
+                let validUrl = currentDetectedUrl;
+                if (!validUrl || validUrl === "" || validUrl === "about:blank") {
+                    const pageList = document.getElementById("nav-list-pages");
+                    const activeLabel = pageList?.querySelector(".logis-label.active") as HTMLElement;
+                    if (activeLabel && activeLabel.dataset.domain) validUrl = `https://${activeLabel.dataset.domain}`;
+                    else validUrl = "https://commerce.logis.center";
+                }
+                const urlObj = new URL(validUrl.toLowerCase());
+                const cc = await hashId(urlObj.hostname);
+                const rawPath = urlObj.pathname + urlObj.search;
+                const teamId = currentSession.team || "";
+                const hashedRefId = await hashId(teamId + cc + rawPath.toLowerCase());
+                taskId = `task_${hashedRefId}`;
+            }
             
             // 🌟 수동 renderMessage 및 startSpinner 제거: addToQueue가 대기열 UI(10번)를 예쁘게 그려줍니다.
             

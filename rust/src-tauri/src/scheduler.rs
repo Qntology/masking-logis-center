@@ -758,10 +758,47 @@ async fn process_task(
 
         let store_guard = store_mutex.lock().await;
         if let Some(db) = store_guard.as_ref() {
+            // 🌟 [추가] 새 아이템 여부 확인 및 Pages 테이블 카운트 증감(증가) 로직
+            let is_new = db.get_item_by_id("items", &task.id).await.unwrap_or(None).is_none();
+
             let _ = db.upsert_item(
                 "items", &task.id, "draft", draft_data, None,
                 Some(&task.from), Some(&team_id), Some(&task.cc), Some(&task.bcc), Some(&task.r#ref), None
             ).await;
+
+            // 🌟 URL이 존재하고 새 아이템일 경우 Pages 테이블의 count 증가
+            if is_new && url.starts_with("http") {
+                if let Ok(parsed_url) = url::Url::parse(&url) {
+                    let hostname = parsed_url.host_str().unwrap_or("").to_string();
+                    let pathname = parsed_url.path().to_string();
+                    let cc_val = task.cc.clone();
+                    
+                    let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}", hostname, pathname));
+                    
+                    let mut page_count = 1;
+                    let mut existing_page_data = json!({
+                        "id": page_id.clone(),
+                        "type": "pages",
+                        "hostname": hostname.clone(),
+                        "pathname": pathname.clone(),
+                        "cc": cc_val.clone(),
+                        "count": 1
+                    });
+
+                    if let Ok(Some(existing_page)) = db.get_item_by_id("pages", &page_id).await {
+                        if let Ok(mut parsed) = serde_json::from_str::<Value>(&existing_page.json_data) {
+                            page_count = parsed.get("count").and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+                            parsed.as_object_mut().unwrap().insert("count".to_string(), json!(page_count));
+                            existing_page_data = parsed;
+                        }
+                    }
+
+                    let _ = db.upsert_item(
+                        "pages", &page_id, "pages", existing_page_data, None,
+                        Some(&task.from), Some(&team_id), Some(&cc_val), Some(&task.bcc), Some(&task.r#ref), None
+                    ).await;
+                }
+            }
         }
 
         // 🌟 [채팅 말풍선 텍스트 반영] 추출된 제목과 설명이 있다면 이를 바탕으로 요약 텍스트를 구성합니다.
