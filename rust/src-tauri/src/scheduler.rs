@@ -2,7 +2,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use crate::store::{VectorStore, Task};
-use crate::logic;
 use crate::utils;
 use crate::parsing::{self, PugMode};
 use crate::model::LogisModel;
@@ -480,6 +479,127 @@ async fn process_task(
         }
     }
 
+    if task.r#type == "mask_documents" {
+        emit_term("[PROCESS] Starting batch masking for selected documents...");
+        
+        let uuids = task_data.get("uuids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        if uuids.is_empty() { return Ok(()); }
+        
+        let total = uuids.len();
+        for (idx, uuid_val) in uuids.iter().enumerate() {
+            if cancellation_token.load(Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
+            
+            let doc_id = uuid_val.as_str().unwrap_or("");
+            if doc_id.is_empty() { continue; }
+
+            let store = {
+                let store_guard = store_mutex.lock().await;
+                store_guard.as_ref().ok_or_else(|| anyhow::anyhow!("Store not initialized"))?.clone()
+            };
+
+            if let Ok(Some(doc)) = store.get_item_by_id("items", doc_id).await {
+                if doc.is_masked { continue; }
+
+                let payload = json!({
+                    "task_id": task.id,
+                    "category": format!("Processing ({}/{})", idx + 1, total),
+                    "summary": format!("Extracting data from draft {}...", doc_id),
+                    "spinner": "⠋"
+                });
+                log_task_progress(app_handle, &task.id, &payload);
+                emit_term(&format!("[EXTRACTION] Processing document: {}", doc_id));
+
+                let mut json_data: Value = serde_json::from_str(&doc.json_data).unwrap_or(json!({}));
+                let raw_html = json_data.get("html").and_then(|v| v.as_str()).unwrap_or("");
+                let is_image = raw_html.starts_with("data:image") || raw_html.starts_with("file://");
+
+                let mut extracted_json = json!({});
+
+                if is_image {
+                    model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
+                    
+                    let dynamic_image = if raw_html.starts_with("data:image") && raw_html.contains("base64,") {
+                        let data = raw_html.split("base64,").nth(1).unwrap_or("");
+                        crate::utils::img_utils::load_image_from_base64(data).ok()
+                    } else if raw_html.starts_with("file://") {
+                        let path = raw_html.replace("file://", "");
+                        image::open(&path).ok().map(|img| image::DynamicImage::ImageRgb8(img.to_rgb8()))
+                    } else {
+                        None
+                    };
+
+                    let prompt = "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {\"language\":\"korean\", \"image_text\":\"...\"} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string();
+
+                    let res_text = model.chat_with_qwen3_5_image_spinner(
+                        "You are a helpful extraction assistant.",
+                        &prompt,
+                        dynamic_image,
+                        app_handle,
+                        "extraction-progress",
+                        json!({ "category": format!("Vision Analysis ({}/{})", idx + 1, total), "summary": "Extracting text from image..." }),
+                        1024,
+                        Some(cancellation_token.clone()),
+                        Some(task.id.clone())
+                    ).await?;
+
+                    extracted_json = crate::parsing::parse_json_from_llm(&res_text);
+                } else {
+                    model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
+
+                    let target_text = json_data.get("yaml").and_then(|v| v.as_str()).unwrap_or(&doc.text);
+
+                    let prompt = format!(
+                        "[TASK] Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {}\n[ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think", 
+                        target_text
+                    );
+
+                    let params = crate::openai_types::ChatCompletionParameters {
+                        messages: vec![
+                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage {
+                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(prompt),
+                                name: None,
+                            })
+                        ],
+                        model: "qwen3.5".to_string(),
+                        max_tokens: Some(1024),
+                        temperature: Some(0.1),
+                        ..Default::default()
+                    };
+
+                    let res_text = if let Some(gen) = model.qwen3_5_generator.lock().await.as_mut() {
+                        gen.generate(params, Some(cancellation_token.clone()), None, None).await?
+                    } else {
+                        "".to_string()
+                    };
+
+                    extracted_json = crate::parsing::parse_json_from_llm(&res_text);
+                }
+
+                if !extracted_json.is_null() && !extracted_json.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                    json_data.as_object_mut().unwrap().insert("data".to_string(), extracted_json);
+                    json_data.as_object_mut().unwrap().insert("is_masked".to_string(), json!(true));
+
+                    let _ = store.upsert_item(
+                        "items", &doc.id, &doc.r#type, json_data, Some(doc.vector.clone()),
+                        Some(&doc.from), Some(&doc.to), Some(&doc.cc), Some(&doc.bcc), Some(&doc.r#ref), Some(&doc.digest)
+                    ).await;
+                }
+            }
+        }
+
+        let payload = json!({
+            "task_id": task.id,
+            "category": "Done",
+            "summary": "Extraction & Masking complete. Refreshing list...",
+            "spinner": "✅",
+            "data": null
+        });
+        
+        let _ = app_handle.emit("extraction-progress", &payload);
+        crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
+        return Ok(());
+    }
+
     let mut url = task_data.get("href")
         .or_else(|| task_data.get("link"))
         .and_then(|s| s.as_str())
@@ -585,7 +705,7 @@ async fn process_task(
 
     let clean_html_content = parsing::pre_clean_html(&raw_html_content);
     
-    let mut raw_pug = parsing::convert_to_clean_pug(&clean_html_content, PugMode::NoAttributesMode, Some(&url));
+    let raw_pug = parsing::convert_to_clean_pug(&clean_html_content, PugMode::NoAttributesMode, Some(&url));
 
     // 🌟 [추가된 로직] 무거운 LLM을 VRAM에 올리기 전에 draft 타입이면 html과 yaml(PUG)을 저장하고 즉시 종료합니다.
     if task.r#type == "draft" {
@@ -665,127 +785,6 @@ async fn process_task(
         crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
         
         emit_term("[PROCESS] Web page staged successfully as draft.");
-        return Ok(());
-    }
-
-    if task.r#type == "mask_documents" {
-        emit_term("[PROCESS] Starting batch masking for selected documents...");
-        
-        let uuids = task_data.get("uuids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        if uuids.is_empty() { return Ok(()); }
-        
-        let total = uuids.len();
-        for (idx, uuid_val) in uuids.iter().enumerate() {
-            if cancellation_token.load(Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
-            
-            let doc_id = uuid_val.as_str().unwrap_or("");
-            if doc_id.is_empty() { continue; }
-
-            let store = {
-                let store_guard = store_mutex.lock().await;
-                store_guard.as_ref().ok_or_else(|| anyhow::anyhow!("Store not initialized"))?.clone()
-            };
-
-            if let Ok(Some(mut doc)) = store.get_item_by_id("items", doc_id).await {
-                if doc.is_masked { continue; }
-
-                let payload = json!({
-                    "task_id": task.id,
-                    "category": format!("Processing ({}/{})", idx + 1, total),
-                    "summary": format!("Extracting data from draft {}...", doc_id),
-                    "spinner": "⠋"
-                });
-                log_task_progress(app_handle, &task.id, &payload);
-                emit_term(&format!("[EXTRACTION] Processing document: {}", doc_id));
-
-                let mut json_data: Value = serde_json::from_str(&doc.json_data).unwrap_or(json!({}));
-                let raw_html = json_data.get("html").and_then(|v| v.as_str()).unwrap_or("");
-                let is_image = raw_html.starts_with("data:image") || raw_html.starts_with("file://");
-
-                let mut extracted_json = json!({});
-
-                if is_image {
-                    model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
-                    
-                    let dynamic_image = if raw_html.starts_with("data:image") && raw_html.contains("base64,") {
-                        let data = raw_html.split("base64,").nth(1).unwrap_or("");
-                        crate::utils::img_utils::load_image_from_base64(data).ok()
-                    } else if raw_html.starts_with("file://") {
-                        let path = raw_html.replace("file://", "");
-                        image::open(&path).ok().map(|img| image::DynamicImage::ImageRgb8(img.to_rgb8()))
-                    } else {
-                        None
-                    };
-
-                    let prompt = "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {\"language\":\"korean\", \"image_text\":\"...\"} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string();
-
-                    let res_text = model.chat_with_qwen3_5_image_spinner(
-                        "You are a helpful extraction assistant.",
-                        &prompt,
-                        dynamic_image,
-                        app_handle,
-                        "extraction-progress",
-                        json!({ "category": format!("Vision Analysis ({}/{})", idx + 1, total), "summary": "Extracting text from image..." }),
-                        1024,
-                        Some(cancellation_token.clone()),
-                        Some(task.id.clone())
-                    ).await?;
-
-                    extracted_json = crate::parsing::parse_json_from_llm(&res_text);
-                } else {
-                    model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
-
-                    let target_text = json_data.get("yaml").and_then(|v| v.as_str()).unwrap_or(&doc.text);
-
-                    let prompt = format!(
-                        "[TASK] Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {}\n[ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think", 
-                        target_text
-                    );
-
-                    let params = crate::openai_types::ChatCompletionParameters {
-                        messages: vec![
-                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage {
-                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(prompt),
-                                name: None,
-                            })
-                        ],
-                        model: "qwen3.5".to_string(),
-                        max_tokens: Some(1024),
-                        temperature: Some(0.1),
-                        ..Default::default()
-                    };
-
-                    let res_text = if let Some(gen) = model.qwen3_5_generator.lock().await.as_mut() {
-                        gen.generate(params, Some(cancellation_token.clone()), None, None).await?
-                    } else {
-                        "".to_string()
-                    };
-
-                    extracted_json = crate::parsing::parse_json_from_llm(&res_text);
-                }
-
-                if !extracted_json.is_null() && !extracted_json.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                    json_data.as_object_mut().unwrap().insert("data".to_string(), extracted_json);
-                    json_data.as_object_mut().unwrap().insert("is_masked".to_string(), json!(true));
-
-                    let _ = store.upsert_item(
-                        "items", &doc.id, &doc.r#type, json_data, Some(doc.vector.clone()),
-                        Some(&doc.from), Some(&doc.to), Some(&doc.cc), Some(&doc.bcc), Some(&doc.r#ref), Some(&doc.digest)
-                    ).await;
-                }
-            }
-        }
-
-        let payload = json!({
-            "task_id": task.id,
-            "category": "Done",
-            "summary": "Extraction & Masking complete. Refreshing list...",
-            "spinner": "✅",
-            "data": null
-        });
-        
-        let _ = app_handle.emit("extraction-progress", &payload);
-        crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
         return Ok(());
     }
 

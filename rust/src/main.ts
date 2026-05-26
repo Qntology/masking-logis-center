@@ -3554,17 +3554,21 @@ function updateListActionButtons() {
     const btnDelete = document.getElementById("btn-delete-selected");
     const btnMask = document.getElementById("btn-mask-selected");
     const btnAll = document.getElementById("btn-all-selected");
+    const btnDrag = document.getElementById("btn-drag-export");
+    
+    const allCheckboxes = document.querySelectorAll('.item-select-checkbox');
     
     if (selectedUuids.size > 0) {
         if (btnDelete) btnDelete.style.display = "flex";
         if (btnMask) btnMask.style.display = "flex";
+        if (btnDrag) btnDrag.style.display = "flex";
     } else {
         if (btnDelete) btnDelete.style.display = "none";
         if (btnMask) btnMask.style.display = "none";
+        if (btnDrag) btnDrag.style.display = "none";
     }
     
     // 전체 선택 버튼 텍스트 상태 동기화 (All / None)
-    const allCheckboxes = document.querySelectorAll('.item-select-checkbox');
     if (btnAll && allCheckboxes.length > 0) {
         if (selectedUuids.size === allCheckboxes.length) {
             btnAll.innerText = "None";
@@ -3573,6 +3577,30 @@ function updateListActionButtons() {
         }
     }
 }
+
+// 🌟 [추가] 브라우저 JS가 아닌 Rust 백엔드에서 네이티브 OS 드래그를 시작하도록 mousedown 이벤트로 연결
+document.getElementById("btn-drag-export")?.addEventListener("mousedown", async (e) => {
+    e.preventDefault(); // 웹 브라우저의 기본 HTML5 드래그 방지
+    const allCheckboxes = document.querySelectorAll('.item-select-checkbox');
+    const fetchAll = selectedUuids.size === allCheckboxes.length && allCheckboxes.length > 0;
+            
+    let baseFilter = `mode = '${currentSearchMode}' AND updated_at >= 0`;
+    if (activeContext.ref) baseFilter = `(${baseFilter}) AND ref = '${activeContext.ref}'`;
+    else if (activeContext.bcc) baseFilter = `(${baseFilter}) AND bcc = '${activeContext.bcc}'`;
+    else if (activeContext.pathname && activeContext.cc) baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}' AND data LIKE '%${activeContext.pathname}%'`;
+    else if (activeContext.cc) baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}'`;
+
+    try {
+        // Rust 백엔드 호출: 즉각 파일 생성 후 OS 드래그 진입
+        await invoke("start_file_drag", {
+            uuids: Array.from(selectedUuids),
+            fetchAll: fetchAll,
+            filter: baseFilter
+        });
+    } catch (err) {
+        console.error("[DRAG] Failed to start native drag:", err);
+    }
+});
 
 function bindCardEvents(el: HTMLElement, doc: any) {
     const toggleCheckbox = el.querySelector('.toggle-more') as HTMLInputElement;

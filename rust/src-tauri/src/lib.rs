@@ -45,6 +45,71 @@ pub struct AppState {
 
 
 #[tauri::command]
+async fn start_file_drag(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    uuids: Vec<String>,
+    fetch_all: bool,
+    filter: Option<String>,
+) -> Result<(), String> {
+    let store_guard = state.store.lock().await;
+    if let Some(store) = store_guard.as_ref() {
+        let mut yaml_contents = Vec::new();
+
+        if fetch_all {
+            // 전체 선택 상태면 현재 필터에 맞는 모든 데이터 10,000건까지 추출
+            let docs = store.get_all_items("items", 10000, 0, filter).await.unwrap_or_default();
+            for doc in docs {
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
+                    if let Some(yaml) = json_val.get("yaml").and_then(|v| v.as_str()) {
+                        yaml_contents.push(yaml.to_string());
+                    }
+                }
+            }
+        } else {
+            // 일부 선택 상태면 화면에 체크된 문서의 데이터만 추출
+            for uuid in uuids {
+                if let Ok(Some(doc)) = store.get_item_by_id("items", &uuid).await {
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
+                        if let Some(yaml) = json_val.get("yaml").and_then(|v| v.as_str()) {
+                            yaml_contents.push(yaml.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        let combined_yaml = yaml_contents.join("\n---\n");
+        
+        // AppData/.../tmp/con.txt 에 기록
+        let file_path = crate::utils::paths::get_app_tmp_root(None).join("con.txt");
+        std::fs::write(&file_path, combined_yaml).map_err(|e| e.to_string())?;
+
+        // 🌟 Rust 백엔드에서 OS 네이티브 드래그 앤 드랍 트리거 (파일 물리적 이동 지원)
+        // 주의: 이 코드가 정상 작동하려면 프로젝트의 Cargo.toml 에 `drag = "2.1.1"` 크레이트가 추가되어 있어야 합니다.
+        let app_handle_clone = app_handle.clone();
+        let _ = app_handle.run_on_main_thread(move || {
+            if let Some(window) = app_handle_clone.get_webview_window("main") {
+                let item = vec![file_path.clone()];
+                
+                // drag 2.1.1 버전부터는 Tauri v2의 윈도우 핸들을 전 OS에서 완벽하게 단일 지원합니다.
+                let _ = drag::start_drag(
+                    &window,
+                    drag::DragItem::Files(item),
+                    drag::Image::Raw(vec![]),
+                    |_, _| {},
+                    drag::Options::default()
+                );
+            }
+        });
+
+        Ok(())
+    } else {
+        Err("DB not initialized".to_string())
+    }
+}
+
+#[tauri::command]
 async fn rename_search_mode(
     state: State<'_, AppState>,
     old_mode: String,
@@ -1926,7 +1991,7 @@ pub fn run() {
             upsert_items, set_ignore_cursor_events, mark_ui_ready, delete_document, delete_documents, delete_message, check_gpu_availability,
             save_mobile_temp_file, crate::utils::network::get_local_network_prefix, crate::utils::network::get_my_full_ip, connect_with_seed, start_listener_command, send_signal_offer, submit_signal_answer,
             get_active_task_context, check_model_status, download_model, delete_all_models,
-            rename_search_mode
+            rename_search_mode, start_file_drag
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
