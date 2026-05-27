@@ -622,9 +622,6 @@ async fn process_task(
 
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
                 if !target_text.is_empty() {
-                    model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
-
-                    // 🌟 16개의 마스킹 타겟 항목(Key) 문자열만 배열에 담습니다.
                     let target_items = vec![
                         // "person's given name",
                         // "person's middle name",
@@ -646,7 +643,27 @@ async fn process_task(
                     ];
 
                     let mut all_matches = Vec::new();
-                    masked_text = target_text.clone(); // 반복 마스킹을 위해 루프 진입 전 초기화
+                    masked_text = target_text.clone(); 
+                    
+                    let mask_session_id = format!("{}_{}_mask_base", task.id, doc_id);
+                    let mut system_content = format!("You are a precise privacy masking assistant.\n\n[PUG CONTENT]\n{}", masked_text);
+
+                    // --- STEP 0: BASE BAKING (루프 진입 전 공통 컨텍스트 1번 굽기) ---
+                    {
+                        if cancellation_token.load(Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
+                        
+                        println!("[Scheduler] Baking Base PUG Context to SSD for Masking...");
+                        log_task_progress(app_handle, &task.id, &json!({ "category": "Preparation", "summary": "Baking document structure...", "spinner": "⠋" }));
+                        
+                        model.secure_vram_relay(crate::model::ModelSize::Qwen, None, Some(cancellation_token.clone()), true, None).await?;
+                        
+                        if cancellation_token.load(Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
+
+                        if let Some(gen) = model.generator.lock().await.as_mut() {
+                            let raw_system_prefix = format!("<|im_start|>system\n{}<|im_end|>\n", system_content);
+                            gen.prefill_only(raw_system_prefix, Some(cancellation_token.clone()), Some(mask_session_id.clone()), None, None).await?;
+                        }
+                    }
 
                     // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
                     for (p_idx, key_name) in target_items.into_iter().enumerate() {
@@ -659,13 +676,15 @@ async fn process_task(
                             if loop_count > 20 { break; } 
                             loop_count += 1;
 
-                            // 🌟 현재까지 치환(마스킹)이 완료된 최신 텍스트와 추출할 키워드를 공통 프롬프트 빌더에 직접 주입합니다.
-                            let prompt = crate::parsing::build_masking_prompt(&masked_text, key_name);
+                            // 🌟 [BAKING STEP 2] 구워진 베이스 캐시(Session)를 VRAM으로 즉시 불러옵니다.
+                            model.secure_vram_relay(crate::model::ModelSize::Qwen, Some(&mask_session_id), Some(cancellation_token.clone()), false, None).await?;
 
-                            let res_mask = model.chat_with_qwen3_5_image_spinner(
-                                "You are a precise privacy masking assistant.",
-                                &prompt,
-                                None,
+                            // 🌟 User 메시지에는 아주 가벼운(50토큰 미만) 추출 지시문만 할당합니다.
+                            let user_prompt = crate::parsing::build_masking_prompt(key_name);
+
+                            let res_mask = model.chat_with_spinner(
+                                &system_content, // 🌟 구워진 내용과 토씨 하나 틀리지 않게 System으로 주입하여 캐시 적중(Hit) 유도
+                                &user_prompt,    // 🌟 가벼운 추출 지시문만 연산됨
                                 app_handle,
                                 "extraction-progress",
                                 json!({ 
@@ -674,8 +693,13 @@ async fn process_task(
                                 }),
                                 1024,
                                 Some(cancellation_token.clone()),
-                                Some(format!("{}_{}_mask_{}_{}", task.id, doc_id, p_idx, loop_count))
+                                Some(format!("{}_{}_mask_{}_{}", task.id, doc_id, p_idx, loop_count)), // 🌟 답변 저장용 임시 세션 (베이스는 건드리지 않음)
+                                None
                             ).await?;
+
+                            // 🌟 [추가] 모델이 실제로 뱉어낸 JSON 결과값을 터미널 로그로 출력하여 확인합니다.
+                            println!("[DEBUG-MASKING] 타겟 항목: '{}' (루프 {}회차)", key_name, loop_count);
+                            println!("[DEBUG-MASKING] LLM 원본 응답:\n{}", res_mask);
 
                             let parsed = crate::parsing::parse_json_from_llm(&res_mask);
                             
@@ -700,6 +724,19 @@ async fn process_task(
                                 "value": extracted_val,
                                 "mnemonic": mnemonic
                             }));
+                            
+                            // 🌟 [핵심] 텍스트가 치환(변경)되었으므로, 다음 루프를 위해 새로운 본문으로 캐시를 다시 굽습니다.
+                            {
+                                system_content = format!("You are a precise privacy masking assistant.\n\n[PUG CONTENT]\n{}", masked_text);
+                                
+                                println!("[Scheduler] Re-baking updated PUG Context to SSD...");
+                                model.secure_vram_relay(crate::model::ModelSize::Qwen, None, Some(cancellation_token.clone()), true, None).await?;
+                                
+                                if let Some(gen) = model.generator.lock().await.as_mut() {
+                                    let raw_system_prefix = format!("<|im_start|>system\n{}<|im_end|>\n", system_content);
+                                    gen.prefill_only(raw_system_prefix, Some(cancellation_token.clone()), Some(mask_session_id.clone()), None, None).await?;
+                                }
+                            }
                         }
                     }
 
