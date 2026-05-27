@@ -773,30 +773,13 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
     all_headers
 }
 
-pub fn split_html_to_pug_list(html: &str, selector_str: &str, mode: PugMode) -> Vec<String> {
-    let document = Html::parse_document(html);
-    split_doc_to_pug_list(&document, selector_str, mode)
-}
+// pub fn split_html_to_pug_list(html: &str, selector_str: &str, mode: PugMode) -> Vec<String> {
+//     let document = Html::parse_document(html);
+//     split_doc_to_pug_list(&document, selector_str, mode)
+// }
 
-pub fn build_masking_prompt(target_item: &str) -> String {
-    let template = r###"Extract the {TARGET_ITEM}
-
-[OUTPUT FORMAT]
-{
-    "header": Boolean,
-    "footer": Boolean,
-    "{TARGET_ITEM}": "..."
-}
-RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
-
-    template.replace("{TARGET_ITEM}", target_item)
-}
-
-// pub fn build_masking_prompt(pug_content: &str, target_item: &str) -> String {
+// pub fn build_masking_prompt(target_item: &str) -> String {
 //     let template = r###"Extract the {TARGET_ITEM}
-
-// [PUG CONTENT]
-// {PUG_CONTENT}
 
 // [OUTPUT FORMAT]
 // {
@@ -807,8 +790,25 @@ RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
 // RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
 
 //     template.replace("{TARGET_ITEM}", target_item)
-//             .replace("{PUG_CONTENT}", pug_content)
 // }
+
+pub fn build_masking_prompt(pug_content: &str, target_item: &str) -> String {
+    let template = r###"Extract the {TARGET_ITEM}
+
+[PUG CONTENT]
+{PUG_CONTENT}
+
+[OUTPUT FORMAT]
+{
+    "header": Boolean,
+    "footer": Boolean,
+    "{TARGET_ITEM}": "..."
+}
+RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
+
+    template.replace("{TARGET_ITEM}", target_item)
+            .replace("{PUG_CONTENT}", pug_content)
+}
 
 pub fn ocr_image_prompt() -> String { r###"[TASK] Extract text from image and return as JSON format. 
 
