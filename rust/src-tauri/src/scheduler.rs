@@ -622,67 +622,83 @@ async fn process_task(
 
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
                 if !target_text.is_empty() {
-                    // 🌟 [CRITICAL FIX] 웹페이지 PUG 등 거대한 텍스트로 인한 VRAM 오버플로우 및 무한 대기(프리징) 방지
-                    let safe_text = model.truncate_pug_context(&target_text, false, 4000, None).await;
-
                     model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
 
-                    // 🌟 분리된 타입별 마스킹 프롬프트를 모두 배열에 담습니다.
-                    let prompts = vec![
-                        crate::parsing::masking_personal_prompt(&safe_text),
-                        crate::parsing::masking_occupational_prompt(&safe_text),
-                        crate::parsing::masking_address_prompt(&safe_text),
-                        crate::parsing::masking_financial_prompt(&safe_text),
-                        crate::parsing::masking_security_prompt(&safe_text),
-                        crate::parsing::masking_vehicle_prompt(&safe_text),
-                        crate::parsing::masking_device_prompt(&safe_text),
+                    // 🌟 16개의 마스킹 타겟 항목(Key) 문자열만 배열에 담습니다.
+                    let target_items = vec![
+                        "person's given name",
+                        "person's middle name",
+                        "person's family name or surname",
+                        "person's name",
+                        "person's age",
+                        "person's gender identity",
+                        "person's biological sex",
+                        "the color of a person's eyes",
+                        "person's physical height",
+                        "person's username",
+                        "person's profession or field of work",
+                        "person's specific job position or role",
+                        "person's specific organizational division or department",
+                        "person's the name of a company, institution, or group",
+                        "email",
+                        "contact number",
                     ];
 
                     let mut all_matches = Vec::new();
+                    masked_text = target_text.clone(); // 반복 마스킹을 위해 루프 진입 전 초기화
 
-                    // 🌟 여러 번 순차적으로 처리하여 결과를 합칩니다.
-                    for (p_idx, prompt) in prompts.iter().enumerate() {
+                    // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
+                    for (p_idx, key_name) in target_items.into_iter().enumerate() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
-
-                        let res_mask = model.chat_with_qwen3_5_image_spinner(
-                            "You are a precise privacy masking assistant.",
-                            prompt,
-                            None,
-                            app_handle,
-                            "extraction-progress",
-                            json!({ 
-                                "category": format!("Masking ({}/{}) - Type {}", idx + 1, total, p_idx + 1), 
-                                "summary": "Anonymizing sensitive data..." 
-                            }),
-                            1024,
-                            Some(cancellation_token.clone()),
-                            Some(format!("{}_{}_mask_{}", task.id, doc_id, p_idx))
-                        ).await?;
-
-                        let parsed = crate::parsing::parse_json_from_llm(&res_mask);
                         
-                        // 각 호출에서 추출된 matches 배열을 하나의 all_matches에 병합합니다.
-                        if let Some(matches_arr) = parsed.get("matches").and_then(|v| v.as_array()) {
-                            all_matches.extend(matches_arr.clone());
-                        }
-                    }
+                        let mut loop_count = 0; // 무한 루프 방지용 (최대 20개 탐색)
 
-                    // 🌟 [추가] 추출된 마스킹 대상에 니모닉을 부여하고 실제 텍스트를 치환합니다.
-                    masked_text = target_text.clone(); // 여기서는 이미 선언된 변수에 값만 덮어씌웁니다.
-                    for match_item in all_matches.iter_mut() {
-                        if let Some(obj) = match_item.as_object_mut() {
-                            if let (Some(name), Some(val)) = (obj.get("name").and_then(|v| v.as_str()), obj.get("value").and_then(|v| v.as_str())) {
-                                
-                                // 파싱 모듈에 추가한 니모닉 생성 함수 호출
-                                let mnemonic = crate::parsing::generate_mnemonic();
-                                
-                                // 원본 텍스트를 마스킹 포맷으로 치환 (예: 3층 102-22 -> [SECONDARY ADDRESS: absolve-zipfile])
-                                let replacement = format!("[{}: {}]", name, mnemonic);
-                                masked_text = masked_text.replace(val, &replacement);
-                                
-                                // 나중에 원본 추적이나 관리가 필요할 수 있으므로, JSON data 객체 안에도 해당 니모닉 값을 쌍으로 저장해 둡니다.
-                                obj.insert("mnemonic".to_string(), json!(mnemonic));
+                        loop {
+                            if cancellation_token.load(Ordering::Relaxed) { break; }
+                            if loop_count > 20 { break; } 
+                            loop_count += 1;
+
+                            // 🌟 현재까지 치환(마스킹)이 완료된 최신 텍스트와 추출할 키워드를 공통 프롬프트 빌더에 직접 주입합니다.
+                            let prompt = crate::parsing::build_masking_prompt(&masked_text, key_name);
+
+                            let res_mask = model.chat_with_qwen3_5_image_spinner(
+                                "You are a precise privacy masking assistant.",
+                                &prompt,
+                                None,
+                                app_handle,
+                                "extraction-progress",
+                                json!({ 
+                                    "category": format!("Masking ({}/{}) - Type {}", idx + 1, total, p_idx + 1), 
+                                    "summary": format!("Anonymizing {} (iter {})...", key_name, loop_count)
+                                }),
+                                1024,
+                                Some(cancellation_token.clone()),
+                                Some(format!("{}_{}_mask_{}_{}", task.id, doc_id, p_idx, loop_count))
+                            ).await?;
+
+                            let parsed = crate::parsing::parse_json_from_llm(&res_mask);
+                            
+                            // 추출된 값이 있는지, 그리고 그 값이 현재 PUG_CONTENT(masked_text)에 실제로 존재하는지 확인
+                            let extracted_val = parsed.get(key_name).and_then(|v| v.as_str()).unwrap_or("");
+                            
+                            if extracted_val.is_empty() || extracted_val == "..." || !masked_text.contains(extracted_val) {
+                                break; // 빈 값이거나 본문에 존재하지 않으면 루프 탈출 -> 다음 프롬프트(항목)로 이동
                             }
+
+                            // 🌟 마스킹 니모닉 생성 및 즉시 치환 (이후 루프의 PUG_CONTENT 프롬프트에 즉시 반영됨)
+                            let mnemonic = crate::parsing::generate_mnemonic();
+                            let upper_key = key_name.to_uppercase();
+                            
+                            // 원본 텍스트를 마스킹 포맷으로 즉시 치환 (예: 010-1234 -> [CONTACT NUMBER: secure-data])
+                            let replacement = format!("[{}: {}]", upper_key, mnemonic);
+                            masked_text = masked_text.replace(extracted_val, &replacement);
+
+                            // 최종 저장용 JSON 객체를 all_matches 배열에 기록
+                            all_matches.push(json!({
+                                "name": upper_key,
+                                "value": extracted_val,
+                                "mnemonic": mnemonic
+                            }));
                         }
                     }
 
