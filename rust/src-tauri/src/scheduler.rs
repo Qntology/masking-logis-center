@@ -576,7 +576,7 @@ async fn process_task(
                         None
                     };
 
-                    let ocr_prompt = "[TASK] Extract text from image and return as JSON format. [OUTPUT FORMAT] {\"language\":\"korean\", \"image_text\":\"...\"} [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think".to_string();
+                    let ocr_prompt = crate::parsing::ocr_image_prompt();
 
                     let res_ocr = model.chat_with_qwen3_5_image_spinner(
                         "You are a helpful extraction assistant.",
@@ -603,32 +603,25 @@ async fn process_task(
 
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
                 if !target_text.is_empty() {
+                    // 🌟 [CRITICAL FIX] 웹페이지 PUG 등 거대한 텍스트로 인한 VRAM 오버플로우 및 무한 대기(프리징) 방지
+                    let safe_text = model.truncate_pug_context(&target_text, false, 4000, None).await;
+
                     model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
 
-                    let mask_prompt = format!(
-                        "[TASK] Extract sensitive personal information from the text and return as a JSON object.\nUse ONLY the following labels based on these categories:\n- Identity: FIRSTNAME, MIDDLENAME, LASTNAME, PREFIX, AGE, GENDER, SEX, EYECOLOR, HEIGHT, USERNAME, OCCUPATION, JOBTITLE, JOBDEPARTMENT, ORGANIZATION, USERAGENT\n- Contact: EMAIL, PHONE, URL\n- Address: STREET, BUILDINGNUMBER, SECONDARYADDRESS, CITY, COUNTY, STATE, ZIPCODE, GPSCOORDINATES, ORDINALDIRECTION\n- Dates & time: DATE, DATEOFBIRTH, TIME\n- Government IDs: SSN\n- Financial: ACCOUNTNAME, BANKACCOUNT, IBAN, BIC, CREDITCARD, CREDITCARDISSUER, CVV, PIN, MASKEDNUMBER, AMOUNT, CURRENCY, CURRENCYCODE, CURRENCYNAME, CURRENCYSYMBOL\n- Crypto: BITCOINADDRESS, ETHEREUMADDRESS, LITECOINADDRESS\n- Vehicle: VIN, VRM\n- Digital: IPADDRESS, MACADDRESS, IMEI\n- Auth: PASSWORD\n\nRETURN JSON ONLY. The format must be a JSON object with a single key 'items' holding an array of objects. In each object, the key is the label and the value is the exact matched word. If none, return {{\"items\": []}}.\n\nText: {}\n[ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think", 
-                        target_text
-                    );
+                    let personal_prompt = crate::parsing::masking_personal_prompt(&safe_text);
 
-                    let params = crate::openai_types::ChatCompletionParameters {
-                        messages: vec![
-                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage {
-                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(mask_prompt),
-                                name: None,
-                            })
-                        ],
-                        model: "qwen3.5".to_string(),
-                        max_tokens: Some(1024),
-                        temperature: Some(0.1),
-                        ..Default::default()
-                    };
-
-                    let res_mask = if let Some(gen) = model.qwen3_5_generator.lock().await.as_mut() {
-                        let session_id = format!("{}_{}_mask", task.id, doc_id);
-                        gen.generate(params, Some(cancellation_token.clone()), Some(session_id), Some("inference".to_string())).await?
-                    } else {
-                        "".to_string()
-                    };
+                    // 🌟 [CRITICAL FIX] UI에 스피너(진행률)를 노출하고 System 프롬프트를 포함하여 안전하게 추론을 시작합니다.
+                    let res_mask = model.chat_with_qwen3_5_image_spinner(
+                        "You are a precise privacy masking assistant.",
+                        &personal_prompt,
+                        None,
+                        app_handle,
+                        "extraction-progress",
+                        json!({ "category": format!("Masking ({}/{})", idx + 1, total), "summary": "Anonymizing sensitive data..." }),
+                        1024,
+                        Some(cancellation_token.clone()),
+                        Some(format!("{}_{}_mask", task.id, doc_id))
+                    ).await?;
 
                     extracted_json = crate::parsing::parse_json_from_llm(&res_mask);
                 }

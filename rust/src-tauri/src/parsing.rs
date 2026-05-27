@@ -778,6 +778,63 @@ pub fn split_html_to_pug_list(html: &str, selector_str: &str, mode: PugMode) -> 
     split_doc_to_pug_list(&document, selector_str, mode)
 }
 
+pub fn masking_personal_prompt(pug_content: &str) -> String  { 
+    let template = r###"[TASK]
+Analyze the provided PUG or HTML content. Your goal is to populate the predefined categories by mapping values to their corresponding labels.
+
+[PUG CONTENT]
+{PUG_CONTENT}
+
+[LABEL FORMAT DEFINITIONS]
+- USERNAME: Must be an alphanumeric string used for account identification.
+- PASSWORD: Must be a string of characters used for authentication.
+- FIRSTNAME: Must be a character string representing a person's given name.
+- MIDDLENAME: Must be a character string representing a person's middle name.
+- LASTNAME: Must be a character string representing a person's family name or surname.
+- PREFIX: Must be a character string representing a title preceding a person's name.
+- EMAIL: Must be a standard email address format containing a local part, an '@' symbol, and a domain.
+- PHONE: Must be a valid phone number containing digits, optionally with country codes, area codes, or hyphens.
+- AGE: Must be a numeric value representing a person's age.
+- GENDER: Must be a character string representing social gender identity.
+- SEX: Must be a character string representing biological sex.
+- HEIGHT: Must be a numeric value or string representing physical height, often with a unit.
+
+
+
+[MAPPING RULES]
+1. Primary Source (textContent): Strictly analyze and extract values from visible text nodes and content between tags. This is the highest priority source for mapping.
+2. Secondary Source (Attributes & Variables): Identify supplemental values hidden in PUG/HTML attributes and template variables.
+3. Populate Labels: Extract and assign values that strictly match the expected format of each predefined label.
+4. Omit Undefined & Empty: ONLY return labels that have a matching value found in the source. Do not include labels from the list that were not found. Do not invent new labels.
+
+[SCHEMA DEFINITIONS]
+matches:Array.
+    - label:Object. 
+        - name: label name.
+        - value: extracted label format value
+
+[OUTPUT FORMAT]
+{
+    matches : [...]
+}
+
+[ACTION]
+RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
+
+    template.replace("{PUG_CONTENT}", &pug_content)
+}
+
+pub fn ocr_image_prompt() -> String { r###"[TASK] Extract text from image and return as JSON format. 
+
+[OUTPUT FORMAT] 
+{
+    "data":{...},
+    "text":"..."
+} 
+
+[ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think"###.to_string() 
+}
+
 pub fn page_type_prompt() -> String { r###"[TASK]
 Based on the provided Pug template, identify the primary category of this webpage.
 
