@@ -42,7 +42,7 @@ pub struct AppConfig {
 impl VectorStore {
     // 🌟 [추가] 카테고리(모드) 커스터마이징 시 기존 문서들의 mode 값을 일괄 갱신합니다.
     pub async fn rename_mode(&self, old_mode: &str, new_mode: &str) -> Result<()> {
-        let tables = vec!["items", "sales", "tracking", "event", "users", "pages"];
+        let tables = vec!["items", "users", "pages"];
         for table_name in tables {
             if let Ok(table) = self.conn.open_table(table_name).execute().await {
                 // old_mode와 일치하는 레코드들의 mode 컬럼을 new_mode로 덮어씌웁니다.
@@ -413,9 +413,6 @@ impl VectorStore {
     pub async fn delete_item(&self, table_name: &str, id: &str) -> Result<()> {
         
         let target = match table_name {
-            "sales" | "goods" | "order" => "sales",
-            "tracking" | "receiving" | "shipping" => "tracking",
-            "event" | "coupon" => "event",
             "member" | "team" | "user" => "users",
             "talk" | "prompt" | "ai_search" => "talks",
             "pages" => "pages",
@@ -431,9 +428,6 @@ impl VectorStore {
     pub async fn delete_items(&self, table_name: &str, ids: Vec<String>) -> Result<()> {
         
         let target = match table_name {
-            "sales" | "goods" | "order" => "sales",
-            "tracking" | "receiving" | "shipping" => "tracking",
-            "event" | "coupon" => "event",
             "member" | "team" | "user" => "users",
             "talk" | "prompt" | "ai_search" => "talks",
             "pages" => "pages",
@@ -448,7 +442,7 @@ impl VectorStore {
     }
     
     pub async fn init_all_tables(&self) -> Result<()> {
-        let tables = vec!["items", "sales", "tracking", "event", "users", "pages"];
+        let tables = vec!["items", "users", "pages"];
         let item_field = Field::new("item", DataType::Float32, true);
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -817,9 +811,6 @@ impl VectorStore {
     pub async fn find_item_by_property(&self, table_name: &str, property: &str, value: &Value) -> Result<Option<(String, Value)>> {
         
         let target = match table_name {
-            "sales" | "goods" | "order" => "sales",
-            "tracking" | "receiving" | "shipping" => "tracking",
-            "event" | "coupon" => "event",
             "member" | "team" | "user" => "users",
             "talk" | "prompt" | "ai_search" => "talks",
             "pages" => "pages",

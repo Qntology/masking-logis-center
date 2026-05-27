@@ -697,7 +697,7 @@ async fn get_document(
 ) -> Result<Option<TradeDocument>, String> {
     let store_guard = state.store.lock().await;
     if let Some(store) = store_guard.as_ref() {
-        let tables = vec!["items", "sales", "tracking", "event", "users", "pages"];
+        let tables = vec!["items", "users", "pages"];
         
         // 🌟 [Draft 검색 결과 반영] 반복되는 Draft 판별 로직을 깔끔하게 클로저로 분리합니다.
         let apply_draft_text = |doc: &mut TradeDocument, json_val: &serde_json::Value| {
@@ -810,7 +810,7 @@ async fn delete_document(
         }
 
         // [DETAIL] 'items' 테이블뿐만 아니라 다른 가능한 테이블에서도 삭제 시도
-        let tables = vec!["items", "sales", "tracking", "event", "users", "pages"];
+        let tables = vec!["items", "users", "pages"];
         for table in tables {
             let _ = store.delete_item(table, &uuid).await;
         }
@@ -864,7 +864,7 @@ async fn delete_documents(
             }
         }
         
-        let tables = vec!["items", "sales", "tracking", "event", "users", "pages"];
+        let tables = vec!["items", "users", "pages"];
         for table in tables {
             let _ = store.delete_items(table, uuids.clone()).await;
         }
@@ -1644,9 +1644,6 @@ async fn upsert_items(state: State<'_, AppState>, items: Vec<Value>) -> Result<S
 
             // Determine table based on cleaned type
             let final_table = match type_str.as_str() {
-                "sales" | "goods" | "order" => "sales",
-                "tracking" | "receiving" | "shipping" => "tracking",
-                "event" | "coupon" => "event",
                 "member" | "team" | "user" => "users",
                 "talk" | "prompt" | "ai_search" => "talks", 
                 "pages" | "page" => "pages", 
@@ -1818,7 +1815,7 @@ async fn check_model_status() -> Result<serde_json::Value, String> {
     };
     
     let qwen3_dir = base_path.join("Qwen3-0.6B-Instruct-gguf");
-    let qwen3_5_dir = base_path.join("Qwen3.5-4B-Instruct-gguf");
+    let qwen3_5_dir = base_path.join("Qwen3.5-2B-Instruct-gguf");
     let embed_dir = base_path.join("embeddinggemma-300m");
 
     Ok(serde_json::json!({
@@ -1848,7 +1845,7 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
 
         let folder_name = match model_name.as_str() {
             "Qwen3" => "Qwen3-0.6B-Instruct-gguf",
-            "Qwen3.5" => "Qwen3.5-4B-Instruct-gguf",
+            "Qwen3.5" => "Qwen3.5-2B-Instruct-gguf",
             "Embedding" => "embeddinggemma-300m",
             _ => "unknown"
         };
@@ -1864,8 +1861,8 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
                 ("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf", "Qwen3-0.6B-Q8_0.gguf")
             ],
             "Qwen3.5" => vec![
-                ("https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/mmproj-BF16.gguf", "mmproj-BF16.gguf"),
-                ("https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q8_0.gguf", "Qwen3.5-4B-Q8_0.gguf")
+                ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-BF16.gguf", "mmproj-BF16.gguf"),
+                ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q8_0.gguf", "Qwen3.5-2B-Q8_0.gguf")
             ],
             "Embedding" => vec![
                 ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300m-Q4_0.gguf", "embeddinggemma-300m-Q4_0.gguf")

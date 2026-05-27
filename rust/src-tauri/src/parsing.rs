@@ -799,7 +799,221 @@ Analyze the provided PUG or HTML content. Your goal is to populate the predefine
 - SEX: Must be a character string representing biological sex.
 - HEIGHT: Must be a numeric value or string representing physical height, often with a unit.
 
+[MAPPING RULES]
+1. Primary Source (textContent): Strictly analyze and extract values from visible text nodes and content between tags. This is the highest priority source for mapping.
+2. Secondary Source (Attributes & Variables): Identify supplemental values hidden in PUG/HTML attributes and template variables.
+3. Populate Labels: Extract and assign values that strictly match the expected format of each predefined label.
+4. Omit Undefined & Empty: ONLY return labels that have a matching value found in the source. Do not include labels from the list that were not found. Do not invent new labels.
 
+[SCHEMA DEFINITIONS]
+matches:Array.
+    - label:Object. 
+        - name: label name.
+        - value: extracted label format value
+
+[OUTPUT FORMAT]
+{
+    matches : [...]
+}
+
+[ACTION]
+RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
+
+    template.replace("{PUG_CONTENT}", &pug_content)
+}
+
+pub fn masking_occupational_prompt(pug_content: &str) -> String  { 
+    let template = r###"[TASK]
+Analyze the provided PUG or HTML content. Your goal is to populate the predefined categories by mapping values to their corresponding labels.
+
+[PUG CONTENT]
+{PUG_CONTENT}
+
+[LABEL FORMAT DEFINITIONS]
+- OCCUPATION: Must be a character string describing a person's profession or field of work.
+- JOBTITLE: Must be a character string representing a specific job position or role.
+- JOBDEPARTMENT: Must be a character string representing a specific organizational division or department.
+- ORGANIZATION: Must be a character string representing the name of a company, institution, or group.
+
+[MAPPING RULES]
+1. Primary Source (textContent): Strictly analyze and extract values from visible text nodes and content between tags. This is the highest priority source for mapping.
+2. Secondary Source (Attributes & Variables): Identify supplemental values hidden in PUG/HTML attributes and template variables.
+3. Populate Labels: Extract and assign values that strictly match the expected format of each predefined label.
+4. Omit Undefined & Empty: ONLY return labels that have a matching value found in the source. Do not include labels from the list that were not found. Do not invent new labels.
+
+[SCHEMA DEFINITIONS]
+matches:Array.
+    - label:Object. 
+        - name: label name.
+        - value: extracted label format value
+
+[OUTPUT FORMAT]
+{
+    matches : [...]
+}
+
+[ACTION]
+RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
+
+    template.replace("{PUG_CONTENT}", &pug_content)
+}
+
+pub fn masking_address_prompt(pug_content: &str) -> String  { 
+    let template = r###"[TASK]
+Analyze the provided PUG or HTML content. Your goal is to populate the predefined categories by mapping values to their corresponding labels.
+
+[PUG CONTENT]
+{PUG_CONTENT}
+
+[LABEL FORMAT DEFINITIONS]
+- STREET: Must be a character string representing the name of a street or road.
+- BUILDING NUMBER: Must be a numeric or alphanumeric string identifying a specific building.
+- SECONDARY ADDRESS: Must be a character string detailing secondary location information like an apartment, suite, or unit number.
+- CITY: Must be a character string representing the name of a city or town.
+- COUNTY: Must be a character string representing a county, district, or similar regional division.
+- STATE: Must be a character string representing a state, province, or primary administrative region.
+- ZIPCODE: Must be an alphanumeric code used for postal sorting and delivery.
+
+[MAPPING RULES]
+1. Primary Source (textContent): Strictly analyze and extract values from visible text nodes and content between tags. This is the highest priority source for mapping.
+2. Secondary Source (Attributes & Variables): Identify supplemental values hidden in PUG/HTML attributes and template variables.
+3. Populate Labels: Extract and assign values that strictly match the expected format of each predefined label.
+4. Omit Undefined & Empty: ONLY return labels that have a matching value found in the source. Do not include labels from the list that were not found. Do not invent new labels.
+
+[SCHEMA DEFINITIONS]
+matches:Array.
+    - label:Object. 
+        - name: label name.
+        - value: extracted label format value
+
+[OUTPUT FORMAT]
+{
+    matches : [...]
+}
+
+[ACTION]
+RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
+
+    template.replace("{PUG_CONTENT}", &pug_content)
+}
+
+pub fn masking_financial_prompt(pug_content: &str) -> String  { 
+    let template = r###"[TASK]
+Analyze the provided PUG or HTML content. Your goal is to populate the predefined categories by mapping values to their corresponding labels.
+
+[PUG CONTENT]
+{PUG_CONTENT}
+
+[LABEL FORMAT DEFINITIONS]
+- ACCOUNTNAME: Must be a character string representing the name of the account holder.
+- BANKACCOUNT: Must be a numeric string representing a bank account number.
+- IBAN: Must be an alphanumeric string conforming to the International Bank Account Number format.
+- CREDIT CARD: Must be a numeric string representing a payment card number.
+- CREDITCARD ISSUER: Must be a character string representing the network or institution that issued the payment card.
+
+[MAPPING RULES]
+1. Primary Source (textContent): Strictly analyze and extract values from visible text nodes and content between tags. This is the highest priority source for mapping.
+2. Secondary Source (Attributes & Variables): Identify supplemental values hidden in PUG/HTML attributes and template variables.
+3. Populate Labels: Extract and assign values that strictly match the expected format of each predefined label.
+4. Omit Undefined & Empty: ONLY return labels that have a matching value found in the source. Do not include labels from the list that were not found. Do not invent new labels.
+
+[SCHEMA DEFINITIONS]
+matches:Array.
+    - label:Object. 
+        - name: label name.
+        - value: extracted label format value
+
+[OUTPUT FORMAT]
+{
+    matches : [...]
+}
+
+[ACTION]
+RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
+
+    template.replace("{PUG_CONTENT}", &pug_content)
+}
+
+pub fn masking_security_prompt(pug_content: &str) -> String  { 
+    let template = r###"[TASK]
+Analyze the provided PUG or HTML content. Your goal is to populate the predefined categories by mapping values to their corresponding labels.
+
+[PUG CONTENT]
+{PUG_CONTENT}
+
+[LABEL FORMAT DEFINITIONS]
+- CVV: Must be a 3- or 4-digit numeric security code for a payment card.
+- PIN: Must be a numeric string representing a Personal Identification Number.
+- MASKED NUMBER: Must be an alphanumeric string where some characters are replaced by masking symbols like '*' or 'X'.
+
+[MAPPING RULES]
+1. Primary Source (textContent): Strictly analyze and extract values from visible text nodes and content between tags. This is the highest priority source for mapping.
+2. Secondary Source (Attributes & Variables): Identify supplemental values hidden in PUG/HTML attributes and template variables.
+3. Populate Labels: Extract and assign values that strictly match the expected format of each predefined label.
+4. Omit Undefined & Empty: ONLY return labels that have a matching value found in the source. Do not include labels from the list that were not found. Do not invent new labels.
+
+[SCHEMA DEFINITIONS]
+matches:Array.
+    - label:Object. 
+        - name: label name.
+        - value: extracted label format value
+
+[OUTPUT FORMAT]
+{
+    matches : [...]
+}
+
+[ACTION]
+RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
+
+    template.replace("{PUG_CONTENT}", &pug_content)
+}
+
+pub fn masking_vehicle_prompt(pug_content: &str) -> String  { 
+    let template = r###"[TASK]
+Analyze the provided PUG or HTML content. Your goal is to populate the predefined categories by mapping values to their corresponding labels.
+
+[PUG CONTENT]
+{PUG_CONTENT}
+
+[LABEL FORMAT DEFINITIONS]
+- VIN: Must be a 17-character alphanumeric string representing a Vehicle Identification Number.
+- VRM: Must be an alphanumeric string representing a Vehicle Registration Mark or license plate.
+
+[MAPPING RULES]
+1. Primary Source (textContent): Strictly analyze and extract values from visible text nodes and content between tags. This is the highest priority source for mapping.
+2. Secondary Source (Attributes & Variables): Identify supplemental values hidden in PUG/HTML attributes and template variables.
+3. Populate Labels: Extract and assign values that strictly match the expected format of each predefined label.
+4. Omit Undefined & Empty: ONLY return labels that have a matching value found in the source. Do not include labels from the list that were not found. Do not invent new labels.
+
+[SCHEMA DEFINITIONS]
+matches:Array.
+    - label:Object. 
+        - name: label name.
+        - value: extracted label format value
+
+[OUTPUT FORMAT]
+{
+    matches : [...]
+}
+
+[ACTION]
+RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
+
+    template.replace("{PUG_CONTENT}", &pug_content)
+}
+
+pub fn masking_device_prompt(pug_content: &str) -> String  { 
+    let template = r###"[TASK]
+Analyze the provided PUG or HTML content. Your goal is to populate the predefined categories by mapping values to their corresponding labels.
+
+[PUG CONTENT]
+{PUG_CONTENT}
+
+[LABEL FORMAT DEFINITIONS]
+- IP ADDRESS: Must be a valid IPv4 or IPv6 address format.
+- MAC ADDRESS: Must be a 12-character hexadecimal string representing a Media Access Control address.
+- IMEI: Must be a 15-digit numeric string representing an International Mobile Equipment Identity.
 
 [MAPPING RULES]
 1. Primary Source (textContent): Strictly analyze and extract values from visible text nodes and content between tags. This is the highest priority source for mapping.
@@ -2008,4 +2222,24 @@ Fill out the JSON keys in the exact order specified below. Use 'analysis_*' keys
 }
 
 [ACTION] RETURN JSON ONLY. NO EXPLANATION. /no_think"###.to_string()
+}
+
+
+pub fn generate_mnemonic() -> String {
+    use rand::seq::SliceRandom;
+    let mut rng = rand::thread_rng();
+
+    // 빌드 시점에 상위 폴더에 있는 텍스트 파일을 정적 문자열로 포함합니다.
+    let adjs = include_str!("../adjectives.txt");
+    let nouns = include_str!("../nouns.txt");
+
+    // 각 줄을 순회하며 공백을 기준으로 쪼갠 뒤, 두 번째 값(실제 영어 단어)만 필터링하여 배열로 만듭니다.
+    let adj_list: Vec<&str> = adjs.lines().filter_map(|l| l.split_whitespace().nth(1)).collect();
+    let noun_list: Vec<&str> = nouns.lines().filter_map(|l| l.split_whitespace().nth(1)).collect();
+
+    // 각각 랜덤으로 하나씩 뽑고, 예외 상황을 방지하기 위해 기본값을 설정합니다.
+    let adj = adj_list.choose(&mut rng).unwrap_or(&"secure");
+    let noun = noun_list.choose(&mut rng).unwrap_or(&"data");
+
+    format!("{}-{}", adj, noun)
 }

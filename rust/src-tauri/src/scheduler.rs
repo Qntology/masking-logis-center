@@ -543,8 +543,26 @@ async fn process_task(
                 store_guard.as_ref().ok_or_else(|| anyhow::anyhow!("Store not initialized"))?.clone()
             };
 
-            if let Ok(Some(doc)) = store.get_item_by_id("items", doc_id).await {
-                if doc.is_masked { continue; }
+            // 🌟 [CRITICAL FIX] "items" 테이블뿐만 아니라 모든 테이블을 순회하여 문서를 찾아냅니다.
+            let tables = vec!["items", "users", "pages"];
+            let mut found_doc = None;
+            let mut found_table = "items";
+
+            for table in tables {
+                if let Ok(Some(doc)) = store.get_item_by_id(table, doc_id).await {
+                    found_doc = Some(doc);
+                    found_table = table;
+                    break;
+                }
+            }
+
+            if let Some(doc) = found_doc {
+                // 🌟 [CRITICAL FIX] 이미 마스킹된 문서(is_masked: true)라도, 
+                // 새로운 니모닉 적용이나 업데이트된 프롬프트를 반영하기 위해 건너뛰지 않고 재처리하도록 제한을 해제합니다.
+                // if doc.is_masked {
+                //     emit_term(&format!("[EXTRACTION] Skipping document: {} (Already masked)", doc_id));
+                //     continue; 
+                // }
 
                 let payload = json!({
                     "task_id": task.id,
@@ -553,7 +571,7 @@ async fn process_task(
                     "spinner": "⠋"
                 });
                 log_task_progress(app_handle, &task.id, &payload);
-                emit_term(&format!("[EXTRACTION] Processing document: {}", doc_id));
+                emit_term(&format!("[EXTRACTION] Processing document: {} (Table: {})", doc_id, found_table));
 
                 let mut json_data: Value = serde_json::from_str(&doc.json_data).unwrap_or(json!({}));
                 let raw_html = json_data.get("html").and_then(|v| v.as_str()).unwrap_or("");
@@ -561,6 +579,7 @@ async fn process_task(
 
                 let mut target_text = String::new();
                 let mut extracted_json = json!({});
+                let mut masked_text = String::new(); // 🌟 변수 생명주기를 [STEP 3]까지 연장하기 위해 밖으로 빼냅니다.
 
                 // 🌟 [STEP 1] 이미지인 경우 OCR을 선행하여 텍스트를 먼저 추출합니다.
                 if is_image {
@@ -608,22 +627,68 @@ async fn process_task(
 
                     model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
 
-                    let personal_prompt = crate::parsing::masking_personal_prompt(&safe_text);
+                    // 🌟 분리된 타입별 마스킹 프롬프트를 모두 배열에 담습니다.
+                    let prompts = vec![
+                        crate::parsing::masking_personal_prompt(&safe_text),
+                        crate::parsing::masking_occupational_prompt(&safe_text),
+                        crate::parsing::masking_address_prompt(&safe_text),
+                        crate::parsing::masking_financial_prompt(&safe_text),
+                        crate::parsing::masking_security_prompt(&safe_text),
+                        crate::parsing::masking_vehicle_prompt(&safe_text),
+                        crate::parsing::masking_device_prompt(&safe_text),
+                    ];
 
-                    // 🌟 [CRITICAL FIX] UI에 스피너(진행률)를 노출하고 System 프롬프트를 포함하여 안전하게 추론을 시작합니다.
-                    let res_mask = model.chat_with_qwen3_5_image_spinner(
-                        "You are a precise privacy masking assistant.",
-                        &personal_prompt,
-                        None,
-                        app_handle,
-                        "extraction-progress",
-                        json!({ "category": format!("Masking ({}/{})", idx + 1, total), "summary": "Anonymizing sensitive data..." }),
-                        1024,
-                        Some(cancellation_token.clone()),
-                        Some(format!("{}_{}_mask", task.id, doc_id))
-                    ).await?;
+                    let mut all_matches = Vec::new();
 
-                    extracted_json = crate::parsing::parse_json_from_llm(&res_mask);
+                    // 🌟 여러 번 순차적으로 처리하여 결과를 합칩니다.
+                    for (p_idx, prompt) in prompts.iter().enumerate() {
+                        if cancellation_token.load(Ordering::Relaxed) { break; }
+
+                        let res_mask = model.chat_with_qwen3_5_image_spinner(
+                            "You are a precise privacy masking assistant.",
+                            prompt,
+                            None,
+                            app_handle,
+                            "extraction-progress",
+                            json!({ 
+                                "category": format!("Masking ({}/{}) - Type {}", idx + 1, total, p_idx + 1), 
+                                "summary": "Anonymizing sensitive data..." 
+                            }),
+                            1024,
+                            Some(cancellation_token.clone()),
+                            Some(format!("{}_{}_mask_{}", task.id, doc_id, p_idx))
+                        ).await?;
+
+                        let parsed = crate::parsing::parse_json_from_llm(&res_mask);
+                        
+                        // 각 호출에서 추출된 matches 배열을 하나의 all_matches에 병합합니다.
+                        if let Some(matches_arr) = parsed.get("matches").and_then(|v| v.as_array()) {
+                            all_matches.extend(matches_arr.clone());
+                        }
+                    }
+
+                    // 🌟 [추가] 추출된 마스킹 대상에 니모닉을 부여하고 실제 텍스트를 치환합니다.
+                    masked_text = target_text.clone(); // 여기서는 이미 선언된 변수에 값만 덮어씌웁니다.
+                    for match_item in all_matches.iter_mut() {
+                        if let Some(obj) = match_item.as_object_mut() {
+                            if let (Some(name), Some(val)) = (obj.get("name").and_then(|v| v.as_str()), obj.get("value").and_then(|v| v.as_str())) {
+                                
+                                // 파싱 모듈에 추가한 니모닉 생성 함수 호출
+                                let mnemonic = crate::parsing::generate_mnemonic();
+                                
+                                // 원본 텍스트를 마스킹 포맷으로 치환 (예: 3층 102-22 -> [SECONDARY ADDRESS: absolve-zipfile])
+                                let replacement = format!("[{}: {}]", name, mnemonic);
+                                masked_text = masked_text.replace(val, &replacement);
+                                
+                                // 나중에 원본 추적이나 관리가 필요할 수 있으므로, JSON data 객체 안에도 해당 니모닉 값을 쌍으로 저장해 둡니다.
+                                obj.insert("mnemonic".to_string(), json!(mnemonic));
+                            }
+                        }
+                    }
+
+                    if !all_matches.is_empty() {
+                        extracted_json = json!({ "matches": all_matches });
+                    }
                 }
 
                 // 🌟 [STEP 3] 최종 결과물(마스킹 정보)을 DB에 업데이트합니다.
@@ -631,10 +696,13 @@ async fn process_task(
                     if let Some(obj) = json_data.as_object_mut() {
                         obj.insert("data".to_string(), extracted_json);
                         obj.insert("is_masked".to_string(), json!(true));
+                        // 🌟 치환이 모두 완료된 새로운 마스킹 텍스트를 삽입하여 DB에 영구 저장될 수 있도록 합니다.
+                        obj.insert("masked_text".to_string(), json!(masked_text));
                     }
 
+                    // 🌟 [CRITICAL FIX] 하드코딩된 "items" 대신 문서를 찾아낸 실제 테이블(found_table)을 사용합니다!
                     let _ = store.upsert_item(
-                        "items", &doc.id, &doc.r#type, json_data, Some(doc.vector.clone()),
+                        found_table, &doc.id, &doc.r#type, json_data, Some(doc.vector.clone()),
                         Some(&doc.from), Some(&doc.to), Some(&doc.cc), Some(&doc.bcc), Some(&doc.r#ref), Some(&doc.digest)
                     ).await;
                 }

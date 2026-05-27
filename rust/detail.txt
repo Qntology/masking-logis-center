@@ -1,0 +1,71 @@
+
+모델 qwen3.5
+
+Extract the contact sender number
+
+[OUTPUT FORMAT]
+{
+    "is_header_content": Boolean,
+    "contact sender number": "...",
+    "is_footer_content": Boolean,
+}
+RETURN JSON ONLY. NO EXPLANATION. NO THINKING.
+
+
+
+
+### [LABEL FORMAT DEFINITIONS]
+
+person's given name.
+person's middle name.
+person's family name or surname.
+person's name
+person's age
+
+person's gender identity.
+person's biological sex.
+the color of a person's eyes
+person's physical height
+person's username
+person's profession or field of work.
+person's specific job position or role.
+person's specific organizational division or department.
+person's the name of a company, institution, or group
+
+email
+
+contact number   / phone
+
+location address
+    * STREET: Must be a character string representing the name of a street or road.
+    * BUILDING NUMBER: Must be a numeric or alphanumeric string identifying a specific building.
+    * SECONDARY ADDRESS: Must be a character string detailing secondary location information like an apartment, suite, or unit number.
+    * CITY: Must be a character string representing the name of a city or town.
+    * COUNTY: Must be a character string representing a county, district, or similar regional division.
+    * STATE: Must be a character string representing a state, province, or primary administrative region.
+    * ZIPCODE: Must be an alphanumeric code used for postal sorting and delivery.
+
+    * IP ADDRESS: Must be a valid IPv4 or IPv6 address format.
+    * MAC ADDRESS: Must be a 12-character hexadecimal string representing a Media Access Control address.
+
+
+    * GPSCOORDINATES: Must be a string representing latitude and longitude values.
+
+
+
+* BANKACCOUNT: Must be a numeric string representing a bank account number.
+* IBAN: Must be an alphanumeric string conforming to the International Bank Account Number format.
+* CREDIT CARD: Must be a numeric string representing a payment card number.
+* CREDITCARD ISSUER: Must be a character string representing the network or institution that issued the payment card.
+
+
+* CVV: Must be a 3- or 4-digit numeric security code for a payment card.
+* PIN: Must be a numeric string representing a Personal Identification Number.
+
+
+* VIN: Must be a 17-character alphanumeric string representing a Vehicle Identification Number.
+* VRM: Must be an alphanumeric string representing a Vehicle Registration Mark or license plate.
+
+* IMEI: Must be a 15-digit numeric string representing an International Mobile Equipment Identity.
+
+* PASSWORD: Must be a string of characters used for authentication.
