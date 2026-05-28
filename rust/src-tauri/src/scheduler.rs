@@ -622,7 +622,7 @@ async fn process_task(
                     
                     if !html_val.is_empty() {
                         // 🌟 HTML 값을 가져와 태그와 속성을 모두 제거한 순수 들여쓰기 텍스트(YamlMode)로 파싱합니다.
-                        target_text = crate::parsing::convert_to_clean_pug(html_val, crate::parsing::PugMode::YamlMode, Some(url_val));
+                        target_text = crate::parsing::convert_to_clean_pug(html_val, crate::parsing::PugMode::NoAttributesMode, Some(url_val));
                     } else {
                         target_text = json_data.get("yaml").and_then(|v| v.as_str()).unwrap_or(&doc.text).to_string();
                     }
@@ -706,8 +706,8 @@ async fn process_task(
                                             })
                                         ],
                                         model: "qwen3".to_string(),
-                                        max_tokens: Some(128),
-                                        temperature: Some(0.1),
+                                        max_tokens: Some(256),
+                                        temperature: Some(0.0),
                                         top_p: Some(0.95),
                                         ..Default::default()
                                     };
@@ -749,9 +749,30 @@ async fn process_task(
                             let parsed = crate::parsing::parse_json_from_llm(&res_mask);
                             
                             // 추출된 값이 있는지, 그리고 그 값이 현재 PUG_CONTENT(masked_text)에 실제로 존재하는지 확인
-                            let extracted_val = parsed.get(key_name).and_then(|v| v.as_str()).unwrap_or("");
+                            let mut extracted_val = parsed.get(key_name).and_then(|v| v.as_str()).unwrap_or("").to_string();
                             
-                            if extracted_val.is_empty() || extracted_val == "..." || !masked_text.contains(extracted_val) {
+                            // 🌟 [추가] 연락처(contact number)일 경우, LLM이 하이픈(-)이나 공백을 마음대로 제거/추가하여 매칭이 안 되는 현상 방어
+                            if !extracted_val.is_empty() && extracted_val != "..." && !masked_text.contains(&extracted_val) {
+                                if key_name == "contact number" {
+                                    // 순수 숫자만 추출
+                                    let digits_only: String = extracted_val.chars().filter(|c| c.is_digit(10)).collect();
+                                    
+                                    // 전화번호 길이(일반적으로 8자리 이상)일 때만 유연한 정규식 탐색 시도
+                                    if digits_only.len() >= 8 {
+                                        // 숫자 사이에 옵셔널 하이픈, 점, 공백 등을 허용하는 정규식 동적 생성 (예: 0[-.\s]*1[-.\s]*0...)
+                                        let regex_pattern = digits_only.chars().map(|c| c.to_string()).collect::<Vec<String>>().join(r"[-.\s]*");
+                                        
+                                        if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                            if let Some(mat) = re.find(&masked_text) {
+                                                // 정규식으로 실제 원본 텍스트에 존재하는 형태를 찾아 extracted_val을 덮어씌움
+                                                extracted_val = mat.as_str().to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if extracted_val.is_empty() || extracted_val == "..." || !masked_text.contains(&extracted_val) {
                                 break; // 빈 값이거나 본문에 존재하지 않으면 루프 탈출 -> 다음 프롬프트(항목)로 이동
                             }
 
@@ -763,7 +784,7 @@ async fn process_task(
                             let skip_marker = format!("**SKIP READ {}**", skip_counter);
                             
                             // 원본 텍스트를 임시 마커로 치환하여 이어지는 LLM 추론에서 혼선을 방지
-                            masked_text = masked_text.replace(extracted_val, &skip_marker);
+                            masked_text = masked_text.replace(&extracted_val, &skip_marker);
                             skip_map.insert(skip_marker, final_replacement);
                             skip_counter += 1;
 

@@ -5607,3 +5607,88 @@ document.getElementById("btn-switch-to-qr")?.addEventListener("click", () => {
     if (video) stopDesktopCamera();
     showPcPairingQr();
 });
+
+// --- Alt + Hover Mnemonic Unmasking Logic ---
+let originalHtmlCache: { el: HTMLElement, maskedHtml: string }[] = [];
+let isAltPressed = false;
+
+window.addEventListener("keydown", (e) => { 
+    if (e.key === "Alt") isAltPressed = true; 
+});
+
+window.addEventListener("keyup", (e) => { 
+    if (e.key === "Alt") {
+        isAltPressed = false;
+        // Alt 키를 떼면 마우스가 아직 올라가 있어도 모두 니모닉(마스킹) 상태로 원상복구합니다.
+        originalHtmlCache.forEach(cache => {
+            cache.el.innerHTML = cache.maskedHtml;
+        });
+        originalHtmlCache = [];
+    }
+});
+
+document.addEventListener("mouseover", async (e) => {
+    if (!isAltPressed) return;
+    const target = e.target as HTMLElement;
+    if (!target || target.nodeType !== 1) return;
+
+    // 너무 거대한 부모 컨테이너 전체가 리렌더링되는 것을 방지하기 위해 말단 요소 위주로 필터링합니다.
+    if (target.tagName === "DIV" && target.children.length > 2) return;
+
+    const html = target.innerHTML || "";
+    // 니모닉 패턴인 대괄호 포함 여부로 1차 고속 필터링
+    if (html.includes("[") && html.includes("]")) {
+        let matches: any[] = [];
+        
+        // 현재 마우스가 위치한 곳이 리스트 뷰인지 상세 뷰인지 파악하여 해당 문서 ID를 도출합니다.
+        const card = target.closest('.logis-result') as HTMLElement;
+        let docId = currentDetailUuid;
+        if (card && card.id) docId = card.id;
+
+        if (docId) {
+            try {
+                // 문서의 JSON 데이터를 파싱하여 마스킹 딕셔너리(matches)를 가져옵니다.
+                const doc = await invoke<any>("get_document", { uuid: docId });
+                if (doc && doc.json_data) {
+                    const parsed = JSON.parse(doc.json_data);
+                    if (parsed.data && parsed.data.matches) {
+                        matches = parsed.data.matches;
+                    }
+                }
+            } catch(err) {
+                console.error("[Unmasking] Failed to fetch document matches:", err);
+            }
+        }
+
+        if (matches.length > 0) {
+            let unmaskedHtml = html;
+            let isModified = false;
+
+            matches.forEach(m => {
+                const mnemonicPattern = `[${m.name}: ${m.mnemonic}]`;
+                if (unmaskedHtml.includes(mnemonicPattern)) {
+                    // 니모닉을 원본 텍스트로 치환하고, 시각적으로 구분이 가도록 약간의 하이라이팅을 줍니다.
+                    unmaskedHtml = unmaskedHtml.split(mnemonicPattern).join(`<span style="background-color: rgba(74, 222, 128, 0.2); padding: 2px 4px; border-radius: 4px; color: #4ade80; font-weight: bold; transition: all 0.2s;">${m.value}</span>`);
+                    isModified = true;
+                }
+            });
+
+            if (isModified && isAltPressed) {
+                // 요소의 원래 HTML을 캐시에 백업하고 치환된 HTML을 렌더링합니다.
+                originalHtmlCache.push({ el: target, maskedHtml: html });
+                target.innerHTML = unmaskedHtml;
+            }
+        }
+    }
+});
+
+document.addEventListener("mouseout", (e) => {
+    const target = e.target as HTMLElement;
+    const cacheIndex = originalHtmlCache.findIndex(c => c.el === target);
+    if (cacheIndex !== -1) {
+        // 마우스가 영역을 벗어나면 즉시 원래 니모닉 텍스트로 복구합니다.
+        const cache = originalHtmlCache[cacheIndex];
+        target.innerHTML = cache.maskedHtml;
+        originalHtmlCache.splice(cacheIndex, 1);
+    }
+});

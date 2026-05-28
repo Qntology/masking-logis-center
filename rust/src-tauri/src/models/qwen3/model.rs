@@ -275,23 +275,33 @@ impl Qwen3Model {
             let input_ids = input_ids.unwrap();
             self.embedding_token_id(input_ids)?
         };
+
+        // 🌟 [VRAM 최적화] CUDA 환경일 때 입력 임베딩을 BF16으로 강제 캐스팅하여 전체 파이프라인의 VRAM 2배 폭식을 방어합니다.
+        let target_dtype = if inputs_embeds.device().is_cuda() { candle_core::DType::BF16 } else { candle_core::DType::F32 };
+        let inputs_embeds = if inputs_embeds.dtype() != target_dtype { inputs_embeds.to_dtype(target_dtype)? } else { inputs_embeds };
+
         let (bs, seq_len, _) = inputs_embeds.dims3()?;
         let attention_mask: Option<Tensor> = {
             if seq_len <= 1 {
                 None
             } else {
-                Some(prepare_causal_attention_mask(
+                let mask = prepare_causal_attention_mask(
                     bs,
                     seq_len,
                     seqlen_offset, // 🌟 [CRITICAL FIX] 청크 분할로 인해 누적된 과거 토큰 길이만큼 마스크 크기를 동적으로 연장합니다.
                     inputs_embeds.device(),
-                )?)
+                )?;
+                Some(if mask.dtype() != target_dtype { mask.to_dtype(target_dtype)? } else { mask })
             }
         };
 
         let (cos, sin) = self
             .rotary_emb
             .forward(seqlen_offset, seq_len, inputs_embeds.device())?;
+            
+        // 🌟 [VRAM 최적화] RoPE 테이블(F32)과 Mask가 Attention 연산에 섞여 들어가 전체 텐서를 F32로 강제 승격시키는 현상을 원천 차단합니다.
+        let cos = if cos.dtype() != target_dtype { cos.to_dtype(target_dtype)? } else { cos };
+        let sin = if sin.dtype() != target_dtype { sin.to_dtype(target_dtype)? } else { sin };
 
         let mut hidden_states = inputs_embeds;
         for decode_layer in &mut self.layers {
