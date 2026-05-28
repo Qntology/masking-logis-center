@@ -25,7 +25,7 @@ pub struct Qwen3Attention {
     num_kv_groups: usize,
     head_dim: usize,
     scaling: f64,
-    kv_cache: Option<(Tensor, Tensor)>,
+    pub kv_cache: Option<(Tensor, Tensor)>,
 }
 
 impl Qwen3Attention {
@@ -111,13 +111,20 @@ impl Qwen3Attention {
         let (key_states, value_states) = match self.kv_cache.take() {
             None => (key_states.contiguous()?, value_states.contiguous()?),
             Some((prev_k, prev_v)) => {
+                let dev = key_states.device();
+                let prev_k = if !prev_k.device().same_device(dev) { prev_k.to_device(dev)? } else { prev_k };
+                let prev_v = if !prev_v.device().same_device(dev) { prev_v.to_device(dev)? } else { prev_v };
                 let k = Tensor::cat(&[&prev_k, &key_states], 2)?.contiguous()?;
                 let v = Tensor::cat(&[&prev_v, &value_states], 2)?.contiguous()?;
                 (k, v)
             }
         };
         
-        self.kv_cache = Some((key_states.clone(), value_states.clone()));
+        // 🌟 [JIT CPU Offload] 동일하게 보관용 캐시를 연산 직후 즉각 RAM으로 대피시켜 VRAM 스파이크를 없앱니다.
+        self.kv_cache = Some((
+            key_states.to_device(&candle_core::Device::Cpu)?, 
+            value_states.to_device(&candle_core::Device::Cpu)?
+        ));
         let attn_output = eager_attention_forward(
             &query_states,
             &key_states,
@@ -137,12 +144,19 @@ impl Qwen3Attention {
     }
 }
 
+#[derive(Clone)]
+pub struct Fp8RamKVCache {
+    pub k_fp8: Tensor,
+    pub v_fp8: Tensor,
+}
+
 pub struct Qwen3DecoderLayer {
     // self_attn: Qwen3Attention,
     self_attn: QKNormAttention,
     mlp: GateUpDownMLP,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
+    pub fp8_cache: Option<Fp8RamKVCache>, // 🌟 [FP8 Compression] VRAM에서 FP8로 초고속 압축 후 RAM 대피
 }
 
 impl Qwen3DecoderLayer {
@@ -188,8 +202,10 @@ impl Qwen3DecoderLayer {
             mlp,
             input_layernorm,
             post_attention_layernorm,
+            fp8_cache: None,
         })
     }
+
 
     pub fn forward(
         &mut self,
@@ -198,6 +214,24 @@ impl Qwen3DecoderLayer {
         sin: &Tensor,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
+        // 🌟 [FP8 Compression] RAM에 보관 중이던 FP8 텐서를 VRAM으로 복사한 뒤, GPU 코어에서 즉시 BF16/F32로 압축 해제합니다.
+        if self.self_attn.kv_cache.is_none() {
+            if let Some(cache) = self.fp8_cache.take() {
+                let dev = xs.device();
+                let target_dtype = if dev.is_cuda() { candle_core::DType::BF16 } else { candle_core::DType::F32 };
+                
+                // 1. FP8 상태 그대로 VRAM으로 고속 전송 (PCIe 대역폭 2배 절약)
+                let k_gpu = cache.k_fp8.to_device(dev)?;
+                let v_gpu = cache.v_fp8.to_device(dev)?;
+                
+                // 2. VRAM 내부에서 즉시 형변환(압축 해제)
+                let k_restored = k_gpu.to_dtype(target_dtype)?;
+                let v_restored = v_gpu.to_dtype(target_dtype)?;
+                
+                self.self_attn.kv_cache = Some((k_restored, v_restored));
+            }
+        }
+
         let residual = xs.clone();
         let xs = self.input_layernorm.forward(xs)?;
         let xs = self.self_attn.forward(&xs, cos, sin, attention_mask)?;
@@ -211,14 +245,46 @@ impl Qwen3DecoderLayer {
 
     pub fn clear_kv_cache(&mut self) {
         self.self_attn.clear_kv_cache();
+        self.fp8_cache = None;
+    }
+
+    pub fn evacuate_kv_to_cpu(&mut self) -> Result<()> {
+        if let Some((k, v)) = self.self_attn.kv_cache.take() {
+            // 🌟 [FP8 Compression] VRAM 내부에서 텐서를 FP8(F8E4M3)로 즉시 압축한 후, 시스템 RAM으로 던져 VRAM을 비웁니다.
+            let cpu_dev = &candle_core::Device::Cpu;
+            
+            // VRAM 상에서 FP8로 캐스팅 (데이터 크기 절반으로 압축, Zlib이나 CPU 연산 병목 없음)
+            let k_fp8 = k.to_dtype(candle_core::DType::F8E4M3)?;
+            let v_fp8 = v.to_dtype(candle_core::DType::F8E4M3)?;
+            
+            self.fp8_cache = Some(Fp8RamKVCache {
+                k_fp8: k_fp8.to_device(cpu_dev)?,
+                v_fp8: v_fp8.to_device(cpu_dev)?,
+            });
+        }
+        Ok(())
     }
 
     pub fn get_kv_cache(&self) -> Option<(Tensor, Tensor)> {
-        self.self_attn.kv_cache.clone()
+        if let Some(cache) = &self.self_attn.kv_cache {
+            Some(cache.clone())
+        } else if let Some(fp8_cache) = &self.fp8_cache {
+            // 스냅샷 저장을 위해 호출될 경우, 원래 타입으로 복원하여 반환
+            let target_dtype = candle_core::DType::F32; // 저장용 기본 타입
+            if let Ok(k) = fp8_cache.k_fp8.to_dtype(target_dtype) {
+                if let Ok(v) = fp8_cache.v_fp8.to_dtype(target_dtype) {
+                    return Some((k, v));
+                }
+            }
+            None
+        } else {
+            None
+        }
     }
 
     pub fn set_kv_cache(&mut self, cache: Option<(Tensor, Tensor)>) {
         self.self_attn.kv_cache = cache;
+        self.fp8_cache = None;
     }
 }
 
@@ -322,6 +388,13 @@ impl Qwen3Model {
         for layer in self.layers.iter_mut() {
             layer.clear_kv_cache()
         }
+    }
+
+    pub fn evacuate_kv_to_cpu(&mut self) -> Result<()> {
+        for layer in self.layers.iter_mut() {
+            layer.evacuate_kv_to_cpu()?;
+        }
+        Ok(())
     }
 
     pub fn get_kv_cache(&self) -> Vec<Option<(Tensor, Tensor)>> {
