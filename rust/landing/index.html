@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Local Trade Doc Automation</title>
+    <title>terminal.logis.center | Intelligent Data Bridge & Privacy</title>
     <!-- Tailwind CSS (Local preferred, CDN fallback) -->
     <script src="static/js/tailwindcss.js" onerror="this.src='https://cdn.tailwindcss.com'"></script>
     <!-- FontAwesome (Local preferred, CDN fallback) -->
@@ -125,12 +125,16 @@
 
     <!-- Navigation -->
     <nav class="nav-glass flex items-center justify-between max-w-3xl mx-auto pl-3 ">
-        <div class="flex items-center gap-2 px-4 py-1.5">
-            <span class="relative flex h-2 w-2">
-                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-            </span>
-            <span class="text-xs text-green-400 font-medium font-mono uppercase" data-i18n="system_status">상태: 연결 준비 완료</span>
+        <div class="flex items-center gap-4 px-4 py-1.5">
+            <span class="text-sm font-bold tracking-tighter text-white font-mono">terminal.logis.center</span>
+            <div class="h-4 w-px bg-white/10"></div>
+            <div class="flex items-center gap-2">
+                <span class="relative flex h-2 w-2">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                </span>
+                <span class="text-xs text-green-400 font-medium font-mono uppercase" data-i18n="system_status">상태: 연결 준비 완료</span>
+            </div>
         </div>
 
         <div class="flex items-center gap-3">
@@ -173,30 +177,34 @@
         <div class="max-w-3xl mx-auto w-full">
             <!-- Main Title & Desc -->
             <div class="text-center space-y-6 mb-16 py-2">
-                <p class="text-gray-400 text-lg md:text-2xl leading-relaxed break-keep" style="text-shadow: 0 0 20px #000;" data-i18n="hero_desc">
-                    WiFi 없이, 노트북에서
-                    무역 서류를 정형 데이터로 변환
+                <h1 class="text-4xl md:text-6xl font-bold tracking-tighter text-gradient mb-4">terminal.logis.center</h1>
+                <p class="text-gray-400 text-lg md:text-2xl leading-relaxed break-keep" style="text-shadow: 0 0 20px #000;"
+                data-i18n="hero_desc">
+                    복잡한 서류, 이제 마우스로 끌어서 AI에게 놓으세요. 데이터 속에 숨겨진 내용은 
+                    채팅으로 물어보고, 민감한 개인정보는 알아서 가려주니까 안심할 수 있습니다.
                 </p>
             </div>
 
             <!-- Specs Grid (Glass Panel) -->
             <div class="max-w-xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-3 mb-16">
                 <div class="glass-panel p-3 rounded-3xl group hover:border-blue-500/30 transition-colors">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_speed">Process Speed</span>
+                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_speed">Data Collection</span>
                     <div class="text-spec text-blue-400 group-hover:scale-105 transition-transform duration-500">
-                        2.0s <span class="text-sm font-normal text-gray-500 ml-1">Avg / Page</span>
+                        One-Click <span class="text-sm font-normal text-gray-500 ml-1">Integration</span>
                     </div>
                 </div>
+        
                 <div class="glass-panel p-3 rounded-3xl group hover:border-green-500/30 transition-colors">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_security">Security</span>
+                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_security">Privacy</span>
                     <div class="text-spec text-green-400 group-hover:scale-105 transition-transform duration-500">
-                        100% <span class="text-sm font-normal text-gray-500 ml-1">Local Only</span>
+                        Auto <span class="text-sm font-normal text-gray-500 ml-1">Masking</span>
                     </div>
                 </div>
+
                 <div class="glass-panel p-3 rounded-3xl group hover:border-white/30 transition-colors">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_capability">Capability</span>
+                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_capability">AI Analysis</span>
                     <div class="text-spec text-white group-hover:scale-105 transition-transform duration-500">
-                        OCR + <span class="text-sm font-normal text-gray-500 ml-1">Context Parser</span>
+                        Ask <span class="text-sm font-normal text-gray-500 ml-1">Anything</span>
                     </div>
                 </div>
             </div>
@@ -480,8 +488,8 @@
     <!-- Footer -->
     <footer class="py-12 border-t border-white/5 text-center text-gray-500 text-sm bg-black relative z-30">
         <div class="max-w-6xl mx-auto px-6 flex flex-col md:flex-row justify-between items-center gap-4">
-            <div class="text-[10px] text-gray-600 font-mono">
-                LOGIS_AI_AGENT_CORE &copy; 2026 / LOCAL_INFERENCE_ENGINE_V3
+            <div class="text-[10px] text-gray-600 font-mono uppercase tracking-widest">
+                terminal.logis.center &copy; 2026 / DATA_ONTOLOGY_AGENT_V3
             </div>
             <div class="flex gap-6">
                 <a href="#" class="text-[10px] text-gray-500 hover:text-white transition-colors uppercase tracking-widest">Documentation</a>
@@ -494,12 +502,12 @@
         const i18n = {
             "ko": {
                 "nav_download": "설치파일 다운로드 (.exe)",
-                "system_status": "상태: 연결 준비 완료",
-                "spec_speed": "문서 처리 속도",
-                "spec_security": "작동 환경",
-                "spec_capability": "핵심 기능",
-                "hero_title": "무역 서류 수작업 자동화.",
-                "hero_desc": "Wifi 없이, 노트북에서\n무역 서류를 정형 데이터로 변환",
+                "system_status": "상태: 준비 완료",
+                "spec_speed": "간편한 데이터 수집",
+                "spec_security": "개인정보 자동 보호",
+                "spec_capability": "AI와 바로 대화하기",
+                "hero_title": "terminal.logis.center",
+                "hero_desc": "마우스로 끌어서(Drag & Drop) 서류를 AI에게 전달해보세요.\n어려운 데이터도 채팅으로 물어보면 바로 대답해주고, 보안 필터가 민감한 정보는 안전하게 지켜줍니다.",
                 "btn_win": "다운로드",
                 "btn_mac": "준비중",
                 "btn_linux": "준비중",
@@ -531,12 +539,12 @@
             },
             "en": {
                 "nav_download": "Download Installer (.exe)",
-                "system_status": "Status: Ready",
-                "spec_speed": "Processing Speed",
-                "spec_security": "Environment",
-                "spec_capability": "Core Capability",
-                "hero_title": "Automated Trade Documentation.",
-                "hero_desc": "On a laptop, without WiFi\nTurning trade documents\ninto structured data",
+                "system_status": "Status: Stable",
+                "spec_speed": "Easy Collection",
+                "spec_security": "Privacy Protection",
+                "spec_capability": "Chat with AI",
+                "hero_title": "terminal.logis.center",
+                "hero_desc": "Just Drag & Drop documents to your AI for instant answers.\nChat with your data naturally while we keep your private information safe and hidden.",
                 "btn_win": "Download",
                 "btn_mac": "Coming Soon",
                 "btn_linux": "Coming Soon",

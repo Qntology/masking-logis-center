@@ -2,4 +2,10 @@
   span[data-i18n="system_status"]{display:none}
 }
 
-[data-i18n="hero_desc"]::first-line{font-size: 1rem !important;}
+/* 브랜드명 강조를 위한 추가 스타일링 */
+.text-gradient {
+    background: linear-gradient(to right, #ffffff, #3b82f6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+[data-i18n="hero_desc"]::first-line{font-size: 1.1rem !important; color: #fff;}
