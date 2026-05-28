@@ -669,6 +669,8 @@ async fn process_task(
 
                     let mut all_matches = Vec::new();
                     masked_text = target_text.clone(); // 반복 마스킹을 위해 루프 진입 전 초기화
+                    let mut skip_counter = 0; // 🌟 추가: SKIP N 카운터
+                    let mut skip_map = std::collections::HashMap::new(); // 🌟 추가: SKIP N -> Mnemonic 매핑
 
                     // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
                     for (p_idx, key_name) in target_items.into_iter().enumerate() {
@@ -753,13 +755,17 @@ async fn process_task(
                                 break; // 빈 값이거나 본문에 존재하지 않으면 루프 탈출 -> 다음 프롬프트(항목)로 이동
                             }
 
-                            // 🌟 마스킹 니모닉 생성 및 즉시 치환 (이후 루프의 PUG_CONTENT 프롬프트에 즉시 반영됨)
+                            // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 SKIP READ 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
                             let upper_key = key_name.to_uppercase();
                             
-                            // 원본 텍스트를 마스킹 포맷으로 즉시 치환 (예: 010-1234 -> [CONTACT NUMBER: secure-data])
-                            let replacement = format!("[{}: {}]", upper_key, mnemonic);
-                            masked_text = masked_text.replace(extracted_val, &replacement);
+                            let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                            let skip_marker = format!("**SKIP READ {}**", skip_counter);
+                            
+                            // 원본 텍스트를 임시 마커로 치환하여 이어지는 LLM 추론에서 혼선을 방지
+                            masked_text = masked_text.replace(extracted_val, &skip_marker);
+                            skip_map.insert(skip_marker, final_replacement);
+                            skip_counter += 1;
 
                             // 최종 저장용 JSON 객체를 all_matches 배열에 기록
                             all_matches.push(json!({
@@ -767,6 +773,14 @@ async fn process_task(
                                 "value": extracted_val,
                                 "mnemonic": mnemonic
                             }));
+                        }
+                    }
+
+                    // 🌟 [추가] 모든 추론이 끝난 후 임시 마커(**SKIP READ N**)를 실제 니모닉으로 일괄 변환합니다.
+                    for i in 0..skip_counter {
+                        let marker = format!("**SKIP READ {}**", i);
+                        if let Some(final_repl) = skip_map.get(&marker) {
+                            masked_text = masked_text.replace(&marker, final_repl);
                         }
                     }
 
