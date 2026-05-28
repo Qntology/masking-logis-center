@@ -10,6 +10,7 @@ pub enum PugMode {
     TheadMode,
     ListMode, 
     NoAttributesMode, 
+    YamlMode,
 }
 
 pub fn sanitize_llm_input(text: &str) -> String {
@@ -606,7 +607,18 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                 attributes_string.push_str(&format!("[{}]", other_attributes.join(" ")));
             }
 
-            output.push_str(&format!("{}{}{}\n", indent, tag_name, attributes_string));
+            let is_table_tag = ["table", "thead", "tbody", "tr", "th", "td"].contains(&tag_name.as_str());
+
+            if *mode != PugMode::YamlMode || is_table_tag {
+                output.push_str(&format!("{}{}{}\n", indent, tag_name, attributes_string));
+            } else {
+                // 🌟 YamlMode일 경우 테이블 태그가 아니면 태그를 생략하고, value 값을 YAML 리스트(-) 형태로 출력합니다.
+                if let Some(val) = element.attr("value") {
+                    if !val.trim().is_empty() {
+                        output.push_str(&format!("{}- {}\n", indent, val.trim().replace("\"", "'")));
+                    }
+                }
+            }
 
             if tag_name == "textarea" {
                 let mut text_content = String::new();
@@ -617,7 +629,11 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                     for line in text_content.lines() {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
-                            output.push_str(&format!("{}    | {}\n", indent, trimmed));
+                            if *mode == PugMode::YamlMode {
+                                output.push_str(&format!("{}    - {}\n", indent, trimmed));
+                            } else {
+                                output.push_str(&format!("{}    | {}\n", indent, trimmed));
+                            }
                         }
                     }
                 }
@@ -633,7 +649,7 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
             if tag_name == "tbody" { if let Some(c) = ctx.as_mut() { c.is_in_tbody = false; } }
         }
         Node::Text(text) => {
-            if *mode == PugMode::FullContent || *mode == PugMode::DetailMode || *mode == PugMode::TheadMode || *mode == PugMode::ListMode || *mode == PugMode::NoAttributesMode {
+            if *mode == PugMode::FullContent || *mode == PugMode::DetailMode || *mode == PugMode::TheadMode || *mode == PugMode::ListMode || *mode == PugMode::NoAttributesMode || *mode == PugMode::YamlMode {
                 let text_content = text.trim();
                 if !text_content.is_empty() {
                     
@@ -648,7 +664,12 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                         }).to_string();
                     }
                     
-                    output.push_str(&format!("{}| {}\n", indent, clean_text));
+                    if *mode == PugMode::YamlMode {
+                        // 🌟 YamlMode인 경우 PUG의 '|' 대신 YAML의 리스트 표현인 '-' 를 사용합니다.
+                        output.push_str(&format!("{}- {}\n", indent, clean_text));
+                    } else {
+                        output.push_str(&format!("{}| {}\n", indent, clean_text));
+                    }
                 }
             }
         }

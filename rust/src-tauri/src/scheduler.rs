@@ -617,12 +617,34 @@ async fn process_task(
                         obj.insert("image_text".to_string(), json!(target_text));
                     }
                 } else {
-                    target_text = json_data.get("yaml").and_then(|v| v.as_str()).unwrap_or(&doc.text).to_string();
+                    let html_val = json_data.get("html").and_then(|v| v.as_str()).unwrap_or("");
+                    let url_val = json_data.get("link").and_then(|v| v.as_str()).unwrap_or("");
+                    
+                    if !html_val.is_empty() {
+                        // 🌟 HTML 값을 가져와 태그와 속성을 모두 제거한 순수 들여쓰기 텍스트(YamlMode)로 파싱합니다.
+                        target_text = crate::parsing::convert_to_clean_pug(html_val, crate::parsing::PugMode::YamlMode, Some(url_val));
+                    } else {
+                        target_text = json_data.get("yaml").and_then(|v| v.as_str()).unwrap_or(&doc.text).to_string();
+                    }
+
+                    // 📂 [CRITICAL FIX] 프로젝트의 자체 tmp 경로를 사용하여 디버그 파일을 저장합니다.
+                    let app_tmp_dir = crate::utils::paths::get_app_tmp_root(Some(app_handle));
+                    let file_path = app_tmp_dir.join("debug_target_text.yaml");
+                    
+                    // 파일에 target_text 기록
+                    if let Err(e) = std::fs::write(&file_path, &target_text) {
+                        eprintln!("Failed to write debug file to tmp: {}", e);
+                    } else {
+                        println!("Debug file saved to: {:?}", file_path);
+                    }
                 }
 
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
                 if !target_text.is_empty() {
-                    model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
+                    // 🌟 [OOM 원인 분석용 로그] 모델에 투입되기 직전 전체 컨텍스트의 문자열 길이를 터미널에 출력합니다.
+                    emit_term(&format!("[DEBUG-OOM] 현재 투입되는 컨텍스트 사이즈(문자 수): {}", target_text.len()));
+
+                    model.secure_vram_relay(crate::model::ModelSize::Qwen3, None, Some(cancellation_token.clone()), false, None).await?;
 
                     // 🌟 16개의 마스킹 타겟 항목(Key) 문자열만 배열에 담습니다.
                     let target_items = vec![
@@ -634,7 +656,7 @@ async fn process_task(
                         "person's name",
                         "person's username",
                         "location address",
-                        "person's age",
+                        // "person's age",
                         // "person's gender identity",
                         "person's biological sex",
                         // "the color of a person's eyes",
@@ -651,31 +673,76 @@ async fn process_task(
                     // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
                     for (p_idx, key_name) in target_items.into_iter().enumerate() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
-                        
-                        let mut loop_count = 0; // 무한 루프 방지용 (최대 20개 탐색)
-
                         loop {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
-                            if loop_count > 20 { break; } 
-                            loop_count += 1;
 
                             // 🌟 현재까지 치환(마스킹)이 완료된 최신 텍스트와 추출할 키워드를 공통 프롬프트 빌더에 직접 주입합니다.
                             let prompt = crate::parsing::build_masking_prompt(&masked_text, key_name);
 
-                            let res_mask = model.chat_with_qwen3_5_image_spinner(
-                                "You are a precise privacy masking assistant.",
-                                &prompt,
-                                None,
-                                app_handle,
-                                "extraction-progress",
-                                json!({ 
-                                    "category": format!("Masking ({}/{}) - Type {}", idx + 1, total, p_idx + 1), 
-                                    "summary": format!("Anonymizing {} (iter {})...", key_name, loop_count)
-                                }),
-                                1024,
-                                Some(cancellation_token.clone()),
-                                Some(format!("{}_{}_mask_{}_{}", task.id, doc_id, p_idx, loop_count))
-                            ).await?;
+                            // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
+                            let payload = json!({ 
+                                "task_id": task.id.clone(),
+                                "category": format!("Masking ({}/{}) - Type {}", idx + 1, total, p_idx + 1), 
+                                "summary": format!("Anonymizing {}...", key_name),
+                                "spinner": "⠋"
+                            });
+                            let _ = app_handle.emit("extraction-progress", &payload);
+                            crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
+
+                            let gen_arc = model.qwen3_generator.clone();
+                            let cancel_clone = cancellation_token.clone();
+                            let prompt_clone = prompt.clone();
+
+                            let res_mask = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+                                let mut gen_guard = gen_arc.blocking_lock();
+                                if let Some(gen) = gen_guard.as_mut() {
+                                    let params = crate::openai_types::ChatCompletionParameters {
+                                        messages: vec![
+                                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
+                                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(prompt_clone),
+                                                name: None,
+                                            })
+                                        ],
+                                        model: "qwen3".to_string(),
+                                        max_tokens: Some(128),
+                                        temperature: Some(0.1),
+                                        top_p: Some(0.95),
+                                        ..Default::default()
+                                    };
+                                    // 🌟 파라미터 개수 오류(E0061) 해결: params와 cancel_clone만 전달
+                                    let res = gen.generate(params, Some(cancel_clone)).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e));
+                                    
+                                    // 🌟 [CRITICAL FIX] 루프가 반복될 때마다 이전 추론의 KV 캐시가 VRAM에 무한 누적되어 
+                                    // 4GB VRAM을 순식간에 터뜨리던 OOM 메모리 누수 현상을 원천 차단합니다!
+                                    gen.clear_kv_cache();
+                                    
+                                    res
+                                } else {
+                                    Err(anyhow::anyhow!("Qwen3 Generator is missing"))
+                                }
+                            }).await??;
+
+                            // 🌟 [OOM 원인 분석용 로그] 추론 직후 LLM이 뱉어낸 실제 결과값과 길이를 출력합니다.
+                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추론 완료 - 응답 길이: {}, 결과: {}", key_name, res_mask.len(), res_mask));
+                            
+                            // 🌟 self 대신 상단에서 가져온 지역 변수 model 사용 (E0424 에러 해결)
+                            if !model.is_cpu_mode {
+                                let dev = model.device_config.device.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    if dev.is_cuda() { let _ = dev.synchronize(); }
+                                }).await;
+                            }
+
+                            #[cfg(target_os = "windows")]
+                            unsafe {
+                                use windows_sys::Win32::System::Threading::GetCurrentProcess;
+                                use windows_sys::Win32::System::Memory::{SetProcessWorkingSetSizeEx, QUOTA_LIMITS_HARDWS_MIN_DISABLE, QUOTA_LIMITS_HARDWS_MAX_DISABLE};
+                                let _ = SetProcessWorkingSetSizeEx(GetCurrentProcess(), usize::MAX, usize::MAX, QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE);
+                            }
+                            #[cfg(target_os = "linux")]
+                            unsafe { extern "C" { fn malloc_trim(pad: usize) -> i32; } malloc_trim(0); }
+                            #[cfg(target_os = "macos")]
+                            unsafe { extern "C" { fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize; } malloc_zone_pressure_relief(std::ptr::null_mut(), 0); }
 
                             let parsed = crate::parsing::parse_json_from_llm(&res_mask);
                             
