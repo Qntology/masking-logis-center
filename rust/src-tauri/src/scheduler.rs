@@ -415,7 +415,8 @@ async fn process_task(
                 "description": extracted_desc.clone(),
                 "text": "Staged Image content",
                 "masked_text": b64_img,
-                "updated_at": chrono::Utc::now().timestamp_millis()
+                "updated_at": chrono::Utc::now().timestamp_millis(),
+                "mode": search_mode.clone() // 🌟 [CRITICAL FIX] 삭제 시 해시 추적을 위해 mode를 반드시 저장해야 합니다.
             });
 
             let store_guard = store_mutex.lock().await;
@@ -838,17 +839,17 @@ async fn process_task(
                     }
 
                     if !all_matches.is_empty() {
-                        extracted_json = json!({ "matches": all_matches });
+                        // 🌟 마스킹된 전체 텍스트도 masked 오브젝트 내부의 text 필드로 함께 캡슐화합니다.
+                        extracted_json = json!({ "matches": all_matches, "text": masked_text });
                     }
                 }
 
                 // 🌟 [STEP 3] 최종 결과물(마스킹 정보)을 DB에 업데이트합니다.
                 if !extracted_json.is_null() && !extracted_json.as_object().map(|o| o.is_empty()).unwrap_or(true) {
                     if let Some(obj) = json_data.as_object_mut() {
-                        obj.insert("data".to_string(), extracted_json);
+                        obj.insert("masked".to_string(), extracted_json);
                         obj.insert("is_masked".to_string(), json!(true));
-                        // 🌟 치환이 모두 완료된 새로운 마스킹 텍스트를 삽입하여 DB에 영구 저장될 수 있도록 합니다.
-                        obj.insert("masked_text".to_string(), json!(masked_text));
+                        // 🌟 루트에 존재하던 masked_text 개별 삽입 로직은 삭제되었습니다.
                     }
 
                     // 🌟 [CRITICAL FIX] 하드코딩된 "items" 대신 문서를 찾아낸 실제 테이블(found_table)을 사용합니다!
@@ -1026,7 +1027,8 @@ async fn process_task(
             "description": extracted_desc, 
             "text": "Staged HTML and YAML content", 
             "masked_text": "",
-            "updated_at": chrono::Utc::now().timestamp_millis()
+            "updated_at": chrono::Utc::now().timestamp_millis(),
+            "mode": search_mode.clone() // 🌟 [CRITICAL FIX] 동일하게 웹페이지 추출 시에도 mode를 누락 없이 저장합니다.
         });
 
         let store_guard = store_mutex.lock().await;

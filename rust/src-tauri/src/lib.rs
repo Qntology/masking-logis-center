@@ -90,11 +90,21 @@ async fn start_file_drag(
                     // 🌟 [추가] 이미지 타입 판별
                     let is_image = doc.r#type == "draft" && (doc.text.contains("[Image]") || doc.json_data.contains("file://"));
 
-                    if is_image {
-                        // 🌟 [CRITICAL FIX 1] 마스킹이 안 된 이미지는 포함하지 않고 건너뜀
+                    // 🌟 [개선] 새로 추가된 masked 객체 안의 text 구조를 최우선으로 탐색하여 내보낼 텍스트로 지정합니다.
+                    let masked_text_owned = json_val.get("masked")
+                        .and_then(|m| m.get("text"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    if let Some(masked_text) = masked_text_owned {
+                        // 마스킹된 텍스트가 정상적으로 존재하면 기존 yaml 값을 안전하게 덮어씁니다.
+                        if let Some(obj) = json_val.as_object_mut() {
+                            obj.insert("yaml".to_string(), json!(masked_text));
+                        }
+                    } else if is_image {
+                        // 마스킹 객체가 분리되기 이전의 구버전 데이터 호환성을 위한 차선책(Fallback) 로직
                         if !doc.is_masked { continue; }
 
-                        // 🌟 [CRITICAL FIX 2] 소유권 분리: 불변 대여(ocr_text)를 독립된 데이터(String)로 변환하여 가변 대여 충돌을 피합니다.
                         let ocr_text_owned = json_val.get("data")
                             .and_then(|d| d.get("image_text"))
                             .and_then(|v| v.as_str())
@@ -780,27 +790,43 @@ async fn delete_document(
         if let Ok(Some(doc)) = store.get_item_by_id("items", &uuid).await {
             if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
                 let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("");
+                // 🌟 [추가] 이미지 타입인지 판별합니다.
+                let is_image = doc.r#type == "draft" && (doc.text.contains("[Image]") || doc.json_data.contains("file://"));
+
+                let mut hostname = String::new();
+                let mut pathname = String::new();
+
+                // 🌟 [보강] http 웹 문서와 로컬 이미지의 경로를 모두 커버하여 Pages 트리를 탐색합니다.
                 if url.starts_with("http") {
                     if let Ok(parsed_url) = url::Url::parse(url) {
-                        let hostname = parsed_url.host_str().unwrap_or("").to_string();
-                        let pathname = parsed_url.path().to_string();
-                        let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}", hostname, pathname));
-                        
-                        if let Ok(Some(existing_page)) = store.get_item_by_id("pages", &page_id).await {
-                            if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&existing_page.json_data) {
-                                let mut count = parsed.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
-                                if count > 0 {
-                                    count -= 1;
-                                    parsed.as_object_mut().unwrap().insert("count".to_string(), serde_json::json!(count));
-                                    
-                                    if count == 0 {
-                                        let _ = store.delete_item("pages", &page_id).await;
-                                    } else {
-                                        let _ = store.upsert_item(
-                                            "pages", &page_id, "pages", parsed, None,
-                                            Some(&existing_page.from), Some(&existing_page.to), Some(&existing_page.cc), Some(&existing_page.bcc), Some(&existing_page.r#ref), None
-                                        ).await;
-                                    }
+                        hostname = parsed_url.host_str().unwrap_or("").to_string();
+                        pathname = parsed_url.path().to_string();
+                    }
+                } else if is_image {
+                    hostname = "Local Image".to_string();
+                    let filename = url.replace("file://", "");
+                    let ext = std::path::Path::new(&filename).extension().and_then(|e| e.to_str()).unwrap_or("file").to_lowercase();
+                    pathname = format!(".{}", ext);
+                }
+
+                if !hostname.is_empty() {
+                    let search_mode = json_val.get("mode").and_then(|v| v.as_str()).unwrap_or("commerce");
+                    let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}_{}", search_mode, hostname, pathname));
+                    
+                    if let Ok(Some(existing_page)) = store.get_item_by_id("pages", &page_id).await {
+                        if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&existing_page.json_data) {
+                            let mut count = parsed.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+                            if count > 0 {
+                                count -= 1;
+                                parsed.as_object_mut().unwrap().insert("count".to_string(), serde_json::json!(count));
+                                
+                                if count == 0 {
+                                    let _ = store.delete_item("pages", &page_id).await;
+                                } else {
+                                    let _ = store.upsert_item(
+                                        "pages", &page_id, "pages", parsed, None,
+                                        Some(&existing_page.from), Some(&existing_page.to), Some(&existing_page.cc), Some(&existing_page.bcc), Some(&existing_page.r#ref), None
+                                    ).await;
                                 }
                             }
                         }
@@ -834,27 +860,41 @@ async fn delete_documents(
             if let Ok(Some(doc)) = store.get_item_by_id("items", uuid).await {
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
                     let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("");
+                    let is_image = doc.r#type == "draft" && (doc.text.contains("[Image]") || doc.json_data.contains("file://"));
+
+                    let mut hostname = String::new();
+                    let mut pathname = String::new();
+
                     if url.starts_with("http") {
                         if let Ok(parsed_url) = url::Url::parse(url) {
-                            let hostname = parsed_url.host_str().unwrap_or("").to_string();
-                            let pathname = parsed_url.path().to_string();
-                            let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}", hostname, pathname));
-                            
-                            if let Ok(Some(existing_page)) = store.get_item_by_id("pages", &page_id).await {
-                                if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&existing_page.json_data) {
-                                    let mut count = parsed.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
-                                    if count > 0 {
-                                        count -= 1;
-                                        parsed.as_object_mut().unwrap().insert("count".to_string(), serde_json::json!(count));
-                                        
-                                        if count == 0 {
-                                            let _ = store.delete_item("pages", &page_id).await;
-                                        } else {
-                                            let _ = store.upsert_item(
-                                                "pages", &page_id, "pages", parsed, None,
-                                                Some(&existing_page.from), Some(&existing_page.to), Some(&existing_page.cc), Some(&existing_page.bcc), Some(&existing_page.r#ref), None
-                                            ).await;
-                                        }
+                            hostname = parsed_url.host_str().unwrap_or("").to_string();
+                            pathname = parsed_url.path().to_string();
+                        }
+                    } else if is_image {
+                        hostname = "Local Image".to_string();
+                        let filename = url.replace("file://", "");
+                        let ext = std::path::Path::new(&filename).extension().and_then(|e| e.to_str()).unwrap_or("file").to_lowercase();
+                        pathname = format!(".{}", ext);
+                    }
+
+                    if !hostname.is_empty() {
+                        let search_mode = json_val.get("mode").and_then(|v| v.as_str()).unwrap_or("commerce");
+                        let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}_{}", search_mode, hostname, pathname));
+                        
+                        if let Ok(Some(existing_page)) = store.get_item_by_id("pages", &page_id).await {
+                            if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&existing_page.json_data) {
+                                let mut count = parsed.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+                                if count > 0 {
+                                    count -= 1;
+                                    parsed.as_object_mut().unwrap().insert("count".to_string(), serde_json::json!(count));
+                                    
+                                    if count == 0 {
+                                        let _ = store.delete_item("pages", &page_id).await;
+                                    } else {
+                                        let _ = store.upsert_item(
+                                            "pages", &page_id, "pages", parsed, None,
+                                            Some(&existing_page.from), Some(&existing_page.to), Some(&existing_page.cc), Some(&existing_page.bcc), Some(&existing_page.r#ref), None
+                                        ).await;
                                     }
                                 }
                             }

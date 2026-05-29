@@ -778,6 +778,13 @@ const handleSearchInteraction = () => {
     // [UI-FIX] If the panel is already expanded, don't refresh the navigation or clear the list.
     // This prevents annoying UI flickering when the user just wants to type in the search bar.
     if (isExpanded && currentTab === "list") {
+        // 🌟 [CRITICAL FIX] 위젯이 열려있더라도 Pages(nav-categories) 영역이 닫혀있다면 강제로 열고 렌더링합니다!
+        const navOverlay = document.getElementById("nav-categories");
+        if (navOverlay && navOverlay.classList.contains("hidden")) {
+            navOverlay.classList.remove("hidden");
+            navOverlay.classList.add("visible");
+            renderNavigation();
+        }
         return;
     }
 
@@ -867,6 +874,7 @@ document.addEventListener('remove-tag', (e: any) => removeSearchTag(e.detail));
 // --- Tree Rendering Logic (Pages & Users) ---
 // --- Original Logic Implementation from content.js ---
 let navTmp: Record<string, boolean> = {};
+let isNavRendering = false; // 🌟 [CRITICAL FIX] 동시 렌더링 방어용 락 추가
 
 async function renderAccordion(nodes: any[], level = 1): Promise<string> {
     let html = `<ul class="logis-branch">`;
@@ -984,6 +992,10 @@ async function renderAccordion(nodes: any[], level = 1): Promise<string> {
 }
 
 async function renderNavigation() {
+    // 🌟 [CRITICAL FIX] 렌더링이 이미 진행 중이라면 중복 실행을 막습니다. (navTmp 초기화로 인한 DOM 증발 방지)
+    if (isNavRendering) return;
+    isNavRendering = true;
+
     const pageList = document.getElementById("nav-list-pages");
     const userList = document.getElementById("nav-list-users");
     const profileName = document.getElementById("nav-profile-name");
@@ -993,7 +1005,10 @@ async function renderNavigation() {
 
     // 🌟 [CRITICAL FIX] index.html에서 userList 관련 영역이 주석 처리되어 null을 반환하더라도,
     // pageList가 존재한다면 함수가 종료(return)되지 않고 끝까지 렌더링을 수행하도록 조건을 (&&)로 변경합니다.
-    if (!pageList && !userList) return;
+    if (!pageList && !userList) {
+        isNavRendering = false;
+        return;
+    }
 
     // [FIX] Show spinner only on the very first navigation render
     if (isFirstNavRender) {
@@ -1221,6 +1236,9 @@ async function renderNavigation() {
         }
         // 🌟 [CRITICAL FIX] 네비게이션 렌더링 완료 후 DOM을 참조하는 버튼 가시성 로직을 강제 재평가하여 버튼을 복구합니다.
         await updateExtractButtonVisibility();
+        
+        // 🌟 락 해제
+        isNavRendering = false;
     }
 }
 
@@ -1515,47 +1533,41 @@ async function renderModeTabs() {
         tempModes.forEach((modeObj, index) => {
             const item = document.createElement("div");
             item.className = "mode-edit-item";
-            item.draggable = true;
+            
+            // 🌟 이동 컨트롤 래퍼 생성
+            const moveControls = document.createElement("div");
+            moveControls.className = "move-controls";
 
-            item.ondragstart = (e) => {
-                draggedModeIndex = index; // 🌟 브라우저 dataTransfer 유실을 방지하기 위해 전역 변수에 직접 캐싱
-                if (e.dataTransfer) {
-                    e.dataTransfer.setData('text/plain', index.toString());
-                    e.dataTransfer.effectAllowed = 'move';
-                }
-                item.style.opacity = '0.5';
-            };
-            item.ondragend = () => { 
-                item.style.opacity = '1'; 
-                draggedModeIndex = null; 
-            };
-            // 🌟 [CRITICAL FIX] HTML5 Drag & Drop 스펙에 따라 dragenter에서도 preventDefault를 걸어야 drop이 작동합니다.
-            item.ondragenter = (e) => { 
-                e.preventDefault(); 
-            };
-            item.ondragover = (e) => { 
-                e.preventDefault(); 
-                if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; 
-            };
-            item.ondrop = (e) => {
-                e.preventDefault();
-                
-                // 🌟 변수를 최우선으로 사용하고, 없으면 dataTransfer를 참조합니다.
-                let fromIndex = draggedModeIndex;
-                if (fromIndex === null && e.dataTransfer) {
-                    fromIndex = parseInt(e.dataTransfer.getData('text/plain'), 10);
-                }
-                
-                if (fromIndex !== null && fromIndex !== index && !isNaN(fromIndex)) {
-                    const movedItem = tempModes.splice(fromIndex, 1)[0];
-                    tempModes.splice(index, 0, movedItem);
+            // 🌟 위로 이동 버튼 (▲)
+            const upBtn = document.createElement("button");
+            upBtn.className = "move-btn";
+            upBtn.innerText = "▲";
+            upBtn.disabled = index === 0; // 첫 번째 항목은 위로 이동 불가
+            upBtn.onclick = () => {
+                if (index > 0) {
+                    const temp = tempModes[index - 1];
+                    tempModes[index - 1] = tempModes[index];
+                    tempModes[index] = temp;
                     renderModeTabs();
                 }
             };
 
-            const dragHandle = document.createElement("span");
-            dragHandle.className = "drag-handle";
-            dragHandle.innerText = "≡";
+            // 🌟 아래로 이동 버튼 (▼)
+            const downBtn = document.createElement("button");
+            downBtn.className = "move-btn";
+            downBtn.innerText = "▼";
+            downBtn.disabled = index === tempModes.length - 1; // 마지막 항목은 아래로 이동 불가
+            downBtn.onclick = () => {
+                if (index < tempModes.length - 1) {
+                    const temp = tempModes[index + 1];
+                    tempModes[index + 1] = tempModes[index];
+                    tempModes[index] = temp;
+                    renderModeTabs();
+                }
+            };
+
+            moveControls.appendChild(upBtn);
+            moveControls.appendChild(downBtn);
 
             const input = document.createElement("input");
             input.type = "text";
@@ -1570,7 +1582,7 @@ async function renderModeTabs() {
                 renderModeTabs();
             };
 
-            item.appendChild(dragHandle);
+            item.appendChild(moveControls);
             item.appendChild(input);
             item.appendChild(delBtn);
             container.appendChild(item);
@@ -1638,10 +1650,10 @@ document.getElementById("btn-edit-modes")?.addEventListener("click", () => {
 });
 
 document.getElementById("btn-add-mode")?.addEventListener("click", () => {
-    let newName = 'new_mode';
+    let newName = 'new_category';
     let counter = 1;
     const existing = tempModes.map(t => t.current);
-    while (existing.includes(newName)) { newName = `new_mode_${counter++}`; }
+    while (existing.includes(newName)) { newName = `new_category_${counter++}`; }
     tempModes.push({ original: null, current: newName });
     renderModeTabs();
 });
@@ -2136,7 +2148,6 @@ listen("extraction-progress", async (event: any) => {
     if (isTerminal && payload.task_id) {
         console.log(`[QUEUE] Terminal state reached for ${payload.task_id}. Releasing and checking next.`);
         
-        // 🌟 [최종 교정] 전역 상태를 먼저 false로 변경해야 updateExtractButtonVisibility가 버튼을 그립니다.
         if (payload.task_id.startsWith("task_") || payload.task_id.startsWith("img_")) {
             isExtracting = false;
         } 
@@ -2150,6 +2161,11 @@ listen("extraction-progress", async (event: any) => {
         // 🌟 버튼 UI 즉시 갱신 및 스피너 중단
         stopSpinner();
         updateExtractButtonVisibility();
+
+        // 🌟 [CRITICAL FIX] #btn-extract 클릭 후 LanceDB 등록(Done)이 완료되면 지연 없이 즉시 Pages 트리를 렌더링합니다!
+        if (payload.category === "Done") {
+            await renderNavigation();
+        }
 
         // 🌟 [추가] 검색 작업이 완료(Done)되었을 경우, 백엔드가 보내준 데이터를 결과창에 렌더링합니다.
         if (payload.task_id.startsWith("search_") && payload.category === "Done" && payload.data) {
@@ -2608,7 +2624,17 @@ listRefreshBtn?.addEventListener("click", refreshList);
 btnDeleteSelected?.addEventListener("click", async () => {
     if (selectedUuids.size === 0) return;
     if (await ask(`Delete ${selectedUuids.size} documents?`, { title: "Confirm Delete", kind: "warning" })) {
-        try { await invoke("delete_documents", { uuids: Array.from(selectedUuids) }); refreshList(); } catch (e) { console.error(e); }
+        // 🌟 [추가] 낙관적 UI 업데이트: 백엔드 작업 대기 전에 선택 상태를 즉시 해제하고 버튼을 숨겨 잔상을 완벽히 없앱니다.
+        const uuidsToDelete = Array.from(selectedUuids);
+        selectedUuids.clear();
+        updateListActionButtons();
+        
+        try { 
+            await invoke("delete_documents", { uuids: uuidsToDelete }); 
+            await refreshList(); 
+        } catch (e) { 
+            console.error(e); 
+        }
     }
 });
 
@@ -3371,12 +3397,17 @@ btnDetailDelete?.addEventListener("click", async () => {
 
         if (confirmed) {
             console.log("[WIDGET] Deletion confirmed for:", currentDetailUuid);
+            
+            // 🌟 [보강] 삭제되는 ID를 선택 목록에서도 확실히 제거하고 액션 버튼을 즉각 숨깁니다.
+            if (currentDetailUuid) selectedUuids.delete(currentDetailUuid);
+            updateListActionButtons();
+            
             const res = await invoke<string>("delete_document", { uuid: currentDetailUuid });
             console.log("[WIDGET] Delete response:", res);
             
             detailView.style.display = "none"; 
             listView.style.display = "block"; 
-            refreshList(); 
+            await refreshList(); 
         }
     } catch (e) { 
         console.error("[WIDGET] Deletion process failed:", e); 
@@ -3385,8 +3416,15 @@ btnDetailDelete?.addEventListener("click", async () => {
 
 async function refreshList() {
     currentPage = 0; hasMore = true; cachedDocs = []; selectedUuids.clear();
+    
     listCurrentY = 0; // Reset scroll
     if(docListContainer) docListContainer.innerHTML = "";
+    
+    updateListActionButtons();
+    
+    // 🌟 [추가] 리스트의 문서가 삭제되었으므로 사이드바의 Pages 트리 카운트도 즉시 시각적으로 갱신합니다.
+    await renderNavigation();
+    
     await loadMoreDocs(true);
 }
 
@@ -3632,6 +3670,17 @@ function updateListActionButtons() {
     const btnDrag = document.getElementById("btn-drag-export");
     
     const allCheckboxes = document.querySelectorAll('.item-select-checkbox');
+    
+    // 🌟 [추가] 리스트가 완전히 비어있다면 All 버튼을 포함한 모든 선택 관련 UI를 숨깁니다.
+    if (allCheckboxes.length === 0) {
+        if (btnAll) btnAll.style.display = "none";
+        if (btnDelete) btnDelete.style.display = "none";
+        if (btnMask) btnMask.style.display = "none";
+        if (btnDrag) btnDrag.style.display = "none";
+        return;
+    } else {
+        if (btnAll) btnAll.style.display = "inline-block";
+    }
     
     if (selectedUuids.size > 0) {
         if (btnDelete) btnDelete.style.display = "inline-block";
@@ -4330,7 +4379,7 @@ async function initSession() {
 
         // 🌟 [CRITICAL FIX] Rust(LanceDB)에서 로드한 초기 데이터를 다시 Rust로 덮어쓰는(역동기화) 치명적인 병목 루프를 제거합니다.
 
-        // 🌟 [CRITICAL FIX] 로그인 여부(네트워크 상태)와 무관하게 로컬 DB의 최신 데이터로 화면을 즉시 그려냅니다! (병목 및 렌더링 유격 해소)
+        // 🌟 [CRITICAL FIX] 앱 실행 시(Startup) HTTP 브라우저 감지 이벤트와 무관하게 무조건 최우선으로 Pages 트리를 즉각 렌더링합니다.
         await renderNavigation();
 
         // 🌟 화면이 렌더링된 후 백그라운드에서 조용히 서버와 통신하여 최신 데이터를 반영합니다.

@@ -128,23 +128,42 @@ body {
     border: 1px solid rgba(0,0,0,0.1);
 }
 .mode-edit-item input {
-    width: 140x;
+    width: 140px;
     height: 30px;
     font-size: 1rem;
     padding: 2px 4px;
     border: 1px solid #ccc;
     border-radius: 2px;
 }
-.mode-edit-item .drag-handle {
-    cursor: grab;
-    color: #999;
-    font-size: 0.9rem;
-    padding: 0 2px;
+.move-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-right: 4px;
+}
+.move-btn {
+    background: transparent;
+    border: none;
+    color: #666;
+    font-size: 0.65rem;
+    cursor: pointer;
+    padding: 2px 4px;
+    line-height: 1;
+}
+.move-btn:hover:not(:disabled) {
+    color: #000;
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 2px;
+}
+.move-btn:disabled {
+    opacity: 0.2;
+    cursor: default;
 }
 .mode-edit-item .del-btn {
     cursor: pointer;
     font-size: 0.8rem;
     color: #ef4444;
+    margin-left: auto;
 }
 
 /* Search Container & Chips */
@@ -829,6 +848,9 @@ tr:hover { background: rgba(0,0,0,0.05); }
     border-radius: 4px;
 }
 
+.tree-root{margin: 0 0.7rem;}
+.tree-root .empty{margin-left: 0.8rem;}
+
 #doc-list .empty{margin-left: 0.8rem;}
 .card-list{margin: 0 0.7rem; min-height: 150px;}
 
@@ -974,7 +996,7 @@ tr:hover { background: rgba(0,0,0,0.05); }
     filter: none;
 }
 
-.logis-label.active > div > span {
+.logis-label.active > div > span > * {
     text-decoration: underline;
     background-color: #000;
     color: #fff;
@@ -983,10 +1005,12 @@ tr:hover { background: rgba(0,0,0,0.05); }
 
 .logis-label.active > div > span > strong {color: #fff;}
 
+.logis-label.active > div > span {padding-left: 1em;}
+
 .logis-label.active > div > span:before {
     content: "▶";
     position: absolute;
-    left: -1.5em;
+    left: 0;
     top: 1px;
     color: #000;
     font-size: 8px;
