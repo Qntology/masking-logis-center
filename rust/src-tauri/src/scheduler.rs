@@ -641,10 +641,14 @@ async fn process_task(
 
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
                 if !target_text.is_empty() {
-                    // 🌟 [OOM 원인 분석용 로그] 모델에 투입되기 직전 전체 컨텍스트의 문자열 길이를 터미널에 출력합니다.
-                    emit_term(&format!("[DEBUG-OOM] 현재 투입되는 컨텍스트 사이즈(문자 수): {}", target_text.len()));
+                    // 컨텍스트 크기에 따른 동적 모델 할당 (10,000 초과 시 Qwen, 이하 시 Qwen3)
+                    let is_large_context = target_text.len() > 10000;
+                    let target_model_size = if is_large_context { crate::model::ModelSize::Qwen } else { crate::model::ModelSize::Qwen3 };
 
-                    model.secure_vram_relay(crate::model::ModelSize::Qwen3, None, Some(cancellation_token.clone()), false, None).await?;
+                    // 🌟 [OOM 원인 분석용 로그] 모델에 투입되기 직전 전체 컨텍스트의 문자열 길이를 터미널에 출력합니다.
+                    emit_term(&format!("[DEBUG-OOM] 현재 투입되는 컨텍스트 사이즈(문자 수): {}. 선택된 모델: {:?}", target_text.len(), target_model_size));
+
+                    model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await?;
 
                     // 🌟 16개의 마스킹 타겟 항목(Key) 문자열만 배열에 담습니다.
                     let target_items = vec![
@@ -691,12 +695,13 @@ async fn process_task(
                             let _ = app_handle.emit("extraction-progress", &payload);
                             crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
 
-                            let gen_arc = model.qwen3_generator.clone();
                             let cancel_clone = cancellation_token.clone();
                             let prompt_clone = prompt.clone();
 
-                            let res_mask = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-                                let mut gen_guard = gen_arc.blocking_lock();
+                            // 🌟 선택된 모델에 맞게 추론 방식을 동적 분기합니다 (async / blocking)
+                            let res_mask = if is_large_context {
+                                let gen_arc = model.generator.clone();
+                                let mut gen_guard = gen_arc.lock().await;
                                 if let Some(gen) = gen_guard.as_mut() {
                                     let params = crate::openai_types::ChatCompletionParameters {
                                         messages: vec![
@@ -705,24 +710,51 @@ async fn process_task(
                                                 name: None,
                                             })
                                         ],
-                                        model: "qwen3".to_string(),
+                                        model: "qwen".to_string(),
                                         max_tokens: Some(256),
                                         temperature: Some(0.0),
                                         top_p: Some(0.95),
                                         ..Default::default()
                                     };
-                                    // 🌟 파라미터 개수 오류(E0061) 해결: params와 cancel_clone만 전달
-                                    let res = gen.generate(params, Some(cancel_clone)).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e));
+                                    // Qwen 모델은 비동기(async) generate를 사용하므로 바로 await 합니다.
+                                    let res = gen.generate(params, Some(cancel_clone), None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
                                     
-                                    // 🌟 [CRITICAL FIX] 루프가 반복될 때마다 이전 추론의 KV 캐시가 VRAM에 무한 누적되어 
-                                    // 4GB VRAM을 순식간에 터뜨리던 OOM 메모리 누수 현상을 원천 차단합니다!
-                                    gen.clear_kv_cache();
+                                    let _ = gen.clear_kv_cache();
                                     
                                     res
                                 } else {
-                                    Err(anyhow::anyhow!("Qwen3 Generator is missing"))
+                                    Err(anyhow::anyhow!("Qwen Generator is missing"))
                                 }
-                            }).await??;
+                            } else {
+                                let gen_arc = model.qwen3_generator.clone();
+                                tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+                                    let mut gen_guard = gen_arc.blocking_lock();
+                                    if let Some(gen) = gen_guard.as_mut() {
+                                        let params = crate::openai_types::ChatCompletionParameters {
+                                            messages: vec![
+                                                crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
+                                                    content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(prompt_clone),
+                                                    name: None,
+                                                })
+                                            ],
+                                            model: "qwen3".to_string(),
+                                            max_tokens: Some(256),
+                                            temperature: Some(0.0),
+                                            top_p: Some(0.95),
+                                            ..Default::default()
+                                        };
+                                        // 🌟 파라미터 개수 오류(E0061) 해결: params와 cancel_clone만 전달
+                                        let res = gen.generate(params, Some(cancel_clone)).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e));
+                                        
+                                        // 🌟 [CRITICAL FIX] 4GB VRAM 메모리 누수 방지
+                                        gen.clear_kv_cache();
+                                        
+                                        res
+                                    } else {
+                                        Err(anyhow::anyhow!("Qwen3 Generator is missing"))
+                                    }
+                                }).await?
+                            }?;
 
                             // 🌟 [OOM 원인 분석용 로그] 추론 직후 LLM이 뱉어낸 실제 결과값과 길이를 출력합니다.
                             emit_term(&format!("[DEBUG-OOM] [{}] 항목 추론 완료 - 응답 길이: {}, 결과: {}", key_name, res_mask.len(), res_mask));
