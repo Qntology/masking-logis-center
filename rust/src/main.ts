@@ -680,6 +680,9 @@ async function updateExtractButtonVisibility() {
         }
     }
 
+    // 🌟 백엔드 및 덱시를 조회하여 최신 마스킹 상태를 먼저 동기화합니다.
+    await syncMaskingState();
+
     let shouldHide = false;
     try {
         if (currentImage) {
@@ -693,8 +696,16 @@ async function updateExtractButtonVisibility() {
             const isCurrentExecuting = GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskPayload && 
                 GlobalTaskManager.currentTaskPayload.ref === imageRefHash;
 
+            // 🌟 [추가] 현재 마스킹 대기열(maskingUuids)에 이 이미지(ref)가 포함되어 있는지 대조 확인
+            let isMasking = false;
+            if (maskingUuids.size > 0) {
+                // 🌟 [CRITICAL FIX] 동일한 이미지를 여러 번 추출했을 경우를 대비해 탐색 리밋을 100으로 대폭 상향
+                const docs = await invoke<any[]>("get_all_documents", { limit: 100, offset: 0, filter: `ref = '${imageRefHash}'` });
+                if (docs.some(d => maskingUuids.has(d.id || d.uuid))) isMasking = true;
+            }
+
             // 🌟 [CRITICAL FIX] 이미 리스트에 존재하더라도 덮어쓰기(업데이트)를 위해 버튼을 숨기지 않습니다. (domExists 검사 제거)
-            if (isActive || isQueued || isCurrentExecuting) shouldHide = true;
+            if (isActive || isQueued || isCurrentExecuting || isMasking) shouldHide = true;
         } else if (currentDetectedUrl) {
             const urlObj = new URL(currentDetectedUrl.toLowerCase());
             const link = (urlObj.pathname + urlObj.search).toLowerCase();
@@ -711,8 +722,16 @@ async function updateExtractButtonVisibility() {
             const isCurrentExecuting = GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskPayload && 
                 (GlobalTaskManager.currentTaskPayload.ref === currentRefToCheck || GlobalTaskManager.currentTaskPayload.link === link);
             
+            // 🌟 [추가] 현재 마스킹 대기열(maskingUuids)에 이 웹페이지 주소(ref)가 포함되어 있는지 대조 확인
+            let isMasking = false;
+            if (maskingUuids.size > 0) {
+                // 🌟 [CRITICAL FIX] 동일한 주소의 과거 문서들이 10개 이상 쌓여있을 경우를 대비해 탐색 리밋을 100으로 대폭 상향
+                const docs = await invoke<any[]>("get_all_documents", { limit: 100, offset: 0, filter: `ref = '${currentRefToCheck}'` });
+                if (docs.some(d => maskingUuids.has(d.id || d.uuid))) isMasking = true;
+            }
+
             // 🌟 [CRITICAL FIX] 이미 Pages 트리에 존재하더라도 덮어쓰기(업데이트)를 위해 버튼을 숨기지 않습니다.
-            if (isActive || isQueued || isCurrentExecuting) shouldHide = true;
+            if (isActive || isQueued || isCurrentExecuting || isMasking) shouldHide = true;
         }
     } catch (e) {
         // 통신 에러 발생 시 노출 유지
@@ -1778,8 +1797,13 @@ document.getElementById("btn-all-selected")?.addEventListener("click", () => {
     const allCheckboxes = document.querySelectorAll('.item-select-checkbox') as NodeListOf<HTMLInputElement>;
     if (allCheckboxes.length === 0) return;
 
-    // 🌟 [수정] 마스킹 진행 중이어서 비활성화된(disabled) 체크박스는 제외하고 선택 가능한 대상만 추출합니다.
-    const selectableCheckboxes = Array.from(allCheckboxes).filter(cb => !cb.disabled);
+    // 🌟 [수정] 마스킹 진행 중이어서 비활성화된(disabled) 체크박스 및 클래스를 삼중으로 검사하여 완벽히 제외합니다.
+    const selectableCheckboxes = Array.from(allCheckboxes).filter(cb => {
+        const docId = cb.dataset.id;
+        const card = cb.closest('.logis-result');
+        const isMasking = cb.disabled || (docId && maskingUuids.has(docId)) || (card && card.classList.contains("masking"));
+        return docId && !isMasking;
+    });
     if (selectableCheckboxes.length === 0) return;
 
     // 선택 가능한 아이템이 모두 선택되었는지 확인
@@ -2684,7 +2708,9 @@ document.getElementById("btn-mask-selected")?.addEventListener("click", async ()
                 type: "mask_documents",
                 uuids: uuidsToMask,
                 link: "Batch PII Masking",
-                ref: "mask_documents"
+                // 🌟 [CRITICAL FIX] "mask_documents"로 덮어쓰지 않고, 현재 브라우저가 포커싱 중인 URL 해시(ref)를 주입합니다.
+                // 이로 인해 DB에 작업이 등록될 때 URL 주소와 완벽하게 연결되어 추출 버튼이 정확히 숨겨집니다.
+                ref: activeContext.ref || "mask_documents"
             });
             
             // 🌟 진행 중인 마스킹 아이템 상태 등록 및 UI 즉시 갱신
@@ -3464,7 +3490,65 @@ async function refreshList() {
     await loadMoreDocs(true);
 }
 
+// 🌟 [추가] LanceDB와 Dexie를 모두 조회하여 마스킹 중인 아이템 상태를 100% 동기화하는 헬퍼 함수
+async function syncMaskingState() {
+    try {
+        GlobalTaskManager.queue.forEach(q => {
+            if (q.taskId.startsWith("mask_") && q.payload) {
+                let p = q.payload;
+                // 🌟 JSON 중첩 직렬화 완벽 파싱 루프
+                while (typeof p === 'string') { try { p = JSON.parse(p); } catch(e){ break; } }
+                if (p && Array.isArray(p.uuids)) {
+                    p.uuids.forEach((id: string) => maskingUuids.add(id));
+                }
+            }
+        });
+
+        // 🌟 [CRITICAL FIX] 큐에서 빠져나와 현재 프론트엔드에서 실행 중(Processing)인 작업도 마스킹 상태 검사에 반드시 포함시킵니다!
+        if (GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskId.startsWith("mask_") && GlobalTaskManager.currentTaskPayload) {
+            let p = GlobalTaskManager.currentTaskPayload;
+            while (typeof p === 'string') { try { p = JSON.parse(p); } catch(e){ break; } }
+            if (p && Array.isArray(p.uuids)) {
+                p.uuids.forEach((id: string) => maskingUuids.add(id));
+            }
+        }
+
+        const activeTasks = await invoke<any[]>("get_active_tasks");
+        activeTasks.forEach(t => {
+            if (t.id.startsWith("mask_") && (t.status === 1 || t.status === 10)) {
+                try {
+                    let tData = t.data || t.data_json;
+                    // 🌟 JSON 중첩 직렬화 완벽 파싱 루프
+                    while (typeof tData === 'string') { try { tData = JSON.parse(tData); } catch(e){ break; } }
+                    if (tData && Array.isArray(tData.uuids)) {
+                        tData.uuids.forEach((id: string) => maskingUuids.add(id));
+                    }
+                } catch(e) {}
+            }
+        });
+
+        // 🌟 [CRITICAL FIX] 새로고침(F5) 시 이전 대기열 아이템과 현재 렌더링된 DOM(doc-list)을 대조하여
+        // 체크박스의 readonly(disabled) 및 체크 상태가 풀린 것을 강제로 원상복구(유지)합니다!
+        maskingUuids.forEach(id => {
+            const card = document.getElementById(id);
+            if (card && card.closest('#doc-list')) {
+                card.classList.add("masking");
+                const cb = card.querySelector('.item-select-checkbox') as HTMLInputElement;
+                if (cb) {
+                    cb.checked = true;
+                    cb.disabled = true;
+                }
+            }
+        });
+
+    } catch (e) {
+        console.error("Failed to sync masking state:", e);
+    }
+}
+
 async function loadMoreDocs(reset: boolean = false, isSync: boolean = false) {
+    await syncMaskingState(); // 🌟 UI 렌더링 전 완벽한 마스킹 상태 복구
+
     if (reset) {
         currentPage = 0; hasMore = true;
         if (docListContainer) docListContainer.innerHTML = "";
@@ -3757,11 +3841,12 @@ function updateListActionButtons() {
     if (selectedUuids.size > 0) {
         if (btnDelete) btnDelete.style.display = "inline-block";
         
-        // 🌟 마스킹 되지 않은 아이템 개수 카운트
+        // 🌟 마스킹 되지 않은 아이템 개수 카운트 (마스킹 진행 중인 아이템은 완벽 제외)
         let unmaskedCount = 0;
         selectedUuids.forEach(uuid => {
             const card = document.getElementById(uuid);
-            if (card && card.dataset.isMasked !== "true") {
+            // dataset뿐만 아니라, 현재 진행 중인 maskingUuids에 포함되어 있는지도 이중으로 검사합니다.
+            if (card && card.dataset.isMasked !== "true" && !maskingUuids.has(uuid)) {
                 unmaskedCount++;
             }
         });
@@ -4381,6 +4466,13 @@ async function initSession() {
         
         // 🌟 1. 새로고침 전 담아두었던 프론트엔드 대기열 먼저 복구 (Dexie 비동기 처리)
         await GlobalTaskManager.loadQueue();
+
+        // 🌟 [추가] 프론트엔드 큐에 남아있는 마스킹 대상을 가장 먼저 복구하여 새로고침 시에도 상태를 유지합니다.
+        GlobalTaskManager.queue.forEach(q => {
+            if (q.taskId.startsWith("mask_") && q.payload && Array.isArray(q.payload.uuids)) {
+                q.payload.uuids.forEach((uuid: string) => maskingUuids.add(uuid));
+            }
+        });
         
         const data = await invoke<any>("mark_ui_ready");
 
@@ -4442,7 +4534,8 @@ async function initSession() {
                     let taskData: any = {};
                     let taskQuery = "";
                     try {
-                        taskData = typeof t.data_json === 'string' ? JSON.parse(t.data_json) : t.data_json;
+                        let rawData = t.data || t.data_json;
+                        taskData = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
                         taskQuery = taskData.query || "";
                     } catch(e) {
                         console.warn("[WIDGET] Failed to parse task data for query recovery:", e);
@@ -4481,8 +4574,11 @@ async function initSession() {
                     // 🌟 [추가] 마스킹 작업 복구: 재시작 시 진행 중이거나 대기 중인 마스킹 대상 추적
                     if (t.id.startsWith("mask_")) {
                         try {
-                            if (taskData.uuids && Array.isArray(taskData.uuids)) {
-                                taskData.uuids.forEach((uuid: string) => maskingUuids.add(uuid));
+                            let p = taskData;
+                            // 🌟 JSON 중첩 직렬화 완벽 파싱 루프
+                            while (typeof p === 'string') { try { p = JSON.parse(p); } catch(e){ break; } }
+                            if (p && Array.isArray(p.uuids)) {
+                                p.uuids.forEach((uuid: string) => maskingUuids.add(uuid));
                             }
                         } catch(e) {}
                     }
@@ -5570,6 +5666,7 @@ async function loadMoreChat(isHistory: boolean = false, silent: boolean = false)
                     task_id: q.taskId,
                     status: 10, // Pending
                     created_at: ts,
+                    data: q.payload,
                     data_json: q.payload,
                     ref: q.payload.link || q.payload.image_path || "Queued Task"
                 };
@@ -5588,7 +5685,8 @@ async function loadMoreChat(isHistory: boolean = false, silent: boolean = false)
             combinedTasks.forEach((t: any) => {
                 let taskQuery = "";
                 try {
-                    const taskData = typeof t.data_json === 'string' ? JSON.parse(t.data_json) : t.data_json;
+                    let rawData = t.data || t.data_json;
+                    const taskData = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
                     taskQuery = taskData.query || "";
                 } catch(e) {}
 

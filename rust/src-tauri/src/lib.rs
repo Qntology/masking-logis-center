@@ -1573,22 +1573,39 @@ struct ActiveTaskQuery {
 
 #[tauri::command]
 async fn check_active_task(
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     payload: ActiveTaskQuery,
 ) -> Result<bool, String> {
     
+    // 1. 메모리(진행 중인 활성 작업) 먼저 확인
     if let Ok(mem_guard) = crate::ACTIVE_TASK_MEM.read() {
         if let Some(active) = mem_guard.as_ref() {
             let active_ref = active.get("ref").and_then(|v| v.as_str()).unwrap_or("");
             let status = active.get("status").and_then(|v| v.as_i64()).unwrap_or(0);
             
-            
-            // 완료된 작업(9)에 의해 추출 버튼이 영구적으로 숨겨지는 버그를 완벽히 막을 수 있습니다.
             if active_ref == payload.r#ref && (status == 1 || status == 10) {
-                return Ok(true); // 현재 메모리에서 해당 페이지가 아직 처리 또는 대기 중임
+                return Ok(true);
             }
         }
     }
+
+    // 🌟 [CRITICAL FIX] 2. 메모리에 없더라도 LanceDB를 직접 쿼리하여 대기 중인(Pending) 작업이 있는지 완벽하게 교차 검증합니다!
+    let store_guard = state.store.lock().await;
+    if let Some(db) = store_guard.as_ref() {
+        // 대기열에 있는 작업 검사 (넉넉하게 100개 조회)
+        if let Ok(pending) = db.get_pending_tasks(100).await {
+            for t in pending {
+                if t.r#ref == payload.r#ref { return Ok(true); }
+            }
+        }
+        // 처리 중인 작업 검사
+        if let Ok(active) = db.get_processing_tasks(100).await {
+            for t in active {
+                if t.r#ref == payload.r#ref { return Ok(true); }
+            }
+        }
+    }
+
     Ok(false)
 }
 
@@ -1787,9 +1804,10 @@ async fn get_browser_status() -> Result<Value, String> {
 async fn get_active_tasks(state: State<'_, AppState>) -> Result<Vec<store::Task>, String> {
     let store_guard = state.store.lock().await;
     if let Some(db) = store_guard.as_ref() {
-        let mut tasks = db.get_pending_tasks(10).await.unwrap_or_default();
+        // 🌟 [CRITICAL FIX] 동기화 스캐닝 시에도 큐 유실을 막기 위해 100으로 상향
+        let mut tasks = db.get_pending_tasks(100).await.unwrap_or_default();
         
-        if let Ok(mut active) = db.get_processing_tasks(10).await {
+        if let Ok(mut active) = db.get_processing_tasks(100).await {
             tasks.append(&mut active);
         }
         Ok(tasks)
@@ -1955,9 +1973,10 @@ async fn mark_ui_ready(state: State<'_, AppState>) -> Result<InitialSyncData, St
     let mut items = Vec::new();
     
     if let Some(db) = store_guard.as_ref() {
-        let mut raw_tasks = db.get_pending_tasks(10).await.unwrap_or_default();
+        // 🌟 [CRITICAL FIX] 새로고침 시 큐에 쌓인 작업이 10개를 넘어가면 유실되는 버그를 방지하기 위해 100으로 상향
+        let mut raw_tasks = db.get_pending_tasks(100).await.unwrap_or_default();
         
-        if let Ok(mut active) = db.get_processing_tasks(10).await {
+        if let Ok(mut active) = db.get_processing_tasks(100).await {
             raw_tasks.append(&mut active);
         }
         

@@ -405,24 +405,43 @@ async fn process_task(
             let safe_image_path = image_path.replace("\\", "/");
             let pug_image_tag = format!("img(src=\"file://{}\", alt=\"{}\")", safe_image_path, filename);
 
-            let draft_data = json!({
-                "id": task.id.clone(),
-                "type": "draft",
-                "link": format!("file://{}", filename),
-                "html": b64_img.clone(),
-                "yaml": pug_image_tag, 
-                "title": extracted_title.clone(),
-                "description": extracted_desc.clone(),
-                "text": "Staged Image content",
-                "masked_text": b64_img,
-                "updated_at": chrono::Utc::now().timestamp_millis(),
-                "mode": search_mode.clone() // 🌟 [CRITICAL FIX] 삭제 시 해시 추적을 위해 mode를 반드시 저장해야 합니다.
-            });
-
             let store_guard = store_mutex.lock().await;
             if let Some(db) = store_guard.as_ref() {
-                // 🌟 [추가] 새 이미지 여부 확인 및 Pages 테이블 카운트 증가 로직
-                let is_new = db.get_item_by_id("items", &task.id).await.unwrap_or(None).is_none();
+                // 🌟 [추가] 기존 아이템 여부 확인 및 속성 보존 처리
+                let existing_doc = db.get_item_by_id("items", &task.id).await.unwrap_or(None);
+                let is_new = existing_doc.is_none();
+
+                let mut draft_data = json!({
+                    "id": task.id.clone(),
+                    "type": "draft",
+                    "link": format!("file://{}", filename),
+                    "html": b64_img.clone(),
+                    "yaml": pug_image_tag, 
+                    "title": extracted_title.clone(),
+                    "description": extracted_desc.clone(),
+                    "text": "Staged Image content",
+                    "updated_at": chrono::Utc::now().timestamp_millis(),
+                    "mode": search_mode.clone() // 🌟 [CRITICAL FIX] 삭제 시 해시 추적을 위해 mode를 반드시 저장해야 합니다.
+                });
+
+                if let Some(doc) = existing_doc {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(&doc.json_data) {
+                        if let Some(obj) = draft_data.as_object_mut() {
+                            // 이전에 마스킹된 데이터 및 커스텀 타이틀(data.title), 생성일(created_at) 보존
+                            if let Some(masked) = parsed.get("masked") { obj.insert("masked".to_string(), masked.clone()); }
+                            if let Some(is_masked) = parsed.get("is_masked") { obj.insert("is_masked".to_string(), is_masked.clone()); }
+                            if let Some(masked_text) = parsed.get("masked_text") { obj.insert("masked_text".to_string(), masked_text.clone()); }
+                            if let Some(data) = parsed.get("data") { obj.insert("data".to_string(), data.clone()); }
+                            if let Some(created_at) = parsed.get("created_at") { obj.insert("created_at".to_string(), created_at.clone()); }
+                            if let Some(image_text) = parsed.get("image_text") { obj.insert("image_text".to_string(), image_text.clone()); }
+                        }
+                    }
+                } else {
+                    if let Some(obj) = draft_data.as_object_mut() {
+                        obj.insert("masked_text".to_string(), json!(b64_img));
+                        obj.insert("created_at".to_string(), json!(chrono::Utc::now().timestamp_millis()));
+                    }
+                }
 
                 let _ = db.upsert_item(
                     "items", &task.id, "draft", draft_data.clone(), None,
@@ -1017,24 +1036,42 @@ async fn process_task(
             (title, desc)
         }; // <-- document 객체가 여기서 파기되므로, 이후의 await 지점을 안전하게 통과할 수 있습니다.
 
-        let draft_data = json!({
-            "id": task.id.clone(),
-            "type": "draft",
-            "link": url,
-            "html": clean_html_content,
-            "yaml": raw_pug,
-            "title": extracted_title, 
-            "description": extracted_desc, 
-            "text": "Staged HTML and YAML content", 
-            "masked_text": "",
-            "updated_at": chrono::Utc::now().timestamp_millis(),
-            "mode": search_mode.clone() // 🌟 [CRITICAL FIX] 동일하게 웹페이지 추출 시에도 mode를 누락 없이 저장합니다.
-        });
-
         let store_guard = store_mutex.lock().await;
         if let Some(db) = store_guard.as_ref() {
-            // 🌟 [추가] 새 아이템 여부 확인 및 Pages 테이블 카운트 증감(증가) 로직
-            let is_new = db.get_item_by_id("items", &task.id).await.unwrap_or(None).is_none();
+            // 🌟 [추가] 기존 아이템 여부 확인 및 속성 보존 처리
+            let existing_doc = db.get_item_by_id("items", &task.id).await.unwrap_or(None);
+            let is_new = existing_doc.is_none();
+
+            let mut draft_data = json!({
+                "id": task.id.clone(),
+                "type": "draft",
+                "link": url.clone(),
+                "html": clean_html_content,
+                "yaml": raw_pug,
+                "title": extracted_title.clone(), 
+                "description": extracted_desc.clone(), 
+                "text": "Staged HTML and YAML content", 
+                "updated_at": chrono::Utc::now().timestamp_millis(),
+                "mode": search_mode.clone() // 🌟 [CRITICAL FIX] 동일하게 웹페이지 추출 시에도 mode를 누락 없이 저장합니다.
+            });
+
+            if let Some(doc) = existing_doc {
+                if let Ok(parsed) = serde_json::from_str::<Value>(&doc.json_data) {
+                    if let Some(obj) = draft_data.as_object_mut() {
+                        // 이전에 마스킹된 데이터 및 커스텀 타이틀(data.title), 생성일(created_at) 보존
+                        if let Some(masked) = parsed.get("masked") { obj.insert("masked".to_string(), masked.clone()); }
+                        if let Some(is_masked) = parsed.get("is_masked") { obj.insert("is_masked".to_string(), is_masked.clone()); }
+                        if let Some(masked_text) = parsed.get("masked_text") { obj.insert("masked_text".to_string(), masked_text.clone()); }
+                        if let Some(data) = parsed.get("data") { obj.insert("data".to_string(), data.clone()); }
+                        if let Some(created_at) = parsed.get("created_at") { obj.insert("created_at".to_string(), created_at.clone()); }
+                    }
+                }
+            } else {
+                if let Some(obj) = draft_data.as_object_mut() {
+                    obj.insert("masked_text".to_string(), json!(""));
+                    obj.insert("created_at".to_string(), json!(chrono::Utc::now().timestamp_millis()));
+                }
+            }
 
             let _ = db.upsert_item(
                 "items", &task.id, "draft", draft_data, None,
