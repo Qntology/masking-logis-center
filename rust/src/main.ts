@@ -342,6 +342,7 @@ const taskSteps = new Map<string, Map<string, number>>();
 const taskTotalSteps = new Map<string, number>(); // 🌟 [CRITICAL FIX] 작업별 총 스텝 수를 기억하는 장부 추가
 
 let selectedUuids = new Set<string>();
+let maskingUuids = new Set<string>(); // 🌟 [추가] 마스킹 진행 중인 아이템 ID 추적용 Set
 let currentDetailUuid: string | null = null;
 let activeTaskId: string | null = null; 
 // [DEPRECATED] 흩어져 있던 개별 락 변수들은 GlobalTaskManager로 대체되었습니다.
@@ -1118,7 +1119,7 @@ async function renderNavigation() {
                     
                     await updateExtractButtonVisibility();
                     fetchChatHistory(true);
-                    hideNavigation();
+                    // 🌟 클릭 시 modes와 pages 영역이 사라지지 않도록 숨김 처리(hideNavigation)를 제거했습니다.
                 };
             });
         }
@@ -2155,6 +2156,26 @@ listen("extraction-progress", async (event: any) => {
             isSearching = false;
         }
 
+        // 🌟 마스킹 작업 완료 시 상태 해제 및 DOM 원상복구
+        if (payload.task_id.startsWith("mask_")) {
+            const taskData = GlobalTaskManager.currentTaskPayload;
+            const finishedMaskIds: string[] = (taskData && taskData.uuids) ? taskData.uuids : Array.from(maskingUuids);
+            
+            finishedMaskIds.forEach(id => {
+                maskingUuids.delete(id);
+                const card = document.getElementById(id);
+                if (card) {
+                    card.classList.remove("masking");
+                    const cb = card.querySelector('.item-select-checkbox') as HTMLInputElement;
+                    if (cb) {
+                        cb.disabled = false;
+                        cb.checked = false; // 완료되었으므로 선택 해제 상태로 복귀
+                    }
+                }
+            });
+            updateListActionButtons();
+        }
+
         // 🌟 큐 매니저 릴리즈 (비동기로 Dexie 업데이트 후 processNext 호출됨)
         await GlobalTaskManager.release(payload.task_id, payload.task_id);
         
@@ -2652,16 +2673,27 @@ document.getElementById("btn-mask-selected")?.addEventListener("click", async ()
             openWidget("settings");
             
             const taskId = `mask_${Date.now()}`;
+            const uuidsToMask = Array.from(selectedUuids);
+
             await GlobalTaskManager.addToQueue(taskId, "mask_documents", {
                 id: taskId,
                 type: "mask_documents",
-                uuids: Array.from(selectedUuids),
+                uuids: uuidsToMask,
                 link: "Batch PII Masking",
                 ref: "mask_documents"
             });
             
+            // 🌟 진행 중인 마스킹 아이템 상태 등록 및 UI 즉시 갱신
+            uuidsToMask.forEach(id => maskingUuids.add(id));
             selectedUuids.clear();
             updateListActionButtons();
+
+            // 🌟 리스트의 체크박스와 카드 스타일을 갱신 (masking 클래스 반영)
+            maskingUuids.forEach(id => {
+                const card = document.getElementById(id);
+                if (card) injectItemSelectCheckbox(card, id);
+            });
+
         } catch (e) {
             console.error(e);
         } finally {
@@ -3458,10 +3490,22 @@ async function loadMoreDocs(reset: boolean = false, isSync: boolean = false) {
         // 🌟 [수정] pathname 속성을 이용해 LanceDB의 data(JSON 텍스트)를 LIKE 검색하여 해당 경로 폴더의 데이터를 가져옵니다.
         if (activeContext.ref) baseFilter = `(${baseFilter}) AND ref = '${activeContext.ref}'`;
         else if (activeContext.bcc) baseFilter = `(${baseFilter}) AND bcc = '${activeContext.bcc}'`;
-        else if (activeContext.pathname && activeContext.cc) baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}' AND data LIKE '%${activeContext.pathname}%'`;
+        else if (activeContext.pathname && activeContext.cc) {
+            baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}'`;
+        }
         else if (activeContext.cc) baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}'`;
 
-        const textQuery = searchInput?.value.trim() || "";
+        let textQuery = searchInput?.value.trim() || "";
+
+        // 🌟 [CRITICAL FIX] 느린 LIKE 쿼리 대신 빠르고 강력한 Full Text Search(FTS) 파이프라인을 타도록 검색어에 편입시킵니다.
+        // 따옴표("")로 묶어주어 경로 슬래시(/) 단위로 쪼개지는 것을 막고 정확한 구문 검색(Phrase Match)을 유도합니다.
+        if (activeContext.pathname && activeContext.cc) {
+            if (textQuery) {
+                textQuery = `${textQuery} "${activeContext.pathname}"`;
+            } else {
+                textQuery = `"${activeContext.pathname}"`;
+            }
+        }
 
         let finalFilter = baseFilter;
         let latestUpdateTime = 0;
@@ -3588,6 +3632,15 @@ function upsertListItems(docs: any[], mode: 'prepend' | 'append') {
         const newCheckbox = temp.querySelector(`input#more-${docId}`) as HTMLElement || temp.querySelector('.toggle-more') as HTMLElement;
         const newCard = temp.querySelector(`div[id="${docId}"]`) as HTMLElement || temp.querySelector('.logis-result') as HTMLElement;
 
+        // 🌟 마스킹 여부를 파악하여 카드에 data 속성으로 심어줍니다.
+        if (newCard) {
+            let isMasked = false;
+            if (doc.is_masked) isMasked = true;
+            else if (doc.data && doc.data.is_masked) isMasked = true;
+            else if (typeof doc.json_data === "string" && doc.json_data.includes('"is_masked":true')) isMasked = true;
+            newCard.dataset.isMasked = isMasked ? "true" : "false";
+        }
+
         if (existingEl) {
             const cachedUpdatedAt = parseInt(existingEl.dataset.updatedAt || "0");
             if (doc.updated_at > cachedUpdatedAt) {
@@ -3653,9 +3706,24 @@ function injectItemSelectCheckbox(card: HTMLElement, docId: string) {
         cb.style.cursor = 'pointer';
         card.appendChild(cb);
     }
-    cb.checked = selectedUuids.has(docId);
+
+    // 🌟 마스킹 진행 중 상태 반영 (체크 고정 및 클래스 추가)
+    if (maskingUuids.has(docId)) {
+        cb.checked = true;
+        cb.disabled = true; // readonly 효과 (클릭 불가)
+        card.classList.add("masking");
+    } else {
+        cb.checked = selectedUuids.has(docId);
+        cb.disabled = false;
+        card.classList.remove("masking");
+    }
+
     cb.onclick = (e) => {
         e.stopPropagation();
+        if (cb.disabled) {
+            e.preventDefault();
+            return;
+        }
         if (cb.checked) selectedUuids.add(docId);
         else selectedUuids.delete(docId);
         updateListActionButtons();
@@ -3684,8 +3752,30 @@ function updateListActionButtons() {
     
     if (selectedUuids.size > 0) {
         if (btnDelete) btnDelete.style.display = "inline-block";
-        if (btnMask) btnMask.style.display = "inline-block";
-        if (btnDrag) btnDrag.style.display = "inline-block";
+        
+        // 🌟 마스킹 되지 않은 아이템 개수 카운트
+        let unmaskedCount = 0;
+        selectedUuids.forEach(uuid => {
+            const card = document.getElementById(uuid);
+            if (card && card.dataset.isMasked !== "true") {
+                unmaskedCount++;
+            }
+        });
+
+        if (btnMask) {
+            if (unmaskedCount > 0) {
+                btnMask.style.display = "inline-block";
+                btnMask.innerText = `Mask (${unmaskedCount})`;
+            } else {
+                // 마스킹 대상이 하나도 없으면 마스킹 버튼을 숨깁니다.
+                btnMask.style.display = "none";
+            }
+        }
+
+        if (btnDrag) {
+            btnDrag.style.display = "inline-block";
+            btnDrag.innerText = `Export (${selectedUuids.size})`;
+        }
     } else {
         if (btnDelete) btnDelete.style.display = "none";
         if (btnMask) btnMask.style.display = "none";
@@ -3866,12 +3956,84 @@ async function showDetail(uuid: string) {
 
             detailTitle.innerText = `${displayTitle} ${doc.doc_number || ''}`;
             
+            // 기존 원본 타이틀 백업 (fallback용)
+            const originalTitle = docData.title || doc.text || displayTitle;
+            // 현재 표시할 타이틀 (item.data.title이 있으면 최우선, 없으면 원본)
+            const hasDataTitle = docData.data && typeof docData.data.title !== "undefined";
+            const currentTitle = hasDataTitle ? docData.data.title : originalTitle;
+
             detailContent.innerHTML = `
                 ${displayDesc ? displayDesc + '<hr style="border-color:#eee; margin: 15px 0;">' : ''}
-                <div style="margin-bottom:10px;"><strong>Summary:</strong><br>${doc.text}</div>
+                <div style="margin-bottom:10px;">
+                    <strong>Summary / Title:</strong><br>
+                    <div style="display:flex; gap:8px; margin-top:5px;">
+                        <input type="text" id="detail-title-input" value="${currentTitle.replace(/"/g, '&quot;')}" placeholder="${originalTitle.replace(/"/g, '&quot;')}" style="flex:1; padding:8px; border-radius:4px; border:1px solid #444; background:#222; color:#fff; font-size:0.9rem;" />
+                        <button id="btn-detail-title-save" style="display:none; padding:8px 12px; background:var(--primary); color:#000; border:none; border-radius:4px; font-weight:bold; cursor:pointer;">Update</button>
+                    </div>
+                </div>
                 <hr style="border-color:#eee; margin: 15px 0;">
-                <pre style="white-space: pre-wrap; font-size: 0.8rem; color:#fff; background:#111; padding:10px; border-radius: 6px;">${prettyJson}</pre>
+                <pre id="detail-json-pre" style="white-space: pre-wrap; font-size: 0.8rem; color:#fff; background:#111; padding:10px; border-radius: 6px;">${prettyJson}</pre>
             `;
+
+            // 입력값 변경 감지 및 Update 버튼 동작 처리
+            const titleInput = document.getElementById("detail-title-input") as HTMLInputElement;
+            const titleSaveBtn = document.getElementById("btn-detail-title-save") as HTMLButtonElement;
+
+            if (titleInput && titleSaveBtn) {
+                titleInput.addEventListener("input", () => {
+                    // 현재 입력창의 텍스트가 처음 로드되었을 때의 텍스트(currentTitle)와 다르면 무조건 노출
+                    if (titleInput.value !== currentTitle) {
+                        titleSaveBtn.style.display = "block";
+                    } else {
+                        titleSaveBtn.style.display = "none";
+                    }
+                });
+
+                titleSaveBtn.addEventListener("click", async () => {
+                    // 입력값이 비어있으면 원본 타이틀(originalTitle)을 저장값으로 사용
+                    const newTitle = titleInput.value.trim() === "" ? originalTitle : titleInput.value.trim();
+                    
+                    try {
+                        titleSaveBtn.innerText = "Saving...";
+                        titleSaveBtn.disabled = true;
+
+                        // 기존 item.title은 유지하고 item.data.title 에만 반영
+                        if (!docData.data) docData.data = {};
+                        docData.data.title = newTitle;
+                        docData.id = docData.id || doc.id || doc.uuid;
+                        docData.type = docData.type || doc.doc_type || doc.type;
+
+                        // 백엔드 데이터베이스에 수정된 내용 반영
+                        await invoke("upsert_items", { items: [docData] });
+
+                        // 업데이트 후 인풋창에도 복구된 값 세팅 (비워뒀다면 원래 값으로 채워짐)
+                        titleInput.value = newTitle;
+
+                        // 하단의 JSON 프리뷰 텍스트도 실시간 반영
+                        const preEl = document.getElementById("detail-json-pre");
+                        if (preEl) {
+                            preEl.innerHTML = JSON.stringify(docData, null, 2)
+                                .replace(/&/g, '&amp;')
+                                .replace(/</g, '&lt;')
+                                .replace(/>/g, '&gt;');
+                        }
+
+                        titleSaveBtn.innerText = "Saved";
+                        setTimeout(() => {
+                            titleSaveBtn.style.display = "none";
+                            titleSaveBtn.innerText = "Update";
+                            titleSaveBtn.disabled = false;
+                        }, 1000);
+
+                        // 리스트 뷰 역시 새로운 타이틀로 갱신하기 위해 새로고침
+                        await refreshList();
+                    } catch (e) {
+                        console.error("Failed to update title:", e);
+                        titleSaveBtn.innerText = "Error";
+                        titleSaveBtn.disabled = false;
+                    }
+                });
+            }
         } else {
             detailContent.innerHTML = `<div class="empty">Document not found in database.</div>`;
         }
@@ -4310,6 +4472,15 @@ async function initSession() {
                         });
                     }
                     
+                    // 🌟 [추가] 마스킹 작업 복구: 재시작 시 진행 중이거나 대기 중인 마스킹 대상 추적
+                    if (t.id.startsWith("mask_")) {
+                        try {
+                            if (taskData.uuids && Array.isArray(taskData.uuids)) {
+                                taskData.uuids.forEach((uuid: string) => maskingUuids.add(uuid));
+                            }
+                        } catch(e) {}
+                    }
+
                     // 3. 진행 중(1)이거나 대기 중(10)인 작업에 대한 전역 상태 락 설정
                     // 🌟 [CRITICAL FIX] 검색 작업인데 프론트엔드 큐(TS Queue)에 존재하지 않는다면 실행될 가능성이 없는 유령(Ghost)입니다.
                     const isSearchGhost = t.id.startsWith("search_") && !GlobalTaskManager.queue.some(q => q.taskId === t.id);

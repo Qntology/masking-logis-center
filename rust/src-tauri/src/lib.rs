@@ -52,31 +52,230 @@ async fn start_file_drag(
     fetch_all: bool,
     filter: Option<String>,
 ) -> Result<(), String> {
+    // 🌟 [변경] PUG 전체를 완벽한 Markdown으로 변환하는 파서 엔진
+    fn convert_pug_to_md(pug: &str) -> String {
+        let mut output = String::new();
+        let mut in_table = false;
+        let mut table_indent = 0;
+        let mut current_row = Vec::new();
+        let mut all_rows: Vec<(bool, Vec<String>)> = Vec::new();
+        let mut is_header_row = false;
+        let mut current_cell = String::new();
+
+        let mut flush_cell = |cell: &mut String, row: &mut Vec<String>| {
+            if !cell.is_empty() {
+                row.push(cell.trim().to_string());
+                cell.clear();
+            }
+        };
+        
+        let mut flush_row = |row: &mut Vec<String>, rows: &mut Vec<(bool, Vec<String>)>, is_hdr: bool| {
+            if !row.is_empty() {
+                rows.push((is_hdr, row.clone()));
+                row.clear();
+            }
+        };
+
+        let render_table = |rows: &Vec<(bool, Vec<String>)>| -> String {
+            if rows.is_empty() { return String::new(); }
+            let mut res = String::new();
+            let max_cols = rows.iter().map(|(_, r)| r.len()).max().unwrap_or(0);
+            
+            let mut has_header = false;
+            for (idx, (is_hdr, r)) in rows.iter().enumerate() {
+                res.push('|');
+                for i in 0..max_cols {
+                    let cell = r.get(i).map(|s| s.as_str()).unwrap_or("");
+                    res.push_str(&format!(" {} |", cell));
+                }
+                res.push('\n');
+                
+                if *is_hdr && !has_header {
+                    res.push('|');
+                    for _ in 0..max_cols { res.push_str(" --- |"); }
+                    res.push('\n');
+                    has_header = true;
+                }
+            }
+            if !has_header && !rows.is_empty() {
+                let mut final_res = String::new();
+                for (idx, (_, r)) in rows.iter().enumerate() {
+                    final_res.push('|');
+                    for i in 0..max_cols {
+                        let cell = r.get(i).map(|s| s.as_str()).unwrap_or("");
+                        final_res.push_str(&format!(" {} |", cell));
+                    }
+                    final_res.push('\n');
+                    if idx == 0 {
+                        final_res.push('|');
+                        for _ in 0..max_cols { final_res.push_str(" --- |"); }
+                        final_res.push('\n');
+                    }
+                }
+                return final_res;
+            }
+            res
+        };
+
+        for line in pug.lines() {
+            let trimmed = line.trim();
+            let indent = line.chars().take_while(|c| *c == ' ').count();
+
+            if trimmed.is_empty() { continue; }
+
+            // Table Context
+            if !in_table {
+                if trimmed.starts_with("table") {
+                    in_table = true;
+                    table_indent = indent;
+                    continue;
+                }
+            } else {
+                if indent <= table_indent && !trimmed.starts_with("table") {
+                    flush_cell(&mut current_cell, &mut current_row);
+                    flush_row(&mut current_row, &mut all_rows, is_header_row);
+                    output.push_str(&render_table(&all_rows));
+                    output.push('\n');
+                    all_rows.clear();
+                    in_table = false;
+                } else if trimmed.starts_with("table") {
+                    flush_cell(&mut current_cell, &mut current_row);
+                    flush_row(&mut current_row, &mut all_rows, is_header_row);
+                    output.push_str(&render_table(&all_rows));
+                    output.push('\n');
+                    all_rows.clear();
+                    in_table = true;
+                    table_indent = indent;
+                    continue;
+                } else {
+                    if trimmed.starts_with("thead") {
+                        flush_cell(&mut current_cell, &mut current_row);
+                        flush_row(&mut current_row, &mut all_rows, is_header_row);
+                        is_header_row = true;
+                    } else if trimmed.starts_with("tbody") {
+                        flush_cell(&mut current_cell, &mut current_row);
+                        flush_row(&mut current_row, &mut all_rows, is_header_row);
+                        is_header_row = false;
+                    } else if trimmed.starts_with("tr") {
+                        flush_cell(&mut current_cell, &mut current_row);
+                        flush_row(&mut current_row, &mut all_rows, is_header_row);
+                    } else if trimmed.starts_with("th") || trimmed.starts_with("td") {
+                        flush_cell(&mut current_cell, &mut current_row);
+                        let text_part = trimmed.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                        if !text_part.is_empty() { current_cell.push_str(text_part); }
+                    } else if trimmed.starts_with('|') {
+                        if !current_cell.is_empty() { current_cell.push(' '); }
+                        current_cell.push_str(trimmed[1..].trim());
+                    } else if trimmed.starts_with('-') {
+                        if !current_cell.is_empty() { current_cell.push(' '); }
+                        current_cell.push_str(trimmed[1..].trim());
+                    } else if trimmed.starts_with("a[href=") {
+                        let link_text = trimmed.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                        if !link_text.is_empty() {
+                            if !current_cell.is_empty() { current_cell.push(' '); }
+                            current_cell.push_str(link_text);
+                        }
+                    } else if trimmed.starts_with("img[src=") {
+                        if !current_cell.is_empty() { current_cell.push(' '); }
+                        current_cell.push_str("[Image]");
+                    } else if trimmed.starts_with("input") || trimmed.starts_with("label") || trimmed.starts_with("span") {
+                        let text_part = trimmed.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                        if !text_part.is_empty() {
+                            if !current_cell.is_empty() { current_cell.push(' '); }
+                            current_cell.push_str(text_part);
+                        }
+                    } else {
+                        if !current_cell.is_empty() { current_cell.push(' '); }
+                        current_cell.push_str(trimmed);
+                    }
+                    continue;
+                }
+            }
+
+            // General Markdown Context
+            if trimmed == "html" || trimmed == "head" || trimmed == "body" || trimmed == "div" || trimmed == "span" || trimmed.starts_with("meta") || trimmed == "title" || trimmed == "nav" || trimmed == "ul" || trimmed == "ol" || trimmed == "dl" || trimmed == "dt" || trimmed == "dd" || trimmed == "form" || trimmed == "colgroup" || trimmed == "col" {
+                continue;
+            }
+
+            if trimmed.starts_with("h1") {
+                output.push_str(&format!("# {}\n\n", trimmed[2..].trim()));
+            } else if trimmed.starts_with("h2") {
+                output.push_str(&format!("## {}\n\n", trimmed[2..].trim()));
+            } else if trimmed.starts_with("h3") {
+                output.push_str(&format!("### {}\n\n", trimmed[2..].trim()));
+            } else if trimmed.starts_with("h4") {
+                output.push_str(&format!("#### {}\n\n", trimmed[2..].trim()));
+            } else if trimmed.starts_with("li") {
+                let text = trimmed[2..].trim();
+                if !text.is_empty() { output.push_str(&format!("- {}\n", text)); }
+            } else if trimmed.starts_with('|') {
+                output.push_str(&format!("{}\n", trimmed[1..].trim()));
+            } else if trimmed.starts_with('-') {
+                output.push_str(&format!("- {}\n", trimmed[1..].trim()));
+            } else if trimmed.starts_with("a[href=") {
+                let mut url = "";
+                let mut text = "";
+                if let Some(start) = trimmed.find('"') {
+                    if let Some(end) = trimmed[start+1..].find('"') {
+                        url = &trimmed[start+1..start+1+end];
+                        let rest = &trimmed[start+1+end+1..];
+                        if let Some(bracket) = rest.find(']') {
+                            text = rest[bracket+1..].trim();
+                        }
+                    }
+                }
+                if text.is_empty() { text = url; }
+                output.push_str(&format!("[{}]({})\n\n", text, url));
+            } else if trimmed.starts_with("img[src=") {
+                let mut url = "";
+                if let Some(start) = trimmed.find('"') {
+                    if let Some(end) = trimmed[start+1..].find('"') {
+                        url = &trimmed[start+1..start+1+end];
+                    }
+                }
+                output.push_str(&format!("![]({})\n\n", url));
+            } else if trimmed.starts_with("input") || trimmed.starts_with("label") || trimmed.starts_with("strong") || trimmed.starts_with("b") {
+                let text_part = trimmed.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                if !text_part.is_empty() {
+                    output.push_str(&format!("{}\n", text_part));
+                }
+            } else {
+                output.push_str(&format!("{}\n", trimmed));
+            }
+        }
+
+        if in_table {
+            flush_cell(&mut current_cell, &mut current_row);
+            flush_row(&mut current_row, &mut all_rows, is_header_row);
+            output.push_str(&render_table(&all_rows));
+            output.push('\n');
+        }
+        
+        let re = regex::Regex::new(r"\n{3,}").unwrap();
+        re.replace_all(&output, "\n\n").to_string().trim().to_string()
+    }
+
     let store_guard = state.store.lock().await;
     if let Some(store) = store_guard.as_ref() {
         let mut yaml_contents = Vec::new();
 
-        // [추가] JSON 데이터에서 title, link, description을 추출하여 Pug 메타 태그로 주입하는 클로저
+        // [추가] JSON 데이터에서 title, link, description을 추출하여 마크다운 메타데이터(Frontmatter)로 주입하는 클로저
         let process_pug_meta = |json_val: &serde_json::Value| -> Option<String> {
             if let Some(yaml) = json_val.get("yaml").and_then(|v| v.as_str()) {
-                let title = json_val.get("title").and_then(|v| v.as_str()).unwrap_or("").replace("\"", "\\\"");
-                let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("").replace("\"", "\\\"");
-                let desc = json_val.get("description").and_then(|v| v.as_str()).unwrap_or("").replace("\"", "\\\"");
+                let title = json_val.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = json_val.get("description").and_then(|v| v.as_str()).unwrap_or("");
                 
-                // 🌟 meta 태그들의 들여쓰기 공백을 4칸에서 8칸으로 늘려 탭 한 번을 더 적용했습니다.
-                let meta_tags = format!(
-                    "        meta(property=\"og:title\", content=\"{}\")\n        meta(property=\"og:url\", content=\"{}\")\n        meta(property=\"og:description\", content=\"{}\")\n",
-                    title, url, desc
+                // 🌟 최상단에 Markdown 문서 정보(Frontmatter) 블록 주입
+                let frontmatter = format!(
+                    "---\ntitle: \"{}\"\nurl: \"{}\"\ndescription: \"{}\"\n---\n\n",
+                    title.replace("\"", "\\\""), url.replace("\"", "\\\""), desc.replace("\"", "\\\"")
                 );
                 
-                // 기존 pug 텍스트에 이미 head 태그가 있다면 그 아래에 주입하고, 없다면 최상단에 html > head 구조를 신규 생성
-                let final_yaml = if yaml.contains("  head\n") {
-                    yaml.replacen("  head\n", &format!("  head\n{}", meta_tags), 1)
-                } else {
-                    format!("html\n  head\n{}{}", meta_tags, yaml)
-                };
+                // 🌟 PUG 템플릿 전체를 깔끔한 Markdown 형식으로 변경
+                let markdown_body = convert_pug_to_md(yaml);
                 
-                Some(final_yaml)
+                Some(format!("{}{}", frontmatter, markdown_body))
             } else {
                 None
             }
@@ -158,9 +357,8 @@ async fn start_file_drag(
         let combined_yaml = yaml_contents.join("\n---\n");
         
         // 🌟 [CRITICAL FIX 1] Windows OS 예약어(CON) 사용 금지!
-        // Windows에서 'con.txt'는 예약된 시스템 장치 이름이므로 정상적인 파일로 취급되지 않습니다.
-        // 이로 인해 drag 2.1.1이 파일의 절대 경로(canonicalize)를 찾다 None을 뱉고 unwrap() 패닉을 일으켰습니다.
-        let file_path = crate::utils::paths::get_app_tmp_root(None).join("kon.txt");
+        // kon.txt 대신 마크다운 표준 포맷에 맞추어 kon.text 로 생성합니다.
+        let file_path = crate::utils::paths::get_app_tmp_root(None).join("kon.text");
         std::fs::write(&file_path, combined_yaml).map_err(|e| e.to_string())?;
 
         // 🌟 Rust 백엔드에서 OS 네이티브 드래그 앤 드랍 트리거 (파일 물리적 이동 지원)
@@ -567,7 +765,8 @@ async fn search_documents(
 
     if let Some(store) = store_opt {
         
-        let search_result = store.search_items("items", &query, query_vec, limit, offset, filter, false).await.map_err(|e| e.to_string());
+        // 🌟 [CRITICAL FIX] 마지막 인자를 false -> true 로 변경하여 텍스트 검색 시 Full Text Search 인덱스를 타게 합니다!
+        let search_result = store.search_items("items", &query, query_vec, limit, offset, filter, true).await.map_err(|e| e.to_string());
         
         
         match &search_result {
@@ -685,7 +884,9 @@ async fn get_all_documents(
             if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
                 // 🌟 [Draft 리스트 반영] draft 타입일 경우, 자연어 변환을 우회하고 수집된 타이틀과 설명을 즉시 조합하여 리스트에 노출합니다.
                 if doc.r#type == "draft" {
-                    let title = json_val.get("title").and_then(|v| v.as_str()).unwrap_or("No Title");
+                    // 🌟 item.data.title이 있으면 최우선 적용
+                    let title = json_val.get("data").and_then(|d| d.get("title")).and_then(|v| v.as_str())
+                        .unwrap_or_else(|| json_val.get("title").and_then(|v| v.as_str()).unwrap_or("No Title"));
                     let desc = json_val.get("description").and_then(|v| v.as_str()).unwrap_or("");
                     doc.text = if desc.is_empty() { title.to_string() } else { format!("{} - {}", title, desc) };
                 } else {
@@ -712,7 +913,9 @@ async fn get_document(
         // 🌟 [Draft 검색 결과 반영] 반복되는 Draft 판별 로직을 깔끔하게 클로저로 분리합니다.
         let apply_draft_text = |doc: &mut TradeDocument, json_val: &serde_json::Value| {
             if doc.r#type == "draft" {
-                let title = json_val.get("title").and_then(|v| v.as_str()).unwrap_or("No Title");
+                // 🌟 item.data.title이 있으면 최우선 적용
+                let title = json_val.get("data").and_then(|d| d.get("title")).and_then(|v| v.as_str())
+                    .unwrap_or_else(|| json_val.get("title").and_then(|v| v.as_str()).unwrap_or("No Title"));
                 let desc = json_val.get("description").and_then(|v| v.as_str()).unwrap_or("");
                 doc.text = if desc.is_empty() { title.to_string() } else { format!("{} - {}", title, desc) };
             } else if doc.text.is_empty() {
@@ -1637,10 +1840,23 @@ async fn upsert_items(state: State<'_, AppState>, items: Vec<Value>) -> Result<S
             if type_str != "talk" && type_str != "prompt" && type_str != "ai_search" {
                 if let Some(data_obj) = clean_item.get("data").and_then(|v| v.as_object()).cloned() {
                     if let Some(main_obj) = clean_item.as_object_mut() {
+                        let mut new_data = serde_json::Map::new();
+                        
                         for (k, v) in data_obj {
-                            main_obj.insert(k, v);
+                            // title은 최상위 원본을 덮어씌우지 않도록 끌어올리지 않고 data 객체 안에 안전하게 보존합니다.
+                            if k == "title" {
+                                new_data.insert(k, v);
+                            } else {
+                                main_obj.insert(k, v);
+                            }
                         }
-                        main_obj.remove("data"); // 기존 껍데기 data 제거
+                        
+                        // 보존할 데이터(title)가 있다면 data 객체를 살려두고, 없으면 기존처럼 삭제합니다.
+                        if new_data.is_empty() {
+                            main_obj.remove("data");
+                        } else {
+                            main_obj.insert("data".to_string(), serde_json::Value::Object(new_data));
+                        }
                     }
                 }
             }

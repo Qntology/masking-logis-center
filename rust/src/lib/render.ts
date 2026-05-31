@@ -120,8 +120,22 @@ export function item2html(item: any, checked: boolean = false, currentUrl: strin
         let _unit = '';
         let _name = key.replace(/_/gi, " ");
 
-        if (typeof itm[key] !== "undefined") _value = itm[key];
-        else if (itm.data && typeof itm.data[key] !== "undefined") _value = itm.data[key];
+        // 🌟 [CRITICAL FIX] 사용자가 입력창에 수정/저장한 타이틀이 존재한다면 최우선으로 출력되도록 타이틀 계층 구조를 재정립합니다.
+        if (key === 'title') {
+            if (itm.data && itm.data.data && typeof itm.data.data.title !== "undefined" && itm.data.data.title !== "") {
+                _value = itm.data.data.title;
+            } else if (itm.data && typeof itm.data.title !== "undefined" && itm.data.title !== "") {
+                _value = itm.data.title;
+            } else if (typeof itm.title !== "undefined" && itm.title !== "") {
+                _value = itm.title;
+            } else {
+                _value = itm[key];
+            }
+        } else if (typeof itm[key] !== "undefined") {
+            _value = itm[key];
+        } else if (itm.data && typeof itm.data[key] !== "undefined") {
+            _value = itm.data[key];
+        }
 
         if (_value && key === "status") {
             _value = parseStatus(_value) || _value;
