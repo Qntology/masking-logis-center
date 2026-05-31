@@ -661,8 +661,8 @@ async fn process_task(
 
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
                 if !target_text.is_empty() {
-                    // 컨텍스트 크기에 따른 동적 모델 할당 (10,000 초과 시 Qwen, 이하 시 Qwen3)
-                    let is_large_context = target_text.len() > 10000;
+                    // 컨텍스트 크기에 따른 동적 모델 할당 (60,000 초과 시 Qwen, 이하 시 Qwen3)
+                    let is_large_context = target_text.len() > 60000;
                     let target_model_size = if is_large_context { crate::model::ModelSize::Qwen } else { crate::model::ModelSize::Qwen3 };
 
                     // 🌟 [OOM 원인 분석용 로그] 모델에 투입되기 직전 전체 컨텍스트의 문자열 길이를 터미널에 출력합니다.
@@ -717,7 +717,7 @@ async fn process_task(
 
                             let cancel_clone = cancellation_token.clone();
                             let prompt_clone = prompt.clone();
-                            // let session_id_clone = format!("{}_{}", task.id, doc_id);
+                            let session_id_clone = format!("{}_{}", task.id, doc_id);
 
                             // 🌟 선택된 모델에 맞게 추론 방식을 동적 분기합니다 (async / blocking)
                             let res_mask = if is_large_context {
@@ -738,8 +738,7 @@ async fn process_task(
                                         ..Default::default()
                                     };
                                     // 🌟 [CRITICAL FIX] Qwen(대형 문맥) 추론 시 session_id와 kv_name을 주입하여 SSD 오프로딩 및 청크 병렬 처리가 동작하도록 수정합니다.
-                                    let res = gen.generate(params, Some(cancel_clone), None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
-                                    // let res = gen.generate(params, Some(cancel_clone), Some(session_id_clone), Some("masking".to_string())).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
+                                    let res = gen.generate(params, Some(cancel_clone), Some(session_id_clone), Some("masking".to_string())).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
                                     
                                     let _ = gen.clear_kv_cache();
                                     
