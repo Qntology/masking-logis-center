@@ -822,8 +822,8 @@ pub fn build_masking_prompt(pug_content: &str, target_item: &str) -> String {
 [OUTPUT FORMAT]
 {
     "header": Boolean,
-    "footer": Boolean,
-    "{TARGET_ITEM}": "..."
+    "{TARGET_ITEM}": "...",
+    "footer": Boolean
 }
 RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
 
