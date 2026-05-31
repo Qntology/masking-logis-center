@@ -814,7 +814,7 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 // }
 
 pub fn build_masking_prompt(pug_content: &str, target_item: &str) -> String {
-    let template = r###"Extract the {TARGET_ITEM}
+    let template = r###"Extract the {TARGET_ITEM} and return as JSON format. 
 
 [PUG CONTENT]
 {PUG_CONTENT}
@@ -822,10 +822,10 @@ pub fn build_masking_prompt(pug_content: &str, target_item: &str) -> String {
 [OUTPUT FORMAT]
 {
     "header": Boolean,
-    "{TARGET_ITEM}": "...",
-    "footer": Boolean
+    "footer": Boolean,
+    "{TARGET_ITEM}": "..."
 }
-RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###;
+[ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think"###;
 
     template.replace("{TARGET_ITEM}", target_item)
             .replace("{PUG_CONTENT}", pug_content)

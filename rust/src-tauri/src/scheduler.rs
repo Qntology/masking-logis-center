@@ -731,7 +731,7 @@ async fn process_task(
                                             })
                                         ],
                                         model: "qwen".to_string(),
-                                        max_tokens: Some(256),
+                                        max_tokens: Some(512),
                                         temperature: Some(0.0),
                                         top_p: Some(0.95),
                                         ..Default::default()
