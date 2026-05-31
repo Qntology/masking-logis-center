@@ -717,6 +717,7 @@ async fn process_task(
 
                             let cancel_clone = cancellation_token.clone();
                             let prompt_clone = prompt.clone();
+                            let session_id_clone = format!("{}_{}", task.id, doc_id);
 
                             // 🌟 선택된 모델에 맞게 추론 방식을 동적 분기합니다 (async / blocking)
                             let res_mask = if is_large_context {
@@ -736,8 +737,8 @@ async fn process_task(
                                         top_p: Some(0.95),
                                         ..Default::default()
                                     };
-                                    // Qwen 모델은 비동기(async) generate를 사용하므로 바로 await 합니다.
-                                    let res = gen.generate(params, Some(cancel_clone), None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
+                                    // 🌟 [CRITICAL FIX] Qwen(대형 문맥) 추론 시 session_id와 kv_name을 주입하여 SSD 오프로딩 및 청크 병렬 처리가 동작하도록 수정합니다.
+                                    let res = gen.generate(params, Some(cancel_clone), Some(session_id_clone), Some("masking".to_string())).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
                                     
                                     let _ = gen.clear_kv_cache();
                                     

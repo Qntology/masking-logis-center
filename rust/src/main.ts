@@ -2551,9 +2551,40 @@ async function renderProgressToUI(payload: any, isRecovery: boolean = false) {
 btnStopTask?.addEventListener("click", async () => {
     if (await ask("Stop the current extraction/search? (The record will be deleted)", { title: "Stop Task", kind: "warning" })) {
         const targetTaskId = activeTaskId; // 지우려는 대상 고정
+        const targetPayload = GlobalTaskManager.currentTaskPayload; // 🌟 취소 전 페이로드 백업
         
         if (targetTaskId) {
             GlobalTaskManager.cancelledTasks.add(targetTaskId); // 🌟 [CRITICAL FIX] 취소 블랙리스트에 등록하여 지연 도착하는 이벤트를 완벽 차단
+            
+            // 🌟 [CRITICAL FIX] 중단하는 대상이 마스킹 작업일 경우, 잠겨있던 체크박스와 마스킹 대기열(Set)을 즉시 해제합니다.
+            if (targetTaskId.startsWith("mask_")) {
+                let uuidsToRelease: string[] = [];
+                if (targetPayload && targetPayload.uuids) {
+                    uuidsToRelease = targetPayload.uuids;
+                } else {
+                    const qt = GlobalTaskManager.queue.find(q => q.taskId === targetTaskId);
+                    if (qt && qt.payload && qt.payload.uuids) uuidsToRelease = qt.payload.uuids;
+                    else {
+                        const bt = GlobalTaskManager.backendQueued.find(q => q.taskId === targetTaskId);
+                        if (bt && bt.uuids) uuidsToRelease = bt.uuids;
+                        else uuidsToRelease = Array.from(maskingUuids); // 최후 수단
+                    }
+                }
+
+                uuidsToRelease.forEach(id => {
+                    maskingUuids.delete(id);
+                    const card = document.getElementById(id);
+                    if (card) {
+                        card.classList.remove("masking");
+                        const cb = card.querySelector('.item-select-checkbox') as HTMLInputElement;
+                        if (cb) {
+                            cb.disabled = false;
+                            cb.checked = false; // 선택 해제
+                        }
+                    }
+                });
+                updateListActionButtons();
+            }
         }
         
         // 🌟 [CRITICAL FIX] 취소 즉시 락을 강제 해제하여 취소 후 #btn-extract 버튼이 먹통되는 현상을 완벽 방어합니다.
