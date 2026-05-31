@@ -1778,11 +1778,15 @@ document.getElementById("btn-all-selected")?.addEventListener("click", () => {
     const allCheckboxes = document.querySelectorAll('.item-select-checkbox') as NodeListOf<HTMLInputElement>;
     if (allCheckboxes.length === 0) return;
 
-    // 현재 화면에 있는 아이템이 모두 선택되었는지 확인
-    const isAllSelected = selectedUuids.size > 0 && selectedUuids.size === allCheckboxes.length;
+    // 🌟 [수정] 마스킹 진행 중이어서 비활성화된(disabled) 체크박스는 제외하고 선택 가능한 대상만 추출합니다.
+    const selectableCheckboxes = Array.from(allCheckboxes).filter(cb => !cb.disabled);
+    if (selectableCheckboxes.length === 0) return;
+
+    // 선택 가능한 아이템이 모두 선택되었는지 확인
+    const isAllSelected = selectedUuids.size > 0 && selectedUuids.size === selectableCheckboxes.length;
     const targetState = !isAllSelected; // 모두 선택되어 있으면 해제, 아니면 전체 선택
 
-    allCheckboxes.forEach(cb => {
+    selectableCheckboxes.forEach(cb => {
         cb.checked = targetState;
         const docId = cb.dataset.id;
         if (docId) {
@@ -3784,7 +3788,9 @@ function updateListActionButtons() {
     
     // 전체 선택 버튼 텍스트 상태 동기화 (All / None)
     if (btnAll && allCheckboxes.length > 0) {
-        if (selectedUuids.size === allCheckboxes.length) {
+        // 🌟 [수정] 전체 개수가 아닌 '선택 가능한(마스킹 중이 아닌)' 아이템 개수를 기준으로 All / None을 판단합니다.
+        const selectableCount = Array.from(allCheckboxes).filter(cb => !(cb as HTMLInputElement).disabled).length;
+        if (selectableCount > 0 && selectedUuids.size === selectableCount) {
             btnAll.innerText = "None";
         } else {
             btnAll.innerText = "All";
