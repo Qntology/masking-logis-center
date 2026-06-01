@@ -845,16 +845,19 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_masking_prompt(pug_content: &str, target_item: &str) -> String {
-    let template = r###"Extract the {TARGET_ITEM} and return as JSON format. 
+pub fn build_masking_prompt(pug_content: &str, target_item: &str) -> (String, String) {
+    let system_template = r###"[PUG CONTENT]
+{PUG_CONTENT}"###;
 
-[PUG CONTENT]
-{PUG_CONTENT}
+    let user_template = r###"Extract the {TARGET_ITEM} and return as JSON format. 
 
 [SCHEMA DEFINITIONS]
 - header: Boolean. True if the document contains a header.
 - footer: Boolean. True if the document contains a footer.
 - {TARGET_ITEM}: String. {TARGET_ITEM}.
+
+[RULES]
+- STRICTLY DO NOT extract or return any temporary placeholders such as "**SKIP READ N**", "SKIP_READ_N", or "**LINK_SKIP_N**". If the target value is matched with these markers, you MUST return "..." instead.
 
 [OUTPUT FORMAT]
 {
@@ -864,8 +867,10 @@ pub fn build_masking_prompt(pug_content: &str, target_item: &str) -> String {
 }
 [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think"###;
 
-    template.replace("{TARGET_ITEM}", target_item)
-            .replace("{PUG_CONTENT}", pug_content)
+    let system_prompt = system_template.replace("{PUG_CONTENT}", pug_content);
+    let user_prompt = user_template.replace("{TARGET_ITEM}", target_item);
+
+    (system_prompt, user_prompt)
 }
 
 pub fn ocr_image_prompt() -> String { r###"[TASK] Extract text from image and return as JSON format. 

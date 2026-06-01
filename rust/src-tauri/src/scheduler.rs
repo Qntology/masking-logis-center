@@ -663,23 +663,29 @@ async fn process_task(
 
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
                 if !target_text.is_empty() {
-                    // 🌟 [추가] LLM 토큰 절약 및 링크 훼손 방지를 위해 href, src 값들을 임시 마커로 치환합니다.
+                    // 🌟 [추가] LLM 토큰 절약 및 링크 훼손 방지를 위해 href, src 등 주요 링크 값들을 임시 마커로 치환합니다.
                     let mut link_map = std::collections::HashMap::new();
                     let mut link_counter = 0;
                     
-                    if let Ok(re_href) = regex::Regex::new(r#"href="([^"]+)""#) {
-                        target_text = re_href.replace_all(&target_text, |caps: &regex::Captures| {
-                            let marker = format!("href=\"**LINK_SKIP_{}**\"", link_counter);
-                            link_map.insert(marker.clone(), caps[0].to_string());
+                    // 쌍따옴표(") 속성 패턴 (대소문자 무시, 공백 허용, data-src 포함)
+                    if let Ok(re_double) = regex::Regex::new(r#"(?i)(href|src|data-src)\s*=\s*"([^"]*)""#) {
+                        target_text = re_double.replace_all(&target_text, |caps: &regex::Captures| {
+                            let attr_name = &caps[1];
+                            let original_full = caps[0].to_string();
+                            let marker = format!("{}=\"**LINK_SKIP_{}**\"", attr_name, link_counter);
+                            link_map.insert(marker.clone(), original_full);
                             link_counter += 1;
                             marker
                         }).to_string();
                     }
                     
-                    if let Ok(re_src) = regex::Regex::new(r#"src="([^"]+)""#) {
-                        target_text = re_src.replace_all(&target_text, |caps: &regex::Captures| {
-                            let marker = format!("src=\"**LINK_SKIP_{}**\"", link_counter);
-                            link_map.insert(marker.clone(), caps[0].to_string());
+                    // 홑따옴표(') 속성 패턴 (대소문자 무시, 공백 허용, data-src 포함)
+                    if let Ok(re_single) = regex::Regex::new(r#"(?i)(href|src|data-src)\s*=\s*'([^']*)'"#) {
+                        target_text = re_single.replace_all(&target_text, |caps: &regex::Captures| {
+                            let attr_name = &caps[1];
+                            let original_full = caps[0].to_string();
+                            let marker = format!("{}='**LINK_SKIP_{}**'", attr_name, link_counter);
+                            link_map.insert(marker.clone(), original_full);
                             link_counter += 1;
                             marker
                         }).to_string();
@@ -727,7 +733,7 @@ async fn process_task(
                             if cancellation_token.load(Ordering::Relaxed) { break; }
 
                             // 🌟 현재까지 치환(마스킹)이 완료된 최신 텍스트와 추출할 키워드를 공통 프롬프트 빌더에 직접 주입합니다.
-                            let prompt = crate::parsing::build_masking_prompt(&masked_text, key_name);
+                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&masked_text, key_name);
 
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -740,7 +746,8 @@ async fn process_task(
                             crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
 
                             let cancel_clone = cancellation_token.clone();
-                            let prompt_clone = prompt.clone();
+                            let system_prompt_clone = system_prompt.clone();
+                            let user_prompt_clone = user_prompt.clone();
                             let session_id_clone = format!("{}_{}", task.id, doc_id);
 
                             // 🌟 선택된 모델에 맞게 추론 방식을 동적 분기합니다 (async / blocking)
@@ -750,8 +757,12 @@ async fn process_task(
                                 if let Some(gen) = gen_guard.as_mut() {
                                     let params = crate::openai_types::ChatCompletionParameters {
                                         messages: vec![
+                                            crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
+                                                content: system_prompt_clone,
+                                                name: None,
+                                            }),
                                             crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(prompt_clone),
+                                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(user_prompt_clone),
                                                 name: None,
                                             })
                                         ],
@@ -778,8 +789,12 @@ async fn process_task(
                                     if let Some(gen) = gen_guard.as_mut() {
                                         let params = crate::openai_types::ChatCompletionParameters {
                                             messages: vec![
+                                                crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
+                                                    content: system_prompt_clone,
+                                                    name: None,
+                                                }),
                                                 crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                                                    content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(prompt_clone),
+                                                    content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(user_prompt_clone),
                                                     name: None,
                                                 })
                                             ],
