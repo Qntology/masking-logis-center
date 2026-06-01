@@ -709,7 +709,7 @@ async fn process_task(
                         ("contact_number", "contact number"),
                         ("name", "person's name"),
                         ("username", "person's username"),
-                        ("address", "location address"),
+                        ("address", "physical street address"),
                         // ("age", "person's age"),
                         // ("gender_identity", "person's gender identity"),
                         ("biological_sex", "person's biological sex"),

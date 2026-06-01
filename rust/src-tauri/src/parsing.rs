@@ -858,7 +858,7 @@ Read the entire document from top to bottom, applying the following strict filte
    - Strictly ignore global navigation, menus, headers, footers, aside, search, filter.
    - temporary placeholder (such as SKIP READ N, SKIP_READ_N, LINK_SKIP).
 2. TARGET:
-   - Focus purely on the main data payload where "{TARGET_ITEM}", or actual items are listed.
+   - Focus purely on the main data payload where "{TARGET_ITEM}".
 3. EVALUATE:
    - You MUST evaluate the concluding elements at the very bottom of the main content area first. Check for the following:
      A. Does the page terminate with dataset navigation (pagination, "next/prev") or bulk-action execution elements?
