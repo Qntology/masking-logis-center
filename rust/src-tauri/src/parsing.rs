@@ -845,30 +845,45 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_masking_prompt(pug_content: &str, target_item: &str) -> (String, String) {
+pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str) -> (String, String) {
     let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
 
-    let user_template = r###"Extract the {TARGET_ITEM} and return as JSON format. 
+    let user_template = r###"[TASK] Analyze the provided PUG/HTML content from top to bottom.
+
+[FORCED DOCUMENT SCANNING LOGIC]
+Read the entire document from top to bottom, applying the following strict filters and evaluations:
+
+1. IGNORE:
+   - Strictly ignore global navigation, menus, headers, footers, aside, search, filter.
+   - temporary placeholder (such as SKIP READ N, SKIP_READ_N, LINK_SKIP).
+2. TARGET:
+   - Focus purely on the main data payload where "{TARGET_ITEM}", or actual items are listed.
+3. EVALUATE:
+   - You MUST evaluate the concluding elements at the very bottom of the main content area first. Check for the following:
+     A. Does the page terminate with dataset navigation (pagination, "next/prev") or bulk-action execution elements?
+     B. Does the main data area consist of a repeating multi-entity grid?
+     C. Does the main data area contain an extensive configuration/input form (inputs, textareas, image uploads, save buttons) for a single entity?
 
 [SCHEMA DEFINITIONS]
-- header: Boolean. True if the document contains a header.
-- footer: Boolean. True if the document contains a footer.
-- {TARGET_ITEM}: String. {TARGET_ITEM}.
-
-[RULES]
-- STRICTLY DO NOT extract or return any temporary placeholders such as "**SKIP READ N**", "SKIP_READ_N", or "**LINK_SKIP_N**". If the target value is matched with these markers, you MUST return "..." instead.
+- title: String. Default '{TITLE}'.
+- has_header: Boolean. True if the document contains a header.
+- has_footer: Boolean. True if the document contains a footer.
+- has_list: Boolean. True if the document contains a multi-entity grid, OR if the bottom of main content area has dataset navigation/bulk controls.
+- has_form: Boolean. True if the main data payload is heavily composed of data entry fields (text, select, radio, file uploads) dedicated to creating or updating a single entity.
+- detail: Boolean. True ONLY if has_list is false AND has_form is true.
+- {TARGET_NAME}: String. Extract the {TARGET_ITEM} value.
 
 [OUTPUT FORMAT]
-{
-    "header": Boolean,
-    "footer": Boolean,
-    "{TARGET_ITEM}": "..."
-}
+{...}
+
 [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think"###;
 
     let system_prompt = system_template.replace("{PUG_CONTENT}", pug_content);
-    let user_prompt = user_template.replace("{TARGET_ITEM}", target_item);
+    let user_prompt = user_template
+        .replace("{TITLE}", title)
+        .replace("{TARGET_NAME}", target_name)
+        .replace("{TARGET_ITEM}", target_item);
 
     (system_prompt, user_prompt)
 }
@@ -967,8 +982,8 @@ Read the entire document from top to bottom, applying the following strict filte
 
 [SCHEMA DEFINITIONS]
 - {TYPE}:
-    - has_header: Boolean True if the document contains a header.
-    - has_footer: Boolean True if the document contains a footer.
+    - has_header: Boolean. True if the document contains a header.
+    - has_footer: Boolean. True if the document contains a footer.
     - has_list: Boolean. True if the document contains a multi-entity grid, OR if the bottom of main content area has dataset navigation/bulk controls.
     - has_form: Boolean. True if the main data payload is heavily composed of data entry fields (text, select, radio, file uploads) dedicated to creating or updating a single entity.
     - detail: Boolean. True ONLY if has_list is false AND has_form is true.

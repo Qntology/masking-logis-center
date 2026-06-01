@@ -700,25 +700,25 @@ async fn process_task(
 
                     model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await?;
 
-                    // 🌟 16개의 마스킹 타겟 항목(Key) 문자열만 배열에 담습니다.
+                    // 🌟 16개의 마스킹 타겟 항목에 대해 (JSON_키, 추출_설명) 튜플 형태로 분리합니다.
                     let target_items = vec![
-                        // "person's given name",
-                        // "person's middle name",
-                        // "person's family name or surname",
-                        "email",
-                        "contact number",
-                        "person's name",
-                        "person's username",
-                        "location address",
-                        // "person's age",
-                        // "person's gender identity",
-                        "person's biological sex",
-                        // "the color of a person's eyes",
-                        // "person's physical height",
-                        // "person's profession or field of work",
-                        // "person's specific job position or role",
-                        // "person's specific organizational division or department",
-                        // "person's the name of a company, institution, or group",
+                        // ("given_name", "person's given name"),
+                        // ("middle_name", "person's middle name"),
+                        // ("family_name", "person's family name or surname"),
+                        ("email", "email"),
+                        ("contact_number", "contact number"),
+                        ("name", "person's name"),
+                        ("username", "person's username"),
+                        ("address", "location address"),
+                        // ("age", "person's age"),
+                        // ("gender_identity", "person's gender identity"),
+                        ("biological_sex", "person's biological sex"),
+                        // ("eye_color", "the color of a person's eyes"),
+                        // ("height", "person's physical height"),
+                        // ("profession", "person's profession or field of work"),
+                        // ("job_position", "person's specific job position or role"),
+                        // ("department", "person's specific organizational division or department"),
+                        // ("company", "person's the name of a company, institution, or group"),
                     ];
 
                     let mut all_matches = Vec::new();
@@ -727,19 +727,20 @@ async fn process_task(
                     let mut skip_map = std::collections::HashMap::new(); // 🌟 추가: SKIP N -> Mnemonic 매핑
 
                     // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
-                    for (p_idx, key_name) in target_items.into_iter().enumerate() {
+                    for (p_idx, (target_name, target_item)) in target_items.into_iter().enumerate() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
                         loop {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
 
                             // 🌟 현재까지 치환(마스킹)이 완료된 최신 텍스트와 추출할 키워드를 공통 프롬프트 빌더에 직접 주입합니다.
-                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&masked_text, key_name);
+                            let doc_title = json_data.get("title").and_then(|v| v.as_str()).unwrap_or("Document");
+                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &masked_text, target_name, target_item);
 
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
                                 "task_id": task.id.clone(),
                                 "category": format!("Masking ({}/{}) - Type {}", idx + 1, total, p_idx + 1), 
-                                "summary": format!("Anonymizing {}...", key_name),
+                                "summary": format!("Anonymizing {}...", target_item),
                                 "spinner": "⠋"
                             });
                             let _ = app_handle.emit("extraction-progress", &payload);
@@ -767,7 +768,7 @@ async fn process_task(
                                             })
                                         ],
                                         model: "qwen".to_string(),
-                                        max_tokens: Some(512),
+                                        max_tokens: Some(1024),
                                         temperature: Some(0.0),
                                         top_p: Some(0.95),
                                         ..Default::default()
@@ -799,7 +800,7 @@ async fn process_task(
                                                 })
                                             ],
                                             model: "qwen3".to_string(),
-                                            max_tokens: Some(256),
+                                            max_tokens: Some(1024),
                                             temperature: Some(0.0),
                                             top_p: Some(0.95),
                                             ..Default::default()
@@ -818,7 +819,7 @@ async fn process_task(
                             }?;
 
                             // 🌟 [OOM 원인 분석용 로그] 추론 직후 LLM이 뱉어낸 실제 결과값과 길이를 출력합니다.
-                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추론 완료 - 응답 길이: {}, 결과: {}", key_name, res_mask.len(), res_mask));
+                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추론 완료 - 응답 길이: {}, 결과: {}", target_item, res_mask.len(), res_mask));
                             
                             // 🌟 self 대신 상단에서 가져온 지역 변수 model 사용 (E0424 에러 해결)
                             if !model.is_cpu_mode {
@@ -842,11 +843,11 @@ async fn process_task(
                             let parsed = crate::parsing::parse_json_from_llm(&res_mask);
                             
                             // 추출된 값이 있는지, 그리고 그 값이 현재 PUG_CONTENT(masked_text)에 실제로 존재하는지 확인
-                            let mut extracted_val = parsed.get(key_name).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let mut extracted_val = parsed.get(target_name).and_then(|v| v.as_str()).unwrap_or("").to_string();
                             
                             // 🌟 [추가] 연락처(contact number)일 경우, LLM이 하이픈(-)이나 공백을 마음대로 제거/추가하여 매칭이 안 되는 현상 방어
                             if !extracted_val.is_empty() && extracted_val != "..." && !masked_text.contains(&extracted_val) {
-                                if key_name == "contact number" {
+                                if target_name == "contact_number" {
                                     // 순수 숫자만 추출
                                     let digits_only: String = extracted_val.chars().filter(|c| c.is_digit(10)).collect();
                                     
@@ -871,7 +872,7 @@ async fn process_task(
 
                             // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 SKIP READ 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
-                            let upper_key = key_name.to_uppercase();
+                            let upper_key = target_name.to_uppercase();
                             
                             let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
                             let skip_marker = format!("**SKIP READ {}**", skip_counter);
