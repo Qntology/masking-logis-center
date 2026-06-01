@@ -1756,6 +1756,37 @@ document.addEventListener('nav-link', async (e: any) => {
     detailView.style.display = "none";
 });
 
+// 🌟 [추가] More 링크 클릭 시 내장 브라우저를 통해 해당 URL 열기
+document.addEventListener('launch-browser-link', async (e: any) => {
+    // 🌟 [CRITICAL FIX] 브라우저가 이미 켜지고 있거나 실행 중일 때는 더블 클릭(중복 실행)을 완벽히 무시합니다.
+    if (isBrowserRunning || isAutoLaunchLocked) {
+        console.warn("[WIDGET] Browser launch already in progress. Ignoring click.");
+        return;
+    }
+
+    const targetUrl = e.detail;
+    if (!targetUrl || targetUrl === 'javascript:void(0);') return;
+    
+    console.log(`[WIDGET] Launching browser for: ${targetUrl}`);
+    
+    try { 
+        isAutoLaunchLocked = true; 
+        isBrowserRunning = true; 
+        
+        if (btnAutoLaunch) {
+            btnAutoLaunch.style.display = "none";
+            btnAutoLaunch.classList.add("hidden");
+        }
+        
+        await invoke("launch_best_browser", { url: targetUrl }); 
+    } catch (err) { 
+        console.error("Launch failed from More link:", err); 
+        isAutoLaunchLocked = false; 
+        isBrowserRunning = false;
+        syncBrowserStatus();
+    } 
+});
+
 // 🌟 [추가] 현재 입력한 검색어가 이미 대기열(10)이나 진행 중(1)인지 확인하는 완벽한 헬퍼 함수
 function isQueryActive(text: string): boolean {
     const query = text.trim();

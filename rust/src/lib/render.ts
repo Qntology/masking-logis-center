@@ -162,7 +162,9 @@ export function item2html(item: any, checked: boolean = false, currentUrl: strin
             if (_value) _value = time2text(_value);
             if (key === "created_at") {
                 _name = _value; 
-                _value = `<label for="more-${docId}" class="more-label" style="cursor:pointer;">More</label>`;
+                // 🌟 링크 클릭 시 커스텀 이벤트를 발생시켜 Tauri(main.ts)에서 내장 브라우저 런처를 호출하도록 변경합니다.
+                const safeUrl = (href || '').replace(/"/g, '&quot;');
+                _value = `<a href="javascript:void(0);" data-url="${safeUrl}" onclick="if(this.dataset.url) document.dispatchEvent(new CustomEvent('launch-browser-link', {detail: this.dataset.url}));" class="more-label" style="cursor:pointer; text-decoration:none;">More</a>`;
             }
         }
 
