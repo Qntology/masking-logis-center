@@ -8,4 +8,4 @@
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
 }
-[data-i18n="hero_desc"]::first-line{font-size: 1.1rem !important; color: #fff;}
+[data-i18n="hero_desc"]::first-line{font-size: 1em !important; color: #fff;}
