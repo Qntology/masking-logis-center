@@ -176,8 +176,14 @@ async fn start_file_drag(
                             current_cell.push_str(link_text);
                         }
                     } else if trimmed.starts_with("img[src=") {
+                        let mut url = "";
+                        if let Some(start) = trimmed.find('"') {
+                            if let Some(end) = trimmed[start+1..].find('"') {
+                                url = &trimmed[start+1..start+1+end];
+                            }
+                        }
                         if !current_cell.is_empty() { current_cell.push(' '); }
-                        current_cell.push_str("[Image]");
+                        current_cell.push_str(&format!("[IMAGE]({})", url));
                     } else if trimmed.starts_with("input") || trimmed.starts_with("label") || trimmed.starts_with("span") {
                         let text_part = trimmed.splitn(2, ' ').nth(1).unwrap_or("").trim();
                         if !text_part.is_empty() {
@@ -241,7 +247,7 @@ async fn start_file_drag(
                         url = &trimmed[start+1..start+1+end];
                     }
                 }
-                output.push_str(&format!("![]({})\n\n", url));
+                output.push_str(&format!("[IMAGE]({})\n\n", url));
             } else if trimmed.starts_with("input") || trimmed.starts_with("label") || trimmed.starts_with("strong") || trimmed.starts_with("b") {
                 let text_part = trimmed.splitn(2, ' ').nth(1).unwrap_or("").trim();
                 if !text_part.is_empty() {

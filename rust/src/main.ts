@@ -777,10 +777,10 @@ listen("browser-status", async (event: any) => {
 
     if (statusStr === "running") {
         isBrowserRunning = true;
-        isAutoLaunchLocked = true; // 실행 중엔 런처 버튼 잠금
+        // 🌟 [CRITICAL FIX] 브라우저 생존 확인 시 큐(대기열)를 무한 루프에 빠지게 하던 전역 락(Lock) 강제 설정을 삭제합니다.
     } else if (statusStr === "stopped") {
         isBrowserRunning = false;
-        isAutoLaunchLocked = false;
+        // 🌟 [CRITICAL FIX] 큐 매니저가 락을 독립적으로 관리하므로 여기서 건드리지 않습니다.
         currentDetectedUrl = "";
     }
     
@@ -1756,35 +1756,61 @@ document.addEventListener('nav-link', async (e: any) => {
     detailView.style.display = "none";
 });
 
-// 🌟 [추가] More 링크 클릭 시 내장 브라우저를 통해 해당 URL 열기
-document.addEventListener('launch-browser-link', async (e: any) => {
-    // 🌟 [CRITICAL FIX] 브라우저가 이미 켜지고 있거나 실행 중일 때는 더블 클릭(중복 실행)을 완벽히 무시합니다.
-    if (isBrowserRunning || isAutoLaunchLocked) {
-        console.warn("[WIDGET] Browser launch already in progress. Ignoring click.");
-        return;
+// 🌟 [추가] 브라우저 자동화 및 URL 이동 대기열 매니저
+class BrowserQueueManager {
+    static queue: string[] = [];
+    static isProcessing: boolean = false;
+
+    static async enqueue(url: string) {
+        if (!url || url === 'javascript:void(0);') return;
+        this.queue.push(url);
+        console.log(`[BROWSER-QUEUE] Enqueued: ${url}. Queue length: ${this.queue.length}`);
+        if (!this.isProcessing) {
+            this.process();
+        }
     }
 
-    const targetUrl = e.detail;
-    if (!targetUrl || targetUrl === 'javascript:void(0);') return;
-    
-    console.log(`[WIDGET] Launching browser for: ${targetUrl}`);
-    
-    try { 
-        isAutoLaunchLocked = true; 
-        isBrowserRunning = true; 
+    static async process() {
+        this.isProcessing = true;
         
-        if (btnAutoLaunch) {
-            btnAutoLaunch.style.display = "none";
-            btnAutoLaunch.classList.add("hidden");
+        while (this.queue.length > 0) {
+            // 🌟 런칭 락(isAutoLaunchLocked)이 걸려있다면, 이벤트를 무시(return)하지 않고 안전하게 풀릴 때까지 대기합니다.
+            while (isAutoLaunchLocked) {
+                console.log("[BROWSER-QUEUE] Waiting for previous browser task to finish...");
+                await new Promise(resolve => setTimeout(resolve, 300));
+            }
+
+            const targetUrl = this.queue.shift()!;
+            isAutoLaunchLocked = true; // 🌟 실행 락(Lock) 활성화
+            isBrowserRunning = true; 
+            
+            console.log(`[BROWSER-QUEUE] Executing launch for: ${targetUrl}`);
+
+            try {
+                if (btnAutoLaunch) {
+                    btnAutoLaunch.style.display = "none";
+                    btnAutoLaunch.classList.add("hidden");
+                }
+                
+                await invoke("launch_best_browser", { url: targetUrl });
+            } catch (err) {
+                console.error("[BROWSER-QUEUE] Launch failed:", err);
+                isBrowserRunning = false;
+                syncBrowserStatus();
+            } finally {
+                // 🌟 작업이 완전히 끝나면 락을 해제하여 대기열의 다음 항목이 실행될 수 있게 합니다.
+                isAutoLaunchLocked = false;
+            }
         }
         
-        await invoke("launch_best_browser", { url: targetUrl }); 
-    } catch (err) { 
-        console.error("Launch failed from More link:", err); 
-        isAutoLaunchLocked = false; 
-        isBrowserRunning = false;
-        syncBrowserStatus();
-    } 
+        this.isProcessing = false;
+    }
+}
+
+// 🌟 [추가] More 링크 클릭 시 내장 브라우저를 통해 해당 URL 열기 (큐를 통한 안전한 대기 실행)
+document.addEventListener('launch-browser-link', async (e: any) => {
+    const targetUrl = e.detail;
+    await BrowserQueueManager.enqueue(targetUrl);
 });
 
 // 🌟 [추가] 현재 입력한 검색어가 이미 대기열(10)이나 진행 중(1)인지 확인하는 완벽한 헬퍼 함수
@@ -2686,26 +2712,10 @@ btnStopTask?.addEventListener("click", async () => {
 // --- Browser Auto ---
 btnAutoLaunch?.addEventListener("click", async () => { 
     if (isBrowserRunning || isAutoLaunchLocked) return;
-
-    try { 
-        isAutoLaunchLocked = true; // 🌟 런칭 락 활성화 (무식하게 전부 무시 시작)
-        isBrowserRunning = true; 
-        
-        if (btnAutoLaunch) {
-            btnAutoLaunch.style.display = "none";
-            btnAutoLaunch.classList.add("hidden");
-        }
-        
-        console.log(`[WIDGET] UI LOCKED: Chrome Launching...`);
-        await invoke("launch_best_browser", { url: "about:blank" }); 
-        console.log(`[WIDGET] UI LOCKED: Waiting for Rust signal...`);
-    } catch (e) { 
-        console.error("Launch failed:", e); 
-        isAutoLaunchLocked = false; // 🌟 에러 시에만 락 해제
-        isBrowserRunning = false;
-        syncBrowserStatus();
-    } 
+    console.log(`[WIDGET] UI LOCKED: Chrome Launching via Queue...`);
+    await BrowserQueueManager.enqueue("about:blank");
 });
+
 const autoBrowser = document.getElementById("auto-browser") as HTMLSelectElement;
 const autoUrl = document.getElementById("auto-url") as HTMLInputElement;
 const autoBtn = document.getElementById("auto-btn") as HTMLButtonElement;
@@ -4710,8 +4720,7 @@ async function initSession() {
         if (btnAutoLaunch) {
             if (data.browser_status === "running") {
                 isBrowserRunning = true;
-                // 🌟 [CRITICAL FIX] 새로고침 시에도 앱이 이미 실행 중이면 락을 강제로 잠가 버튼 노출을 완벽 차단합니다.
-                if (!isAutoLaunchLocked) isAutoLaunchLocked = true; 
+                // 🌟 [CRITICAL FIX] 새로고침(F5) 시 큐를 완전히 멈춰버리는 영구 락 강제 설정을 해제합니다.
                 btnAutoLaunch.style.display = "none";
                 btnAutoLaunch.classList.add("hidden");
             } else {

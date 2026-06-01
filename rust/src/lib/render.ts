@@ -162,9 +162,9 @@ export function item2html(item: any, checked: boolean = false, currentUrl: strin
             if (_value) _value = time2text(_value);
             if (key === "created_at") {
                 _name = _value; 
-                // 🌟 링크 클릭 시 커스텀 이벤트를 발생시켜 Tauri(main.ts)에서 내장 브라우저 런처를 호출하도록 변경합니다.
+                // 🌟 [수정] 클릭 시 시각적 반응(Opening...)을 주고 안전하게 대기열 이벤트에 등록합니다.
                 const safeUrl = (href || '').replace(/"/g, '&quot;');
-                _value = `<a href="javascript:void(0);" data-url="${safeUrl}" onclick="if(this.dataset.url) document.dispatchEvent(new CustomEvent('launch-browser-link', {detail: this.dataset.url}));" class="more-label" style="cursor:pointer; text-decoration:none;">More</a>`;
+                _value = `<a href="javascript:void(0);" data-url="${safeUrl}" onclick="if(this.dataset.url) { const orig = this.innerText; this.innerText = 'Opening...'; this.style.opacity = '0.5'; setTimeout(() => { this.innerText = orig; this.style.opacity = '1'; }, 2000); document.dispatchEvent(new CustomEvent('launch-browser-link', {detail: this.dataset.url})); }" class="more-label" style="cursor:pointer; font-weight:bold;">More</a>`;
             }
         }
 

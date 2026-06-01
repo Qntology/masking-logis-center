@@ -851,6 +851,11 @@ pub fn build_masking_prompt(pug_content: &str, target_item: &str) -> String {
 [PUG CONTENT]
 {PUG_CONTENT}
 
+[SCHEMA DEFINITIONS]
+- header: Boolean. True if the document contains a header.
+- footer: Boolean. True if the document contains a footer.
+- {TARGET_ITEM}: String. {TARGET_ITEM}.
+
 [OUTPUT FORMAT]
 {
     "header": Boolean,
