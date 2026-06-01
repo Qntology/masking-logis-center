@@ -225,7 +225,15 @@ async fn start_file_drag(
                     }
                 }
                 if text.is_empty() { text = url; }
-                output.push_str(&format!("[{}]({})\n\n", text, url));
+                
+                // 🌟 [CRITICAL FIX] 무의미한 더미 앵커(#)나 javascript 링크, 잘못 병합된 빈 주소는 링크를 해제하고 텍스트만 출력합니다.
+                if url.is_empty() || url == "#" || url.starts_with("javascript:") || url.ends_with("/#") {
+                    if text != "#" && !text.starts_with("javascript:") && text != url {
+                        output.push_str(&format!("{}\n\n", text));
+                    }
+                } else {
+                    output.push_str(&format!("[{}]({})\n\n", text, url));
+                }
             } else if trimmed.starts_with("img[src=") {
                 let mut url = "";
                 if let Some(start) = trimmed.find('"') {

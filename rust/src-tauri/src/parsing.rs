@@ -594,10 +594,14 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                         }
 
                         if name_str == "href" || name_str == "src" {
-                            if let Some(c) = ctx.as_ref() {
+                            let sv_trim = safe_value.trim();
+                            // 🌟 [CRITICAL FIX] 무의미한 앵커(#)나 자바스크립트 실행 링크는 절대 주소로 병합하지 않고 원본을 유지합니다.
+                            if sv_trim == "#" || sv_trim.starts_with("javascript:") {
+                                safe_value = sv_trim.to_string();
+                            } else if let Some(c) = ctx.as_ref() {
                                 if let Some(base) = &c.base_url {
                                     if let Ok(base_url_obj) = url::Url::parse(base) {
-                                        if let Ok(resolved_url) = base_url_obj.join(safe_value.trim()) {
+                                        if let Ok(resolved_url) = base_url_obj.join(sv_trim) {
                                             safe_value = resolved_url.to_string();
                                         }
                                     }
