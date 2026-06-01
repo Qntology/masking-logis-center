@@ -9,8 +9,10 @@
     <!-- FontAwesome (Local preferred, CDN fallback) -->
     <link rel="stylesheet" href="static/css/styles.css?1">
     <link rel="stylesheet" href="static/css/fontawesome.css">
-    <!-- Google Fonts (Local preferred, CDN fallback) -->
     <link rel="stylesheet" href="static/css/google-fonts.css">
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.1.9/p5.min.js"></script>
+    <script src="static/js/vanta.topology.min.js"></script>
 
     <script>
         tailwind.config = {
@@ -60,8 +62,8 @@
                 background-image: conic-gradient(rgba(0,0,0,0.5) 90deg, transparent 90deg 180deg, rgba(0,0,0,0.5) 180deg 270deg, transparent 270deg);
                 background-size: 5px 5px;
             }
-            .video-bg-wrap video {
-                @apply absolute inset-0 w-full h-full object-cover z-0;
+            .video-bg-wrap #vanta-bg {
+                @apply absolute inset-0 w-full h-full z-0;
             }
 
             /* Glass Panel */
@@ -74,8 +76,7 @@
             }
             
             .nav-glass {
-                @apply fixed top-6 left-6 right-6 md:left-1/2 md:-translate-x-1/2 z-50 w-auto md:w-[95%] max-w-6xl px-6 py-3 rounded-full 
-                        glass-panel border-white/[0.12];
+                @apply absolute top-6 left-6 right-6 md:left-1/2 md:-translate-x-1/2 z-50 w-auto md:w-[95%] max-w-6xl px-6 py-3;
             }
             
             .text-spec { 
@@ -120,6 +121,15 @@
             }
         }
     </style>
+
+    <style>
+        .media{position: relative; z-index: 0;}
+        .media video{position: relative; z-index: -1;}
+        .media .grid{position: relative; z-index: 1;}
+
+        .media:before{content: ""; position: absolute; inset: 0 -100vw 0 -100vw; z-index: 11; background: linear-gradient(to top, rgba(0, 0, 0, 1) 0%, transparent 100%); z-index: 0;}
+        .media:after{content: ""; position: absolute; left: -100vw; right: -100vw; top: 100%; height: 100vh; z-index: 11; background: #000; z-index: 0; }
+    </style>
 </head>
 <body>
 
@@ -139,9 +149,17 @@
 
         <div class="flex items-center gap-3">
             <!-- Language Toggle -->
-            <button onclick="toggleLanguage()" class="w-10 h-10 rounded-full glass-panel flex items-center justify-center hover:bg-white/10 transition-all border-white/10">
-                <span id="lang-text" class="text-xs font-bold font-mono">EN</span>
-            </button>
+            <div class="relative flex items-center">
+                <select onchange="changeLanguage(this.value)" class="glass-panel text-xs font-bold font-mono text-white bg-transparent outline-none cursor-pointer rounded-full pl-4 pr-8 py-2.5 border border-white/10 hover:bg-white/10 transition-all appearance-none z-10 relative">
+                    <option value="en" class="bg-[#1a1a1a] text-white">EN</option>
+                    <option value="ja" class="bg-[#1a1a1a] text-white">JA</option>
+                    <option value="zh" class="bg-[#1a1a1a] text-white">ZH</option>
+                    <option value="ko" class="bg-[#1a1a1a] text-white">KO</option>
+                </select>
+                <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 z-10 text-white/50">
+                    <i class="fa-solid fa-chevron-down text-[10px]"></i>
+                </div>
+            </div>
 
             <!-- Smart Download Button -->
             <div class="relative" id="download-wrapper">
@@ -166,64 +184,62 @@
 
     <!-- Hero Section (Video Background is now INSIDE this section) -->
     <section class="pt-40 pb-24 px-6 relative z-10 overflow-hidden min-h-[85vh] flex items-center">
-        <!-- Video Background with Overlay -->
         <div class="video-bg-wrap">
-            <video autoplay loop muted playsinline>
-                <source src="static/video/background.mp4" type="video/mp4">
-                Your browser does not support HTML5 video.
-            </video>
+            <div id="vanta-bg"></div>
         </div>
 
         <div class="max-w-3xl mx-auto w-full">
             <!-- Main Title & Desc -->
             <div class="text-center space-y-6 mb-16 py-2">
-                <h1 class="text-3xl md:text-5xl font-bold tracking-tighter text-gradient mb-4">어려운 데이터 관리 대화로 시작하고,<br>보안 필터로 안전하게 지키세요.</h1>
+                <h1 class="text-3xl md:text-5xl font-bold tracking-tighter text-gradient mb-4">Start difficult data management<br>keep it safe with privacy filters</h1>
                 <p class="text-gray-400 text-lg leading-relaxed break-keep" style="text-shadow: 0 0 20px #000;" data-i18n="hero_desc">
                     복잡한 데이터 이제 마우스로 끌어서 AI에게 놓으세요.
                 </p>
             </div>
 
-            <!-- Specs Grid (Glass Panel) -->
-            <div class="max-w-xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-3 mb-16">
-                <div class="glass-panel p-3 rounded-3xl group hover:border-blue-500/30 transition-colors">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_speed">Data Collection</span>
-                    <div class="text-spec text-blue-400 group-hover:scale-105 transition-transform duration-500">
-                        One-Click <span class="text-sm font-normal text-gray-500 ml-1">Integration</span>
-                    </div>
-                </div>
-        
-                <div class="glass-panel p-3 rounded-3xl group hover:border-green-500/30 transition-colors">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_security">Privacy</span>
-                    <div class="text-spec text-green-400 group-hover:scale-105 transition-transform duration-500">
-                        Auto <span class="text-sm font-normal text-gray-500 ml-1">Masking</span>
-                    </div>
-                </div>
+            <div class="media">
+                <video style="border-radius: 1em;" autoplay loop muted playsinline>
+                    <source src="/video/temp2.mp4" type="video/mp4">
+                </video>
 
-                <div class="glass-panel p-3 rounded-3xl group hover:border-white/30 transition-colors">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_capability">AI Analysis</span>
-                    <div class="text-spec text-white group-hover:scale-105 transition-transform duration-500">
-                        Ask <span class="text-sm font-normal text-gray-500 ml-1">Anything</span>
-                    </div>
+                <!-- Main Title & Desc -->
+                <div class="max-w-xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-4" style="position: relative; top: -90px;">
+                    <button class="glass-panel px-2 py-4 rounded-2xl flex items-center justify-center gap-3 opacity-50 cursor-not-allowed border-white/5 text-gray-500 w-full">
+                        <i class="fa-brands fa-linux text-xl"></i>
+                        <span data-i18n="btn_linux">준비중</span>
+                    </button>
+                    <button class="glass-panel px-2 py-4 rounded-2xl flex items-center justify-center gap-3 opacity-50 cursor-not-allowed border-white/5 text-gray-500 w-full">
+                        <i class="fa-brands fa-apple text-xl"></i>
+                        <span data-i18n="btn_mac">준비중</span>
+                    </button>
+                    <button onclick="executeDownload()" class="glass-panel bg-blue-600/20 hover:bg-blue-600/40 border-blue-500/30 text-white font-bold px-2 py-4 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 w-full">
+                        <i class="fa-brands fa-windows text-xl"></i>
+                        <span data-i18n="btn_win">다운로드</span>
+                    </button>
                 </div>
             </div>
 
-            <!-- Horizontal Divider -->
-            <div class="h-px w-full bg-gradient-to-r from-transparent via-white/10 to-transparent my-16"></div>
+            <div class="max-w-xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-3 mb-16">
+                <div class="glass-panel p-3 rounded-3xl group border-white/0 transition-colors">
+                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_speed">Data Collection</span>
+                    <div class="text-spec text-blue-400 group-hover:scale-105 transition-transform duration-500">
+                        One-Click <br><span class="text-sm font-normal text-gray-500 ml-1">Integration</span>
+                    </div>
+                </div>
+        
+                <div class="glass-panel p-3 rounded-3xl group border-white/0 transition-colors">
+                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_security">Privacy</span>
+                    <div class="text-spec text-green-400 group-hover:scale-105 transition-transform duration-500">
+                        Auto <br><span class="text-sm font-normal text-gray-500 ml-1">Masking</span>
+                    </div>
+                </div>
 
-            <!-- Main Title & Desc -->
-            <div class="max-w-xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-4">
-                <button class="glass-panel px-2 py-4 rounded-2xl flex items-center justify-center gap-3 opacity-50 cursor-not-allowed border-white/5 text-gray-500 w-full">
-                    <i class="fa-brands fa-linux text-xl"></i>
-                    <span data-i18n="btn_linux">준비중</span>
-                </button>
-                <button class="glass-panel px-2 py-4 rounded-2xl flex items-center justify-center gap-3 opacity-50 cursor-not-allowed border-white/5 text-gray-500 w-full">
-                    <i class="fa-brands fa-apple text-xl"></i>
-                    <span data-i18n="btn_mac">준비중</span>
-                </button>
-                <button onclick="executeDownload()" class="glass-panel bg-blue-600/20 hover:bg-blue-600/40 border-blue-500/30 text-white font-bold px-2 py-4 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 w-full">
-                    <i class="fa-brands fa-windows text-xl"></i>
-                    <span data-i18n="btn_win">다운로드</span>
-                </button>
+                <div class="glass-panel p-3 rounded-3xl group border-white/0 transition-colors">
+                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_capability">AI Analysis</span>
+                    <div class="text-spec text-white group-hover:scale-105 transition-transform duration-500">
+                        Ask <br><span class="text-sm font-normal text-gray-500 ml-1">Anything</span>
+                    </div>
+                </div>
             </div>
         </div>
     </section>
@@ -502,9 +518,9 @@
                 "nav_download": "Download Installer (.exe)",
                 "system_status": "Status: Ready",
                 "spec_speed": "Easy Data Collection",
-                "spec_security": "Auto Privacy Protection",
+                "spec_security": "Privacy Filter",
                 "spec_capability": "Chat Directly with AI",
-                "hero_title": "Start difficult data management with a conversation,\nand keep it safe with security filters.",
+                "hero_title": "Start difficult data management\nkeep it safe with privacy filters",
                 "hero_desc": "Now, just drag and drop complex data to AI.",
                 "btn_win": "Download",
                 "btn_mac": "Coming Soon",
@@ -615,7 +631,7 @@
                 "spec_speed": "간편한 데이터 수집",
                 "spec_security": "개인정보 자동 보호",
                 "spec_capability": "AI와 바로 대화하기",
-                "hero_title": "어려운 데이터 관리 대화로 시작하고,\n보안 필터로 안전하게 지키세요.",
+                "hero_title": "어려운 데이터 관리 대화로 시작하고\n보안 마스킹으로 안전하게 지키세요",
                 "hero_desc": "복잡한 데이터 이제 마우스로 끌어서 AI에게 놓으세요.",
                 "btn_win": "다운로드",
                 "btn_mac": "준비중",
@@ -659,10 +675,9 @@
         };
         let detectedOS = OS_TYPES.WIN;
 
-        function toggleLanguage() {
-            currentLangIndex = (currentLangIndex + 1) % langOrder.length;
-            currentLang = langOrder[currentLangIndex];
-            document.getElementById('lang-text').innerText = currentLang.toUpperCase();
+        function changeLanguage(langCode) {
+            currentLang = langCode;
+            currentLangIndex = langOrder.indexOf(langCode);
             applyLanguage();
             renderDownloadButton();
         }
@@ -747,6 +762,18 @@
         detectOS();
         applyLanguage();
         renderDownloadButton();
+
+        // Initialize Vanta Topology Background
+        VANTA.TOPOLOGY({
+            el: "#vanta-bg",
+            mouseControls: true,
+            touchControls: true,
+            gyroControls: false,
+            minHeight: 200.00,
+            minWidth: 200.00,
+            scale: 1.00,
+            scaleMobile: 1.00
+        })
     </script>
 </body>
 </html>

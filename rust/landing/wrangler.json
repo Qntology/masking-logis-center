@@ -1,0 +1,34 @@
+{
+	"compatibility_date": "2026-06-01",
+	"main": "src/index.ts",
+	"name": "terminal-logis-center",
+	"upload_source_maps": true,
+	"d1_databases": [
+		
+	],
+	"vectorize": [
+		
+	],
+	"observability": {
+        "enabled": true
+    },
+    "assets": {
+        "directory": "./public/",
+        "binding": "ASSETS"
+    },
+    "rules": [
+        {
+            "type": "Text",
+            "globs": [
+                "**/*.html"
+            ],
+            "fallthrough": true
+        }
+    ],
+    "r2_buckets": [
+        {
+            "binding": "CDN",
+            "bucket_name": "cdn"
+        }
+    ]
+}
