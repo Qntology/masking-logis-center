@@ -675,8 +675,15 @@ async function updateExtractButtonVisibility() {
     if (currentLock) {
         const lockEl = document.getElementById(currentLock);
         if (!lockEl) {
-            const lockTime = parseInt(currentLock.split('_')[1] || "0");
-            if (Date.now() - lockTime > 5000) { await kvRemove("sys_lock"); }
+            // 🌟 [CRITICAL FIX] 5000ms라는 불확실한 시간 기반 땜질 로직을 전면 폐기하고,
+            // 실제 프론트엔드/백엔드 큐(대기열)에 존재하는지 명확한 상태 기반으로 교차 검증하여 유령 락을 즉각 해제합니다.
+            const isFrontendActive = GlobalTaskManager.currentTaskId === currentLock || GlobalTaskManager.queue.some(q => q.taskId === currentLock);
+            const isBackendActive = GlobalTaskManager.backendQueued.some(p => p.id === currentLock || p.taskId === currentLock);
+            
+            if (!isFrontendActive && !isBackendActive) {
+                console.log(`[LOCK] Zombie lock detected without active queue: ${currentLock}. Releasing immediately.`);
+                await kvRemove("sys_lock");
+            }
         }
     }
 
@@ -1760,6 +1767,7 @@ document.addEventListener('nav-link', async (e: any) => {
 class BrowserQueueManager {
     static queue: string[] = [];
     static isProcessing: boolean = false;
+    static bootPromise: Promise<void> | null = null; // 🌟 Rust와 동기화하기 위한 Promise 기반 락(Lock) 추가
 
     static async enqueue(url: string) {
         if (!url || url === 'javascript:void(0);') return;
@@ -1774,63 +1782,55 @@ class BrowserQueueManager {
         this.isProcessing = true;
         
         while (this.queue.length > 0) {
-            // 🌟 [CRITICAL FIX] 무한 루프 방지: 최대 5초(50 * 100ms)만 대기하고 락을 강제로 풉니다.
-            // 브라우저가 이미 켜져 있을 때는 락 대기를 아예 무시하여 즉각적으로 반응하게 만듭니다.
-            let waitTime = 0;
-            let currentQueueLength = this.queue.length;
-
-            while (!isBrowserRunning && isAutoLaunchLocked && waitTime < 5000) {
-                await new Promise(resolve => setTimeout(resolve, 100));
-                waitTime += 100;
-
-                // 🌟 [CRITICAL FIX] 대기 중에 사용자가 More 버튼을 추가로 클릭하여 큐(대기열)가 늘어나면,
-                // 카운트다운을 0으로 초기화(연장)하여 브라우저가 켜질 수 있는 충분한 시간을 보장합니다.
-                if (this.queue.length > currentQueueLength) {
-                    console.log(`[BROWSER-QUEUE] Queue size increased (${currentQueueLength} -> ${this.queue.length}). Resetting timeout.`);
-                    waitTime = 0;
-                    currentQueueLength = this.queue.length;
-                }
-            }
-
-            if (isAutoLaunchLocked && waitTime >= 5000) {
-                console.warn("[BROWSER-QUEUE] Lock timeout. Forcing unlock to prevent infinite loop.");
-                isAutoLaunchLocked = false;
+            // 🌟 [CRITICAL FIX] setTimeout 기반의 타이머 폴링을 완전히 제거하고,
+            // Rust 백엔드의 브라우저 부팅(Promise)이 완료되는 정확한 시점까지 호흡을 맞춰 대기합니다.
+            if (this.bootPromise) {
+                console.log("[BROWSER-QUEUE] Waiting for background boot task to synchronize with Rust...");
+                await this.bootPromise;
             }
 
             const targetUrl = this.queue.shift()!;
-            
-            // 브라우저가 꺼져 있어 새로 부팅해야 할 때만 전체 락을 겁니다.
             const needsBootLock = !isBrowserRunning;
+
             if (needsBootLock) {
                 isAutoLaunchLocked = true; 
                 isBrowserRunning = true; 
-            }
-            
-            console.log(`[BROWSER-QUEUE] Executing launch for: ${targetUrl}`);
+                
+                // 🌟 이후 들어오는 큐들이 백엔드 부팅이 끝날 때까지 대기할 수 있도록 Promise 생성
+                let resolver: () => void;
+                this.bootPromise = new Promise(r => { resolver = r; });
+                
+                console.log(`[BROWSER-QUEUE] Executing BOOT launch for: ${targetUrl}`);
 
-            try {
+                try {
+                    if (btnAutoLaunch) {
+                        btnAutoLaunch.style.display = "none";
+                        btnAutoLaunch.classList.add("hidden");
+                    }
+                    
+                    // 🌟 Rust의 브라우저 런칭이 완료될 때까지 비동기 락 유지
+                    await invoke("launch_best_browser", { url: targetUrl });
+                } catch (err) {
+                    console.error("[BROWSER-QUEUE] Launch failed:", err);
+                    isBrowserRunning = false;
+                    syncBrowserStatus();
+                } finally {
+                    isAutoLaunchLocked = false;
+                    if (resolver!) resolver(); // 🌟 대기 중이던 밀린 큐들을 일제히 해제
+                    this.bootPromise = null;
+                }
+            } else {
+                // 🌟 브라우저가 켜져 있으면 락을 기다리지 않고 비동기로 즉시 병렬 발송
+                console.log(`[BROWSER-QUEUE] Executing PARALLEL launch for: ${targetUrl}`);
+                
                 if (btnAutoLaunch) {
                     btnAutoLaunch.style.display = "none";
                     btnAutoLaunch.classList.add("hidden");
                 }
                 
-                // 🌟 [CRITICAL FIX] 브라우저가 이미 켜져 있다면 큐가 멈춰서 기다리지 않고 비동기로 바로 쏴버립니다 (체감 속도 즉각 반응)
-                if (!needsBootLock) {
-                    invoke("launch_best_browser", { url: targetUrl }).catch(err => {
-                        console.error("[BROWSER-QUEUE] Parallel launch failed:", err);
-                    });
-                } else {
-                    await invoke("launch_best_browser", { url: targetUrl });
-                }
-            } catch (err) {
-                console.error("[BROWSER-QUEUE] Launch failed:", err);
-                isBrowserRunning = false;
-                syncBrowserStatus();
-            } finally {
-                // 부팅 락을 걸었던 경우에만 해제합니다.
-                if (needsBootLock) {
-                    isAutoLaunchLocked = false;
-                }
+                invoke("launch_best_browser", { url: targetUrl }).catch(err => {
+                    console.error("[BROWSER-QUEUE] Parallel launch failed:", err);
+                });
             }
         }
         
