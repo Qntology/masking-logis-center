@@ -1774,15 +1774,37 @@ class BrowserQueueManager {
         this.isProcessing = true;
         
         while (this.queue.length > 0) {
-            // 🌟 런칭 락(isAutoLaunchLocked)이 걸려있다면, 이벤트를 무시(return)하지 않고 안전하게 풀릴 때까지 대기합니다.
-            while (isAutoLaunchLocked) {
-                console.log("[BROWSER-QUEUE] Waiting for previous browser task to finish...");
-                await new Promise(resolve => setTimeout(resolve, 300));
+            // 🌟 [CRITICAL FIX] 무한 루프 방지: 최대 5초(50 * 100ms)만 대기하고 락을 강제로 풉니다.
+            // 브라우저가 이미 켜져 있을 때는 락 대기를 아예 무시하여 즉각적으로 반응하게 만듭니다.
+            let waitTime = 0;
+            let currentQueueLength = this.queue.length;
+
+            while (!isBrowserRunning && isAutoLaunchLocked && waitTime < 5000) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+                waitTime += 100;
+
+                // 🌟 [CRITICAL FIX] 대기 중에 사용자가 More 버튼을 추가로 클릭하여 큐(대기열)가 늘어나면,
+                // 카운트다운을 0으로 초기화(연장)하여 브라우저가 켜질 수 있는 충분한 시간을 보장합니다.
+                if (this.queue.length > currentQueueLength) {
+                    console.log(`[BROWSER-QUEUE] Queue size increased (${currentQueueLength} -> ${this.queue.length}). Resetting timeout.`);
+                    waitTime = 0;
+                    currentQueueLength = this.queue.length;
+                }
+            }
+
+            if (isAutoLaunchLocked && waitTime >= 5000) {
+                console.warn("[BROWSER-QUEUE] Lock timeout. Forcing unlock to prevent infinite loop.");
+                isAutoLaunchLocked = false;
             }
 
             const targetUrl = this.queue.shift()!;
-            isAutoLaunchLocked = true; // 🌟 실행 락(Lock) 활성화
-            isBrowserRunning = true; 
+            
+            // 브라우저가 꺼져 있어 새로 부팅해야 할 때만 전체 락을 겁니다.
+            const needsBootLock = !isBrowserRunning;
+            if (needsBootLock) {
+                isAutoLaunchLocked = true; 
+                isBrowserRunning = true; 
+            }
             
             console.log(`[BROWSER-QUEUE] Executing launch for: ${targetUrl}`);
 
@@ -1792,14 +1814,23 @@ class BrowserQueueManager {
                     btnAutoLaunch.classList.add("hidden");
                 }
                 
-                await invoke("launch_best_browser", { url: targetUrl });
+                // 🌟 [CRITICAL FIX] 브라우저가 이미 켜져 있다면 큐가 멈춰서 기다리지 않고 비동기로 바로 쏴버립니다 (체감 속도 즉각 반응)
+                if (!needsBootLock) {
+                    invoke("launch_best_browser", { url: targetUrl }).catch(err => {
+                        console.error("[BROWSER-QUEUE] Parallel launch failed:", err);
+                    });
+                } else {
+                    await invoke("launch_best_browser", { url: targetUrl });
+                }
             } catch (err) {
                 console.error("[BROWSER-QUEUE] Launch failed:", err);
                 isBrowserRunning = false;
                 syncBrowserStatus();
             } finally {
-                // 🌟 작업이 완전히 끝나면 락을 해제하여 대기열의 다음 항목이 실행될 수 있게 합니다.
-                isAutoLaunchLocked = false;
+                // 부팅 락을 걸었던 경우에만 해제합니다.
+                if (needsBootLock) {
+                    isAutoLaunchLocked = false;
+                }
             }
         }
         
