@@ -663,6 +663,28 @@ async fn process_task(
 
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
                 if !target_text.is_empty() {
+                    // 🌟 [추가] LLM 토큰 절약 및 링크 훼손 방지를 위해 href, src 값들을 임시 마커로 치환합니다.
+                    let mut link_map = std::collections::HashMap::new();
+                    let mut link_counter = 0;
+                    
+                    if let Ok(re_href) = regex::Regex::new(r#"href="([^"]+)""#) {
+                        target_text = re_href.replace_all(&target_text, |caps: &regex::Captures| {
+                            let marker = format!("href=\"**LINK_SKIP_{}**\"", link_counter);
+                            link_map.insert(marker.clone(), caps[0].to_string());
+                            link_counter += 1;
+                            marker
+                        }).to_string();
+                    }
+                    
+                    if let Ok(re_src) = regex::Regex::new(r#"src="([^"]+)""#) {
+                        target_text = re_src.replace_all(&target_text, |caps: &regex::Captures| {
+                            let marker = format!("src=\"**LINK_SKIP_{}**\"", link_counter);
+                            link_map.insert(marker.clone(), caps[0].to_string());
+                            link_counter += 1;
+                            marker
+                        }).to_string();
+                    }
+
                     // 컨텍스트 크기에 따른 동적 모델 할당 (60,000 초과 시 Qwen, 이하 시 Qwen3)
                     let is_large_context = target_text.len() > 60000;
                     let target_model_size = if is_large_context { crate::model::ModelSize::Qwen } else { crate::model::ModelSize::Qwen3 };
@@ -859,6 +881,11 @@ async fn process_task(
                         if let Some(final_repl) = skip_map.get(&marker) {
                             masked_text = masked_text.replace(&marker, final_repl);
                         }
+                    }
+
+                    // 🌟 [추가] 마스킹이 끝난 후 임시로 빼두었던 원본 링크(href, src)들을 다시 복원합니다.
+                    for (marker, original_link) in link_map {
+                        masked_text = masked_text.replace(&marker, &original_link);
                     }
 
                     if !all_matches.is_empty() {

@@ -108,7 +108,7 @@ body {
 
 .pill-nav:active { cursor: grabbing; }
 
-#search-mode-tabs{margin-bottom: 0.5em; padding: 0 1.4rem;}
+#search-mode-tabs{margin-bottom: 0.5em; padding: 0 1.6rem;}
 #search-mode-tabs .mode-tab{display: block;}
 #search-mode-tabs .mode-tab+.mode-tab{margin-top: 1.5em;}
 #search-mode-tabs .mode-tab:hover{font-style: italic;}
@@ -957,6 +957,8 @@ tr:hover { background: rgba(0,0,0,0.05); }
     font-weight: 300;
     color: #333;
 }
+
+[data-is-masked="true"] *{font-style: italic !important;}
 
 .logis-label:empty{display: none;}
 

@@ -168,6 +168,16 @@ export function item2html(item: any, checked: boolean = false, currentUrl: strin
 
         if (key === "status") {
             _name = itm.type || "status";
+            
+            // 🌟 마스킹 여부를 파악하여 UI 표기를 'masked'로 덮어씌웁니다.
+            let isMasked = false;
+            if (itm.is_masked) isMasked = true;
+            else if (itm.data && itm.data.is_masked) isMasked = true;
+            else if (typeof itm.json_data === "string" && itm.json_data.includes('"is_masked":true')) isMasked = true;
+            
+            if (isMasked) {
+                _name = "masked";
+            }
         }
 
         if (key !== "created_at") {

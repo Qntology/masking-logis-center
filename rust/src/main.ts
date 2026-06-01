@@ -1257,6 +1257,11 @@ async function renderNavigation() {
         // 🌟 [CRITICAL FIX] 네비게이션 렌더링 완료 후 DOM을 참조하는 버튼 가시성 로직을 강제 재평가하여 버튼을 복구합니다.
         await updateExtractButtonVisibility();
         
+        // 🌟 모드 탭 카운트 최신화 (사용자가 모드 탭 편집 중일 때는 포커스 보호를 위해 건너뜀)
+        if (!isModeEdit) {
+            await renderModeTabs();
+        }
+
         // 🌟 락 해제
         isNavRendering = false;
     }
@@ -1544,6 +1549,21 @@ async function renderModeTabs() {
     const editBtn = document.getElementById("btn-edit-modes");
     if (!container || !actions || !editBtn) return;
 
+    let modeCounts: Record<string, number> = {};
+    try {
+        // pages 테이블의 메타데이터를 활용하여 각 모드별 아이템 총합을 빠르고 가볍게 계산합니다.
+        const _pagesRaw = await invoke<any[]>("get_known_pages");
+        for (const item of _pagesRaw) {
+            let data: any = {};
+            try { data = typeof item.json_data === "string" ? JSON.parse(item.json_data) : item.data || item; } catch(e) {}
+            const mode = data.mode || "commerce";
+            const count = data.count || 1;
+            modeCounts[mode] = (modeCounts[mode] || 0) + count;
+        }
+    } catch (e) {
+        console.warn("Failed to fetch mode counts", e);
+    }
+
     container.innerHTML = "";
 
     if (isModeEdit) {
@@ -1620,7 +1640,11 @@ async function renderModeTabs() {
             const btn = document.createElement("button");
             btn.className = "mode-tab";
             btn.dataset.mode = mode;
-            btn.innerText = mode.charAt(0).toUpperCase() + mode.slice(1);
+            
+            const modeCount = modeCounts[mode] || 0;
+            const modeName = mode.charAt(0).toUpperCase() + mode.slice(1);
+            btn.innerHTML = `${modeName} <u style="font-size: 0.75rem; font-style: italic; text-decoration: none; opacity: 0.6; margin-left: 2px;">(${modeCount})</u>`;
+            
             btn.style.background = "none";
             btn.style.border = "none";
             btn.style.fontSize = "0.8rem";
@@ -3894,7 +3918,7 @@ function updateListActionButtons() {
 
         if (btnDrag) {
             btnDrag.style.display = "inline-block";
-            btnDrag.innerText = `Export (${selectedUuids.size})`;
+            btnDrag.innerText = `Export(${selectedUuids.size})`;
         }
     } else {
         if (btnDelete) btnDelete.style.display = "none";
