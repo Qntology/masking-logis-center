@@ -479,7 +479,8 @@ async fn run_driverless_automation(browser: &str, url: &str, _script: &str, app_
             let first_page = pages.first().unwrap();
             let first_url = first_page.url().await.unwrap_or_default().unwrap_or_default();
             if first_url.is_empty() || first_url == "about:blank" || first_url.contains("newtab") || first_url.contains("new-tab") {
-                let _ = first_page.close().await;
+                // 🌟 [CRITICAL FIX] `first_page`는 참조자(&)이므로 소유권(Ownership) 이동을 위해 .clone()을 호출한 뒤 닫습니다.
+                let _ = first_page.clone().close().await;
             }
         }
         p
