@@ -641,8 +641,10 @@ async fn process_task(
                     let url_val = json_data.get("link").and_then(|v| v.as_str()).unwrap_or("");
                     
                     if !html_val.is_empty() {
-                        // 🌟 HTML 값을 가져와 태그와 속성을 모두 제거한 순수 들여쓰기 텍스트(YamlMode)로 파싱합니다.
-                        target_text = crate::parsing::convert_to_clean_pug(html_val, crate::parsing::PugMode::NoAttributesMode, Some(url_val));
+                        // 🌟 Speedreader 조건 적용: 핵심 본문 영역이 존재할 경우 해당 영역만 추출하여 LLM 토큰 최적화
+                        let speedreader_html = crate::parsing::extract_speedreader_content(html_val);
+                        // 🌟 정제된 HTML 값을 가져와 태그와 속성을 모두 제거한 순수 들여쓰기 텍스트(YamlMode)로 파싱합니다.
+                        target_text = crate::parsing::convert_to_clean_pug(&speedreader_html, crate::parsing::PugMode::NoAttributesMode, Some(url_val));
                     } else {
                         target_text = json_data.get("yaml").and_then(|v| v.as_str()).unwrap_or(&doc.text).to_string();
                     }
@@ -662,7 +664,7 @@ async fn process_task(
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
                 if !target_text.is_empty() {
                     // 컨텍스트 크기에 따른 동적 모델 할당 (60,000 초과 시 Qwen, 이하 시 Qwen3)
-                    let is_large_context = target_text.len() > 60000;
+                    let is_large_context = target_text.len() > 8000;
                     let target_model_size = if is_large_context { crate::model::ModelSize::Qwen } else { crate::model::ModelSize::Qwen3 };
 
                     // 🌟 [OOM 원인 분석용 로그] 모델에 투입되기 직전 전체 컨텍스트의 문자열 길이를 터미널에 출력합니다.
@@ -738,7 +740,8 @@ async fn process_task(
                                         ..Default::default()
                                     };
                                     // 🌟 [CRITICAL FIX] Qwen(대형 문맥) 추론 시 session_id와 kv_name을 주입하여 SSD 오프로딩 및 청크 병렬 처리가 동작하도록 수정합니다.
-                                    let res = gen.generate(params, Some(cancel_clone), Some(session_id_clone), Some("masking".to_string())).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
+                                    let res = gen.generate(params, Some(cancel_clone), None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
+                                    // let res = gen.generate(params, Some(cancel_clone), Some(session_id_clone), Some("masking".to_string())).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
                                     
                                     let _ = gen.clear_kv_cache();
                                     

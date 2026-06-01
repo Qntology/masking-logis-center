@@ -975,7 +975,7 @@ async function renderAccordion(nodes: any[], level = 1): Promise<string> {
                     : name;
                 
                 content = `<div style="display:flex; align-items:center; width:100%; justify-content:space-between;">
-                    <span>${displayName} ${countStr}</span>
+                    <span><u>${displayName} ${countStr}</u></span>
                 </div>`;
             }
 

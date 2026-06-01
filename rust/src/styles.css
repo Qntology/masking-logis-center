@@ -1005,12 +1005,10 @@ tr:hover { background: rgba(0,0,0,0.05); }
 
 .logis-label.active > div > span > strong {color: #fff;}
 
-.logis-label.active > div > span {padding-left: 1em;}
-
 .logis-label.active > div > span:before {
     content: "▶";
     position: absolute;
-    left: 0;
+    left: -1em;
     top: 1px;
     color: #000;
     font-size: 8px;
@@ -1049,6 +1047,6 @@ input[type="checkbox"]:checked ~ .logis-child {
 
 #extraction-log{display:flex; flex-direction:column;}
 
-#detail-content{overflow-y:auto; flex:1; font-size: 0.85rem; padding:0 1em 1em;}
+#detail-content{overflow-y:auto; flex:1; font-size: 0.85rem; padding:1em;}
 .progress-container{display:flex; flex-direction:column; gap:5px;}
 #progress-container:empty{margin-bottom: 14px;}

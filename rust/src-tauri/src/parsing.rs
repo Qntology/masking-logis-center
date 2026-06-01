@@ -75,6 +75,34 @@ pub fn pre_clean_html(html: &str) -> String {
     clean.trim().to_string()
 }
 
+pub fn extract_speedreader_content(html: &str) -> String {
+    let document = Html::parse_document(html);
+    
+    // Speedreader가 주로 타겟팅하는 핵심 본문(Main Content) 셀렉터 우선순위 목록
+    let selectors = [
+        "article",
+        "main",
+        "[role='main']",
+        ".main-content",
+        "#main-content",
+        ".post-content",
+        ".article-content",
+        "#article",
+        ".content"
+    ];
+
+    for sel_str in selectors.iter() {
+        if let Ok(sel) = Selector::parse(sel_str) {
+            if let Some(element) = document.select(&sel).next() {
+                // 핵심 본문 영역이 발견되면 해당 영역의 HTML만 반환하여 LLM 토큰 낭비 방지
+                return element.inner_html();
+            }
+        }
+    }
+    
+    // 지정된 핵심 본문 영역을 찾지 못했다면 원본 HTML을 그대로 반환하여 데이터 유실 방지
+    html.to_string()
+}
 
 pub fn convert_doc_to_clean_pug(document: &Html, mode: PugMode, base_url: Option<&str>) -> String {
     let mut pug_output = String::new();
