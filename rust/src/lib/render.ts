@@ -97,7 +97,8 @@ export function item2html(item: any, checked: boolean = false, currentUrl: strin
     const docId = item.id || item.uuid || (item.data && item.data.id) || item.index || Math.random().toString(36).substr(2, 9);
     
     let body = `<input type="checkbox" id="more-${docId}" class="toggle-more" ${checked ? 'disabled checked' : ''} style="display:none;" />`;
-    body += `<div id="${docId}" class="${selector.result}" data-type="${item.type || ''}" data-created-at="${item.created_at || 0}" data-updated-at="${item.updated_at || 0}">`;
+    // 🌟 [CRITICAL FIX] data-ref 속성을 심어주어, 마스킹 시작 시 현재 활성 브라우저 주소와 100% 맵핑되도록 지원합니다.
+    body += `<div id="${docId}" class="${selector.result}" data-ref="${item.ref || ''}" data-type="${item.type || ''}" data-created-at="${item.created_at || 0}" data-updated-at="${item.updated_at || 0}">`;
 
     let itemType = item.type || "unknown";
     const tradeDocs = ['BL', 'AWB', 'CI', 'PI', 'PL', 'CO', 'LC', 'shipping_doc', 'shipping'];

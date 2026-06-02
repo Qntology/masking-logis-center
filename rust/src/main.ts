@@ -167,8 +167,6 @@ class GlobalTaskManager {
         this.activeRefs.add(taskId);
         await this.saveQueue(); // 🌟 즉시 저장 (Dexie)
         
-        // 🌟 [추가] 큐에 담기자마자 사용자에게 시각적 피드백 제공 (DB 등록 전 선행 렌더링)
-        // 🌟 [CRITICAL FIX] 이미지 해시(img_0x...)를 Timestamp로 파싱하다가 Invalid Date(RangeError)가 터져 UI가 먹통이 되는 버그 방어
         let startTime = Date.now();
         const match = taskId.match(/_(\d+)$/);
         if (match) startTime = parseInt(match[1], 10);
@@ -185,13 +183,23 @@ class GlobalTaskManager {
             });
         }
 
-        // 2. 시스템 대기열 말풍선 선행 렌더링
+        // 🌟 [CRITICAL FIX] 큐가 비어있으면 즉시 실행(Processing, 1)으로 렌더링하고, 대기열이 존재하면(Pending, 10)으로 렌더링합니다.
+        const isImmediatelyProcessing = this.queue.length === 1 && !this.isBusy;
+        const initStatus = isImmediatelyProcessing ? 1 : 10;
+        
+        let labelText = payload.link || payload.image_path || payload.ref || "Task";
+        if (type === "mask_documents") labelText = "Batch PII Masking";
+        else if (type === "ai_search") labelText = "AI Search";
+        
+        const initText = isImmediatelyProcessing ? `Starting: ${labelText}` : `Waiting in Queue: ${labelText}`;
+
+        // 2. 시스템 대기열/진행 말풍선 선행 렌더링
         await renderMessage({
             id: taskId,
             task_id: taskId,
             role: "system_task",
-            text: payload.link || payload.image_path || "Waiting in queue...",
-            status: 10, // Pending
+            text: initText,
+            status: initStatus, 
             created_at: startTime,
             updated_at: startTime
         });
@@ -2105,7 +2113,15 @@ btnExtract?.addEventListener("click", async () => {
                 taskId = `task_${hashedRefId}`;
             }
             
-            // 🌟 수동 renderMessage 및 startSpinner 제거: addToQueue가 대기열 UI(10번)를 예쁘게 그려줍니다.
+            // 🌟 [CRITICAL FIX] HTML 추출(extract_html_from_current_tab) 과정이 1~2초 지연되어 
+            // 앱이 멈춘 것처럼 보이는 프리징 현상을 방어하기 위해 즉시 프로그레스 UI(말풍선 및 스피너)를 선행 렌더링합니다!
+            await renderProgressToUI({ 
+                task_id: taskId, 
+                category: "Processing", 
+                summary: "Extracting webpage content...", 
+                spinner: "⠋" 
+            });
+            startSpinner();
             
             const isCloudMode = (document.getElementById("cloud-mode-toggle") as HTMLInputElement)?.checked;
 
@@ -2859,14 +2875,23 @@ document.getElementById("btn-mask-selected")?.addEventListener("click", async ()
             const taskId = `mask_${Date.now()}`;
             const uuidsToMask = Array.from(selectedUuids);
 
+            // 🌟 [CRITICAL FIX] 첫 번째 선택된 문서의 실제 URL 해시(ref)를 DOM에서 추출합니다!
+            let targetRef = activeContext.ref;
+            if (!targetRef) {
+                const firstCard = document.getElementById(uuidsToMask[0]);
+                if (firstCard && firstCard.dataset.ref) {
+                    targetRef = firstCard.dataset.ref;
+                }
+            }
+
             await GlobalTaskManager.addToQueue(taskId, "mask_documents", {
                 id: taskId,
                 type: "mask_documents",
                 uuids: uuidsToMask,
                 link: "Batch PII Masking",
-                // 🌟 [CRITICAL FIX] "mask_documents"로 덮어쓰지 않고, 현재 브라우저가 포커싱 중인 URL 해시(ref)를 주입합니다.
-                // 이로 인해 DB에 작업이 등록될 때 URL 주소와 완벽하게 연결되어 추출 버튼이 정확히 숨겨집니다.
-                ref: activeContext.ref || "mask_documents"
+                // 🌟 [CRITICAL FIX] 추출한 실제 문서의 ref를 마스킹 큐에 정확히 연결하여, 
+                // 메모리 기반 가시성 검사(memoryHide)가 0ms만에 번개 버튼을 즉각 숨기도록 만듭니다!
+                ref: targetRef || "mask_documents"
             });
             
             // 🌟 진행 중인 마스킹 아이템 상태 등록 및 UI 즉시 갱신
@@ -2882,6 +2907,27 @@ document.getElementById("btn-mask-selected")?.addEventListener("click", async ()
                 const card = document.getElementById(id);
                 if (card) injectItemSelectCheckbox(card, id);
             });
+
+            // 🌟 [CRITICAL FIX] 마스킹 작업이 시작되었음을 직관적으로 보여주기 위해 채팅창의 해당 말풍선으로 스크롤을 이동합니다.
+            setTimeout(() => {
+                const taskEl = document.getElementById(taskId);
+                const scrollEl = document.getElementById("chat-scroll");
+                const container = document.querySelector(".chat-container") as HTMLElement;
+                
+                if (taskEl && scrollEl && container) {
+                    const maxScroll = Math.max(0, scrollEl.scrollHeight - container.clientHeight);
+                    let targetY = taskEl.offsetTop - (container.clientHeight / 2) + (taskEl.clientHeight / 2);
+                    
+                    if (targetY < 0) targetY = 0;
+                    if (targetY > maxScroll) targetY = maxScroll;
+                    
+                    currentY = targetY;
+                    scrollEl.style.transition = "transform 0.3s ease-out";
+                    updateTransform();
+                    
+                    setTimeout(() => { scrollEl.style.transition = ""; }, 300);
+                }
+            }, 100);
 
         } catch (e) {
             console.error(e);
@@ -4719,11 +4765,16 @@ async function initSession() {
 
                     // 2. 시스템 대기열/진행 상태 말풍선 복구
                     if (!document.getElementById(t.id)) {
+                        let textLabel = t.ref || "Local Source";
+                        if (t.id.startsWith("search_")) textLabel = "AI Search";
+                        else if (t.id.startsWith("mask_")) textLabel = "Batch PII Masking";
+
                         await renderMessage({
                             id: t.id,
                             task_id: t.id,
                             role: "system_task",
-                            text: t.id.startsWith("search_") ? "Task Started: AI Search" : ("Task Started: " + (t.ref || "Local Source")),
+                            // 🌟 [CRITICAL FIX] 상태(t.status)가 1이면 진행 중, 10이면 대기 중으로 명확히 텍스트를 분기합니다.
+                            text: t.status === 10 ? `Waiting in Queue: ${textLabel}` : `Processing: ${textLabel}`,
                             status: t.status,
                             // 🌟 [핵심 수정] 기준 시간(t.created_at) 그대로 사용하여 질문 뒤에 오게 함
                             created_at: t.created_at,
@@ -5872,12 +5923,16 @@ async function loadMoreChat(isHistory: boolean = false, silent: boolean = false)
 
                 const exists = messages.find(m => m.id === t.id || m.task_id === t.id);
                 if (!exists) {
+                    let textLabel = t.ref || "Local Source";
+                    if (t.id.startsWith("search_")) textLabel = "AI Search";
+                    else if (t.id.startsWith("mask_")) textLabel = "Batch PII Masking";
+
                     messages.push({
                         id: t.id,
                         task_id: t.id,
                         role: "system_task",
-                        // 🌟 [UI 보강] DB에 아직 안 들어간 순수 대기열(status: 10) 상태임을 직관적으로 보여줍니다.
-                        text: t.id.startsWith("search_") ? "Waiting in Queue: AI Search" : ("Waiting in Queue: " + (t.ref || "Local Source")),
+                        // 🌟 [CRITICAL FIX] 상태(t.status)가 1이면 진행 중, 10이면 대기 중으로 명확히 텍스트를 분기합니다.
+                        text: t.status === 10 ? `Waiting in Queue: ${textLabel}` : `Processing: ${textLabel}`,
                         status: t.status,
                         created_at: t.created_at + 1,
                         updated_at: t.updated_at + 1
