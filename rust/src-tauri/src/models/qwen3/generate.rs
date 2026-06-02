@@ -233,6 +233,7 @@ impl Qwen3GenerateModel {
         load_session_id: Option<String>,
         cache_dir: Option<String>,
         cancel_flag: Option<Arc<AtomicBool>>,
+        ignore_list: Option<&[String]>,
     ) -> Result<String> {
         if is_prefill {
             self.clear_kv_cache();
@@ -351,6 +352,35 @@ impl Qwen3GenerateModel {
             // <think> 지속 억제
             if (think_token_id as usize) < len { logits_vec[think_token_id as usize] -= 1000.0; }
 
+            // 🌟 [CRITICAL FIX] ignore_list에 등재된 잘못된 추출값의 토큰 시퀀스 생성을 억제(Bias)합니다.
+            if let Some(ignores) = ignore_list {
+                for ign in ignores {
+                    let ign_toks = self.tokenizer.text_encode_vec(ign.to_string(), false).unwrap_or_default();
+                    if ign_toks.is_empty() { continue; }
+                    
+                    let mut overlap = 0;
+                    for l in (1..=ign_toks.len().min(generate.len())).rev() {
+                        if generate.ends_with(&ign_toks[..l]) {
+                            overlap = l;
+                            break;
+                        }
+                    }
+                    
+                    if overlap < ign_toks.len() {
+                        let next_tok = ign_toks[overlap] as usize;
+                        if next_tok < len {
+                            if overlap > 0 {
+                                // 이미 토큰 시퀀스가 일부 매칭되었다면 완성을 방지하기 위해 강하게 억제 (-100.0)
+                                logits_vec[next_tok] -= 100.0;
+                            } else if gen_text.ends_with('"') {
+                                // 새로운 JSON value가 시작되는 시점(")에 첫 토큰이 등장하는 것을 억제 (-50.0)
+                                logits_vec[next_tok] -= 50.0;
+                            }
+                        }
+                    }
+                }
+            }
+
             // 🌟 [CRITICAL FIX] 모델이 같은 문장을 무한 반복하는 현상(Loop)을 끊기 위해 페널티를 로짓(Logits)에 직접 연산합니다.
             let penalty = self.generation_config.repetition_penalty;
             if penalty > 1.0 {
@@ -415,7 +445,7 @@ impl Qwen3GenerateModel {
         Ok(res_text)
     }
 
-    pub fn generate(&mut self, mes: ChatCompletionParameters, cancel_flag: Option<Arc<AtomicBool>>) -> Result<String> {
+    pub fn generate(&mut self, mes: ChatCompletionParameters, cancel_flag: Option<Arc<AtomicBool>>, ignore_list: Option<&[String]>) -> Result<String> {
         let temperature = mes
             .temperature
             .unwrap_or(self.generation_config.temperature as f64);
@@ -526,6 +556,35 @@ impl Qwen3GenerateModel {
 
             // <think> 지속 억제
             if (think_token_id as usize) < len { logits_vec[think_token_id as usize] -= 1000.0; }
+
+            // 🌟 [CRITICAL FIX] ignore_list에 등재된 잘못된 추출값의 토큰 시퀀스 생성을 억제(Bias)합니다.
+            if let Some(ignores) = ignore_list {
+                for ign in ignores {
+                    let ign_toks = self.tokenizer.text_encode_vec(ign.to_string(), false).unwrap_or_default();
+                    if ign_toks.is_empty() { continue; }
+                    
+                    let mut overlap = 0;
+                    for l in (1..=ign_toks.len().min(generate.len())).rev() {
+                        if generate.ends_with(&ign_toks[..l]) {
+                            overlap = l;
+                            break;
+                        }
+                    }
+                    
+                    if overlap < ign_toks.len() {
+                        let next_tok = ign_toks[overlap] as usize;
+                        if next_tok < len {
+                            if overlap > 0 {
+                                // 이미 토큰 시퀀스가 일부 매칭되었다면 완성을 방지하기 위해 강하게 억제 (-100.0)
+                                logits_vec[next_tok] -= 100.0;
+                            } else if gen_text.ends_with('"') {
+                                // 새로운 JSON value가 시작되는 시점(")에 첫 토큰이 등장하는 것을 억제 (-50.0)
+                                logits_vec[next_tok] -= 50.0;
+                            }
+                        }
+                    }
+                }
+            }
 
             // 🌟 [CRITICAL FIX] 모델이 같은 문장을 무한 반복하는 현상(Loop)을 끊기 위해 페널티를 로짓(Logits)에 직접 연산합니다.
             let penalty = self.generation_config.repetition_penalty;

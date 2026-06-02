@@ -598,13 +598,21 @@ pub async fn extract_html_from_current_tab() -> Result<String, String> {
                 (function() {
                     try {
                         const elements = document.querySelectorAll('*');
-                        
+                
                         elements.forEach(el => {
                             const style = window.getComputedStyle(el);
+                            let newStyle = '';
                             if (style.position === 'absolute' || style.position === 'fixed') {
+                                newStyle += ` position: ${style.position};`;
+                            }
+                            if (style.display) {
+                                newStyle += ` display: ${style.display};`;
+                            }
+                            
+                            if (newStyle) {
                                 const currentStyle = el.getAttribute('style') || '';
                                 el.setAttribute('data-logis-original-style', currentStyle);
-                                el.setAttribute('style', currentStyle + `; position: ${style.position};`);
+                                el.setAttribute('style', currentStyle + newStyle);
                             }
                         });
                         

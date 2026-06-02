@@ -42,14 +42,14 @@ pub fn pre_clean_html(html: &str) -> String {
     let re_tags = Regex::new(r"(?is)<(script|style|link|noscript|iframe|svg)\b[^>]*>.*?</(script|style|link|noscript|iframe|svg)>").unwrap();
     let html = re_tags.replace_all(&html, "");
 
-    // 3. 단일 태그 및 불필요한 메타 태그 정리 (input은 제외하고 보존)
-    let re_single = Regex::new(r"(?is)<(meta|link|br|hr|source)\b[^>]*>").unwrap();
+    // 3. 단일 태그 및 불필요한 메타 태그 정리 (input, br은 렌더링을 위해 보존)
+    let re_single = Regex::new(r"(?is)<(meta|link|hr|source)\b[^>]*>").unwrap();
     let clean = re_single.replace_all(&html, "");
 
-    // 4. 허용된 속성 외 모두 제거 (지정된 16개 속성만 보존)
+    // 4. 허용된 속성 외 모두 제거 (지정된 속성 보존, style 속성 추가)
     let re_tag = Regex::new(r"(?i)<([a-zA-Z0-9\-]+)([^>]*)>").unwrap();
     
-    let re_attr = Regex::new(r#"(?i)\b(id|class|src|href|type|name|value|placeholder|checked|selected|disabled|readonly|rows|cols|rowspan|colspan|scope)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?"#).unwrap();
+    let re_attr = Regex::new(r#"(?i)\b(id|class|src|href|type|name|value|placeholder|checked|selected|disabled|readonly|rows|cols|rowspan|colspan|scope|style)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?"#).unwrap();
     
     let clean = re_tag.replace_all(&clean, |caps: &regex::Captures| {
         let tag_name = &caps[1];
@@ -130,6 +130,7 @@ pub fn convert_doc_to_clean_pug(document: &Html, mode: PugMode, base_url: Option
             generate_pug_lines(child, 0, &mut pug_output, &mode, &mut ctx);
         }
     }
+    flush_inline_buffer(&mut pug_output, &mode, &mut ctx);
     sanitize_llm_input(&pug_output)
 }
     
@@ -159,6 +160,7 @@ pub fn convert_doc_to_clean_pug_selector(document: &Html, selector_str: &str, mo
             }
         }
     }
+    flush_inline_buffer(&mut pug_output, &mode, &mut ctx);
     pug_output
 }
 
@@ -403,6 +405,34 @@ pub struct TableContext {
     pub current_col_idx: usize,
     pub is_in_tbody: bool,
     pub base_url: Option<String>, 
+    pub inline_buffer: String, // 🌟 누적된 인라인 텍스트 버퍼
+    pub inline_indent: usize,  // 🌟 첫 텍스트가 시작된 들여쓰기 뎁스
+}
+
+// 🌟 블록 요소를 만나거나 태그가 닫힐 때, 그동안 누적된 인라인 텍스트를 하나의 라인(|)으로 묶어 방출합니다.
+pub fn flush_inline_buffer(output: &mut String, mode: &PugMode, ctx: &mut Option<TableContext>) {
+    if let Some(c) = ctx.as_mut() {
+        let text_content = c.inline_buffer.trim();
+        if !text_content.is_empty() {
+            let indent = "    ".repeat(c.inline_indent);
+            let mut clean_text = text_content.replace("\"", "'");
+            
+            if let Ok(re) = regex::Regex::new(r"(\d{1,3}(?:,\d{3})+)(\.\d+)?") {
+                clean_text = re.replace_all(&clean_text, |caps: &regex::Captures| {
+                    let int_part = caps.get(1).map_or("", |m| m.as_str()).replace(",", "");
+                    let dec_part = caps.get(2).map_or("", |m| m.as_str());
+                    format!("{}{}", int_part, dec_part)
+                }).to_string();
+            }
+            
+            if *mode == PugMode::YamlMode {
+                output.push_str(&format!("{}- {}\n", indent, clean_text));
+            } else {
+                output.push_str(&format!("{}| {}\n", indent, clean_text));
+            }
+        }
+        c.inline_buffer.clear();
+    }
 }
 
 pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, output: &mut String, mode: &PugMode, ctx: &mut Option<TableContext>) {
@@ -413,13 +443,36 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
         Node::Element(element) => {
             let tag_name = element.name().to_lowercase();
 
+            // 🌟 브라우저에서 계산되어 넘어온 style 값을 통해 inline 요소 여부를 완벽히 판별합니다.
+            let is_inline = {
+                let style = element.attr("style").unwrap_or("").to_lowercase();
+                if style.contains("display: inline") || style.contains("display: inline-block") {
+                    true
+                } else if style.contains("display: block") || style.contains("display: flex") || style.contains("display: grid") || style.contains("display: table") {
+                    false
+                } else {
+                    // 명시적 스타일이 없는 경우 태그 기본값으로 유추
+                    let inline_tags = ["span", "a", "strong", "b", "em", "i", "font", "label"];
+                    inline_tags.contains(&tag_name.as_str())
+                }
+            };
+
             if let Some(style) = element.attr("style") {
                 let style_lower = style.to_lowercase();
+                if style_lower.contains("display: none") {
+                    return;
+                }
                 if style_lower.contains("position") && 
                    (style_lower.contains("absolute") || style_lower.contains("fixed")) 
                 {
                     return;
                 }
+            }
+
+            // br 태그는 강제 개행을 의미하므로 누적된 인라인 버퍼를 비우고 종료합니다.
+            if tag_name == "br" {
+                flush_inline_buffer(output, mode, ctx);
+                return;
             }
 
             // 🌟 [CRITICAL FIX 1] img 태그의 지연 로딩(Lazy-load) 실제 주소 추출 및 Base64 필터링
@@ -512,13 +565,24 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                 return;
             }
 
-            // 현재 태그가 무의미한 껍데기이고 유효한 자식이 딱 1개라면, 자신을 숨기고 뎁스 유지
-            if is_useless && !has_meaningful_attrs && valid_children.len() == 1 {
+            // 🌟 [핵심 판단]
+            // 인라인이면서 의미 없는 속성을 가진 껍데기이거나,
+            // 블록이라 하더라도 의미 없는 속성을 가지고 자식이 딱 1개라면 껍데기를 벗깁니다.
+            let hide_tag = if is_inline {
+                !has_meaningful_attrs
+            } else {
+                is_useless && !has_meaningful_attrs && valid_children.len() == 1
+            };
+
+            if hide_tag {
                 for child in node.children() {
                     generate_pug_lines(child, indent_level, output, mode, ctx);
                 }
                 return;
             }
+
+            // 🌟 이 태그는 껍데기가 유지되어 출력될 예정이므로, 그전에 쌓여 있던 인라인 텍스트를 방출하여 개행합니다.
+            flush_inline_buffer(output, mode, ctx);
 
             // --- 허용된 속성만 Pug 문법으로 변환 ---
             let mut other_attributes = Vec::new();
@@ -565,7 +629,8 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                 let name_lower = name.to_lowercase();
                 let name_str = name_lower.as_str();
 
-                if name_str == "id" || name_str == "class" || name_str == "alt" { continue; }
+                // 🌟 PUG 토큰 절약을 위해 style은 최종 결과물에서 숨깁니다. (이미 위에서 display 값을 빼먹었으므로 소임을 다함)
+                if name_str == "id" || name_str == "class" || name_str == "alt" || name_str == "style" { continue; }
 
                 // 🌟 [추가] 추출된 지연 로딩 원본 주소 속성은 중복 출력을 방지하기 위해 스킵
                 if tag_name == "img" && ["data-src", "data-original", "data-lazy-src", "lazy-src"].contains(&name_str) {
@@ -674,6 +739,9 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                     generate_pug_lines(child, indent_level + 1, output, mode, ctx);
                 }
             }
+            
+            // 🌟 태그 종료 시점에도 내부에 쌓인 텍스트가 있다면 방출하여 외부 블록과 섞이지 않게 합니다.
+            flush_inline_buffer(output, mode, ctx);
 
             // End of Tag Updates
             if tag_name == "tr" { if let Some(c) = ctx.as_mut() { if c.is_in_tbody { c.current_row_idx += 1; } } }
@@ -682,25 +750,18 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
         }
         Node::Text(text) => {
             if *mode == PugMode::FullContent || *mode == PugMode::DetailMode || *mode == PugMode::TheadMode || *mode == PugMode::ListMode || *mode == PugMode::NoAttributesMode || *mode == PugMode::YamlMode {
-                let text_content = text.trim();
-                if !text_content.is_empty() {
-                    
-                    let mut clean_text = text_content.replace("\"", "'");
-                    
-                    // 정규식: 1~3자리 숫자 뒤에 (콤마 + 3자리 숫자)가 1번 이상 반복되고, 선택적으로 소수점이 붙는 패턴
-                    if let Ok(re) = regex::Regex::new(r"(\d{1,3}(?:,\d{3})+)(\.\d+)?") {
-                        clean_text = re.replace_all(&clean_text, |caps: &regex::Captures| {
-                            let int_part = caps.get(1).map_or("", |m| m.as_str()).replace(",", "");
-                            let dec_part = caps.get(2).map_or("", |m| m.as_str());
-                            format!("{}{}", int_part, dec_part)
-                        }).to_string();
-                    }
-                    
-                    if *mode == PugMode::YamlMode {
-                        // 🌟 YamlMode인 경우 PUG의 '|' 대신 YAML의 리스트 표현인 '-' 를 사용합니다.
-                        output.push_str(&format!("{}- {}\n", indent, clean_text));
-                    } else {
-                        output.push_str(&format!("{}| {}\n", indent, clean_text));
+                
+                // 🌟 원본 텍스트의 띄어쓰기를 최대한 보존하면서 인라인 텍스트들을 묶습니다.
+                let t = text.replace('\n', " ").replace('\r', "");
+                let t = regex::Regex::new(r"\s+").unwrap().replace_all(&t, " ").to_string();
+                
+                if !t.is_empty() {
+                    if let Some(c) = ctx.as_mut() {
+                        // 만약 버퍼가 비어있다면, 현재 텍스트의 뎁스가 이 줄의 기본 뎁스가 됩니다.
+                        if c.inline_buffer.is_empty() {
+                            c.inline_indent = indent_level;
+                        }
+                        c.inline_buffer.push_str(&t);
                     }
                 }
             }
@@ -741,6 +802,7 @@ pub fn split_doc_to_pug_list_advanced(document: &Html, selector_str: &str, mode:
                 
                 // 현재 노드의 PUG 라인 생성
                 generate_pug_lines(node, 0, &mut pug_output, &mode, &mut ctx);
+                flush_inline_buffer(&mut pug_output, &mode, &mut ctx);
 
                 // 개별로 바로 push 하지 않고 rowspan 검사
                 if !pug_output.trim().is_empty() {
@@ -855,7 +917,7 @@ pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, t
 Read the entire document from top to bottom, applying the following strict filters and evaluations:
 
 1. IGNORE:
-   - Strictly ignore global navigation, menus, headers, footers, aside, search, filter.
+   - Strictly ignore global navigation, menus, headers, footers, aside, search, filter, form.
    - temporary placeholder (such as SKIP READ N, SKIP_READ_N, LINK_SKIP).
 2. TARGET:
    - Focus purely on the main data payload where "{TARGET_ITEM}".
@@ -866,16 +928,26 @@ Read the entire document from top to bottom, applying the following strict filte
      C. Does the main data area contain an extensive configuration/input form (inputs, textareas, image uploads, save buttons) for a single entity?
 
 [SCHEMA DEFINITIONS]
-- title: String. Default '{TITLE}'.
 - has_header: Boolean. True if the document contains a header.
 - has_footer: Boolean. True if the document contains a footer.
 - has_list: Boolean. True if the document contains a multi-entity grid, OR if the bottom of main content area has dataset navigation/bulk controls.
 - has_form: Boolean. True if the main data payload is heavily composed of data entry fields (text, select, radio, file uploads) dedicated to creating or updating a single entity.
 - detail: Boolean. True ONLY if has_list is false AND has_form is true.
+- title: String. Default '{TITLE}'.
+- language: String. Detect the language of PUG CONTENT and return ISO 639-1 code.
 - {TARGET_NAME}: String. Extract the {TARGET_ITEM} value.
 
 [OUTPUT FORMAT]
-{...}
+{
+    "has_header": Boolean,
+    "title" : String,
+    "has_footer": Boolean,
+    "language": String,
+    "{TARGET_NAME}": String,
+    "has_list": Boolean,
+    "has_form": Boolean,
+    "detail": Boolean
+}
 
 [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think"###;
 

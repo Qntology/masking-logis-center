@@ -729,10 +729,14 @@ async fn process_task(
                     // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
                     for (p_idx, (target_name, target_item)) in target_items.into_iter().enumerate() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
+                        
+                        let mut ignore_list: Vec<String> = Vec::new(); // 🌟 추가: 본문에 존재하지 않는 잘못된 추출값 기록
+                        let mut miss_counter = 0; // 🌟 추가: 무한 루프 방지 카운터
+                        
                         loop {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
 
-                            // 🌟 현재까지 치환(마스킹)이 완료된 최신 텍스트와 추출할 키워드를 공통 프롬프트 빌더에 직접 주입합니다.
+                            // 🌟 현재까지 치환(마스킹)이 완료된 최신 텍스트와 추출할 키워드, 그리고 무시 리스트를 공통 프롬프트 빌더에 주입합니다.
                             let doc_title = json_data.get("title").and_then(|v| v.as_str()).unwrap_or("Document");
                             let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &masked_text, target_name, target_item);
 
@@ -785,6 +789,7 @@ async fn process_task(
                                 }
                             } else {
                                 let gen_arc = model.qwen3_generator.clone();
+                                let ignore_list_clone = ignore_list.clone(); // 🌟 쓰레드로 넘기기 위해 복제
                                 tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
                                     let mut gen_guard = gen_arc.blocking_lock();
                                     if let Some(gen) = gen_guard.as_mut() {
@@ -805,8 +810,8 @@ async fn process_task(
                                             top_p: Some(0.95),
                                             ..Default::default()
                                         };
-                                        // 🌟 파라미터 개수 오류(E0061) 해결: params와 cancel_clone만 전달
-                                        let res = gen.generate(params, Some(cancel_clone)).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e));
+                                        // 🌟 Qwen3 생성기의 Bias 조작을 위해 ignore_list를 파라미터로 함께 주입합니다.
+                                        let res = gen.generate(params, Some(cancel_clone), Some(&ignore_list_clone)).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e));
                                         
                                         // 🌟 [CRITICAL FIX] 4GB VRAM 메모리 누수 방지
                                         gen.clear_kv_cache();
@@ -866,9 +871,24 @@ async fn process_task(
                                 }
                             }
 
-                            if extracted_val.is_empty() || extracted_val == "..." || !masked_text.contains(&extracted_val) {
-                                break; // 빈 값이거나 본문에 존재하지 않으면 루프 탈출 -> 다음 프롬프트(항목)로 이동
+                            // 🌟 아예 빈 값이거나 "..." 형태인 경우 더 이상 추출할 항목이 없다고 판단하고 완전히 루프를 탈출합니다.
+                            if extracted_val.is_empty() || extracted_val == "..." {
+                                continue;
                             }
+
+                            // 🌟 값이 추출되긴 했으나 원본 텍스트에 존재하지 않는(환각/변형된) 값인 경우, 
+                            // 무시 리스트(ignore_list)에 넣고 다시 프롬프트를 생성해 재시도(continue)합니다.
+                            if !masked_text.contains(&extracted_val) {
+                                miss_counter += 1;
+                                // if miss_counter > 3 {
+                                //     break; // 재시도를 3번 이상 실패하면 무한 루프를 방지하기 위해 강제 탈출
+                                // }
+                                ignore_list.push(extracted_val.clone());
+                                continue;
+                            }
+
+                            // 정상 추출되었으므로 연속 실패 카운터를 리셋합니다.
+                            miss_counter = 0;
 
                             // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 SKIP READ 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
