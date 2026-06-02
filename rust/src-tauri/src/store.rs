@@ -176,8 +176,8 @@ impl VectorStore {
 
     pub async fn has_active_task(&self, cc: &str, r#ref: &str) -> Result<bool> {
         let table = self.conn.open_table("tasks").execute().await?;
-        // [FIX] Use backticks for 'ref' to avoid reserved keyword conflicts in LanceDB/DataFusion
-        let filter = format!("cc = '{}' AND `ref` = '{}' AND (status = 10 OR status = 1)", cc, r#ref);
+        // 🌟 [CRITICAL FIX] DataFusion 엔진의 표준 SQL 이스케이프 규격에 맞춰 백틱 대신 쌍따옴표(")를 사용합니다.
+        let filter = format!("cc = '{}' AND \"ref\" = '{}' AND (status = 10 OR status = 1)", cc, r#ref);
         let results = table.query()
             .only_if(filter)
             .limit(1).execute().await?.try_collect::<Vec<_>>().await?;

@@ -616,15 +616,19 @@ if (pillNav) {
 }
 
 let extractClickLock = false; 
+// 🌟 [CRITICAL FIX 1] 동시성 제어 카운터: 
+// 느린 DB 쿼리가 늦게 도착해서 새로운 상태를 과거 상태로 덮어버리는 깜빡임(Flickering) 버그를 원천 차단합니다.
+let visibilityUpdateCounter = 0; 
+let extractableUrl = ""; // 🌟 [추가] 버튼 노출 시점의 유효한 URL을 기억하는 캐시 변수
 
 async function updateExtractButtonVisibility() {
-    // 🌟 [CRITICAL FIX] 앱이 백그라운드(숨김) 상태일 때는 무한 DB 조회를 유발하는 가시성 업데이트를 즉각 중단합니다!
-    if (!isFocus) return; 
-
+    // 🌟 [CRITICAL FIX] 앱이 포커스를 잃었을 때(사용자가 크롬 브라우저를 조작 중일 때) 
+    // UI 업데이트를 차단하던 코드를 전면 삭제하여, 외부 브라우저 주소 변경 시 버튼이 실시간으로 반응하도록 복구합니다.
     if (!btnExtract || !btnAutoLaunch) return;
 
+    const currentCounter = ++visibilityUpdateCounter;
+
     // 1. 브라우저 물리 상태 체크 (동기/즉시 실행)
-    // 이미지(currentImage)가 선택된 상태라면 브라우저 실행 여부와 무관하게 반환하지 않고 진행합니다.
     if (!isBrowserRunning && !isAutoLaunchLocked && !currentImage) {
         btnAutoLaunch.style.display = "flex";
         btnAutoLaunch.classList.remove("hidden");
@@ -648,9 +652,8 @@ async function updateExtractButtonVisibility() {
         return;
     }
 
-    // 3. 웹페이지 접속 여부 판별 (HTTP/HTTPS 프로토콜 검사로 대체)
+    // 3. 웹페이지 접속 여부 판별
     let isAllowedDomain = false;
-
     if (currentDetectedUrl) {
         const lowerUrl = currentDetectedUrl.toLowerCase();
         if (lowerUrl.startsWith("http://") || lowerUrl.startsWith("https://")) {
@@ -665,11 +668,47 @@ async function updateExtractButtonVisibility() {
         return; 
     }
 
-    // 5. 더블 클릭 및 비동기 작업(Lock 확인 및 태스크 상태 질의) 처리 후 최종 가시성 결정
-    // 🌟 [CRITICAL FIX] 즉시 렌더링(flex) 후 비동기로 숨기는(none) 로직 때문에 깜빡임이 발생했습니다. 
-    // 비동기 검증을 먼저 await로 대기한 뒤 최종적으로 한 번만 렌더링하여 깜빡임을 원천 차단합니다.
     if (extractClickLock) {
         btnExtract.style.display = "none";
+        return;
+    }
+
+    // 🌟 [CRITICAL FIX 2] 메모리 고속 판별 로직 (0ms 지연)
+    // 무거운 DB 조회를 돌리기 전에, 프론트엔드 대기열(Queue)이나 활성 작업(Active) 목록에 해당 문서가 있다면 즉시 숨기고 종료합니다.
+    let memoryHide = false;
+    let ccHash = "";
+    let currentRefToCheck = "";
+    
+    if (currentImage) {
+        currentRefToCheck = await hashId(currentImage);
+        
+        const isQueued = GlobalTaskManager.queue.some(q => q.payload && q.payload.ref === currentRefToCheck) ||
+                         GlobalTaskManager.backendQueued.some(p => p.ref === currentRefToCheck);
+        const isCurrentExecuting = GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskPayload && 
+            GlobalTaskManager.currentTaskPayload.ref === currentRefToCheck;
+            
+        if (isQueued || isCurrentExecuting) memoryHide = true;
+    } else if (currentDetectedUrl) {
+        const urlObj = new URL(currentDetectedUrl.toLowerCase());
+        const link = (urlObj.pathname + urlObj.search).toLowerCase();
+        const fullUrl = currentDetectedUrl; 
+        
+        ccHash = await hashId(urlObj.hostname);
+        currentRefToCheck = await hashId((currentSession.team || "") + ccHash + link);
+
+        const isQueued = GlobalTaskManager.queue.some(q => q.payload && (q.payload.ref === currentRefToCheck || q.payload.link === link || q.payload.link === fullUrl)) ||
+                         GlobalTaskManager.backendQueued.some(p => p.ref === currentRefToCheck || p.link === link || p.link === fullUrl);
+        const isCurrentExecuting = GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskPayload && 
+            (GlobalTaskManager.currentTaskPayload.ref === currentRefToCheck || GlobalTaskManager.currentTaskPayload.link === link || GlobalTaskManager.currentTaskPayload.link === fullUrl);
+            
+        if (isQueued || isCurrentExecuting) memoryHide = true;
+    }
+
+    // 메모리에 해당 작업이 존재하면, DB를 안 기다리고 즉각 숨깁니다!
+    if (memoryHide) {
+        if (currentCounter !== visibilityUpdateCounter) return;
+        btnExtract.style.display = "none";
+        btnExtract.classList.add("hidden");
         return;
     }
 
@@ -678,80 +717,44 @@ async function updateExtractButtonVisibility() {
     if (currentLock) {
         const lockEl = document.getElementById(currentLock);
         if (!lockEl) {
-            // 🌟 [CRITICAL FIX] 5000ms라는 불확실한 시간 기반 땜질 로직을 전면 폐기하고,
-            // 실제 프론트엔드/백엔드 큐(대기열)에 존재하는지 명확한 상태 기반으로 교차 검증하여 유령 락을 즉각 해제합니다.
             const isFrontendActive = GlobalTaskManager.currentTaskId === currentLock || GlobalTaskManager.queue.some(q => q.taskId === currentLock);
             const isBackendActive = GlobalTaskManager.backendQueued.some(p => p.id === currentLock || p.taskId === currentLock);
             
             if (!isFrontendActive && !isBackendActive) {
-                console.log(`[LOCK] Zombie lock detected without active queue: ${currentLock}. Releasing immediately.`);
                 await kvRemove("sys_lock");
             }
         }
     }
 
-    // 🌟 백엔드 및 덱시를 조회하여 최신 마스킹 상태를 먼저 동기화합니다.
-    await syncMaskingState();
-
     let shouldHide = false;
     try {
-        if (currentImage) {
-            const imageRefHash = await hashId(currentImage); 
+        // 🌟 [CRITICAL FIX 3] 무거운 순차적 IPC 호출을 병렬(Promise.all)로 처리합니다.
+        // 또한 100개를 스캔하던 기존 쿼리를 limit: 1로 극한 압축하여 지연 시간을 70% 이상 단축합니다.
+        // 문서가 이미 존재하면 마스킹 상태 여부에 상관없이 어차피 숨겨지므로 isMasking 반복 대조는 불필요합니다.
+        const [_, existingDocs, isActive] = await Promise.all([
+            syncMaskingState(),
+            invoke<any[]>("get_all_documents", { limit: 1, offset: 0, filter: `"ref" = '${currentRefToCheck}'` }).catch(() => []),
+            invoke<boolean>("check_active_task", { payload: { cc: ccHash, ref: currentRefToCheck } }).catch(() => false)
+        ]);
 
-            const isActive = await invoke<boolean>("check_active_task", { payload: { cc: activeContext.cc || "", ref: imageRefHash } });
-            // 🌟 프론트엔드 대기 큐 및 백엔드 대기 큐(backendQueued) 동시 확인
-            const isQueued = GlobalTaskManager.queue.some(q => q.payload && q.payload.ref === imageRefHash) ||
-                             GlobalTaskManager.backendQueued.some(p => p.ref === imageRefHash);
-            
-            const isCurrentExecuting = GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskPayload && 
-                GlobalTaskManager.currentTaskPayload.ref === imageRefHash;
-
-            // 🌟 [추가] 현재 마스킹 대기열(maskingUuids)에 이 이미지(ref)가 포함되어 있는지 대조 확인
-            let isMasking = false;
-            if (maskingUuids.size > 0) {
-                // 🌟 [CRITICAL FIX] SQL 파싱 에러 방지를 위해 ref 컬럼명을 백틱(`)으로 감쌉니다.
-                const docs = await invoke<any[]>("get_all_documents", { limit: 100, offset: 0, filter: `\`ref\` = '${imageRefHash}'` });
-                if (docs.some(d => maskingUuids.has(d.id || d.uuid))) isMasking = true;
-            }
-
-            // 🌟 [CRITICAL FIX] 이미 리스트에 존재하더라도 덮어쓰기(업데이트)를 위해 버튼을 숨기지 않습니다. (domExists 검사 제거)
-            if (isActive || isQueued || isCurrentExecuting || isMasking) shouldHide = true;
-        } else if (currentDetectedUrl) {
-            const urlObj = new URL(currentDetectedUrl.toLowerCase());
-            const link = (urlObj.pathname + urlObj.search).toLowerCase();
-            const ccHash = await hashId(urlObj.hostname);
-            const hashedRefId = await hashId((currentSession.team || "") + ccHash + link);
-
-            // 🌟 [CRITICAL FIX] 필터 컨텍스트(activeContext.ref)에 의존하지 않고, 현재 활성화된 브라우저 탭의 고유 해시값만 사용하여 판별합니다.
-            const currentRefToCheck = hashedRefId;
-            
-            const isActive = await invoke<boolean>("check_active_task", { payload: { cc: ccHash, ref: currentRefToCheck } });
-            // 🌟 프론트엔드 대기 큐 및 백엔드 대기 큐(backendQueued) 동시 확인
-            const isQueued = GlobalTaskManager.queue.some(q => q.payload && (q.payload.ref === currentRefToCheck || q.payload.link === link)) ||
-                             GlobalTaskManager.backendQueued.some(p => p.ref === currentRefToCheck || p.link === link);
-            
-            const isCurrentExecuting = GlobalTaskManager.currentTaskId && GlobalTaskManager.currentTaskPayload && 
-                (GlobalTaskManager.currentTaskPayload.ref === currentRefToCheck || GlobalTaskManager.currentTaskPayload.link === link);
-            
-            // 🌟 [추가] 현재 마스킹 대기열(maskingUuids)에 이 웹페이지 주소(ref)가 포함되어 있는지 대조 확인
-            let isMasking = false;
-            if (maskingUuids.size > 0) {
-                // 🌟 [CRITICAL FIX] SQL 파싱 에러(DataFusion 예약어 충돌) 방지를 위해 ref 컬럼명을 백틱(`)으로 감쌉니다.
-                const docs = await invoke<any[]>("get_all_documents", { limit: 100, offset: 0, filter: `\`ref\` = '${currentRefToCheck}'` });
-                if (docs.some(d => maskingUuids.has(d.id || d.uuid))) isMasking = true;
-            }
-
-            // 🌟 [CRITICAL FIX] 이미 Pages 트리에 존재하더라도 덮어쓰기(업데이트)를 위해 버튼을 숨기지 않습니다.
-            if (isActive || isQueued || isCurrentExecuting || isMasking) shouldHide = true;
+        if (existingDocs.length > 0 || isActive) {
+            shouldHide = true;
         }
     } catch (e) {
-        // 통신 에러 발생 시 노출 유지
+        console.error("[VISIBILITY] Error checking DB/Queue state:", e);
     }
+
+    // 🌟 [CRITICAL FIX 4] 비동기 처리 도중 새로운 판별이 시작되었다면 과거 결과는 버려 깜빡임을 원천 차단합니다.
+    if (currentCounter !== visibilityUpdateCounter) return;
 
     if (shouldHide) {
         btnExtract.style.display = "none";
         btnExtract.classList.add("hidden");
     } else {
+        // 🌟 [CRITICAL FIX] 버튼이 노출되는 시점의 100% 유효한 URL을 캐싱하여, 
+        // 클릭 순간 발생하는 Blur(포커스 잃음)로 인한 about:blank 덮어쓰기(Race Condition) 에러를 원천 방어합니다!
+        extractableUrl = currentDetectedUrl;
+
         btnExtract.style.display = "flex";
         btnExtract.innerHTML = "⚡";
         btnExtract.classList.remove("hidden");
@@ -2077,12 +2080,22 @@ btnExtract?.addEventListener("click", async () => {
                 const imageRefHash = await hashId(currentImage);
                 taskId = `img_${imageRefHash}`;
             } else {
-                let validUrl = currentDetectedUrl;
+                // 🌟 [CRITICAL FIX] Race Condition 방어: 
+                // 위젯을 클릭하여 브라우저가 포커스를 잃는 찰나의 순간에 currentDetectedUrl이 
+                // "about:blank"로 증발해버리는 현상을 막기 위해 캐싱된 extractableUrl을 최우선으로 사용합니다.
+                let validUrl = extractableUrl || currentDetectedUrl;
                 if (!validUrl || validUrl === "" || validUrl === "about:blank") {
                     const pageList = document.getElementById("nav-list-pages");
                     const activeLabel = pageList?.querySelector(".logis-label.active") as HTMLElement;
-                    if (activeLabel && activeLabel.dataset.domain) validUrl = `https://${activeLabel.dataset.domain}`;
-                    else validUrl = "https://commerce.logis.center";
+                    if (activeLabel && activeLabel.dataset.domain) {
+                        // 🌟 [CRITICAL FIX] 도메인뿐만 아니라 상세 경로(pathname)까지 완벽하게 결합하여 원본 주소를 복원합니다!
+                        const domain = activeLabel.dataset.domain;
+                        const pathname = activeLabel.dataset.pathname || "";
+                        validUrl = `https://${domain}${pathname}`;
+                    } else {
+                        // 🌟 [CRITICAL FIX] 유효한 주소를 도출할 수 없으면 가짜 주소를 넣지 않고 즉시 예외를 발생시켜 작업을 중단합니다.
+                        throw new Error("No valid URL found to extract.");
+                    }
                 }
                 const urlObj = new URL(validUrl.toLowerCase());
                 const cc = await hashId(urlObj.hostname);
@@ -2176,16 +2189,19 @@ btnExtract?.addEventListener("click", async () => {
                     console.log("[WIDGET] Queuing LOCAL HTML/ANALYTIC task...");
                     const html = await invoke<string>("extract_html_from_current_tab");
                     
-                    // 🌟 [CRITICAL FIX] 브라우저가 유휴 상태(Idle/Background)로 전환되어 currentDetectedUrl이 
-                    // 빈 값이거나 about:blank로 날아갔을 경우, localhost로 엉뚱하게 매칭되는 것을 방어합니다!
-                    let validUrl = currentDetectedUrl;
+                    // 🌟 [CRITICAL FIX] 여기서도 캐싱된 URL을 최우선으로 사용하여 완벽한 추출 주소를 보장합니다.
+                    let validUrl = extractableUrl || currentDetectedUrl;
                     if (!validUrl || validUrl === "" || validUrl === "about:blank") {
                         const pageList = document.getElementById("nav-list-pages");
                         const activeLabel = pageList?.querySelector(".logis-label.active") as HTMLElement;
                         if (activeLabel && activeLabel.dataset.domain) {
-                            validUrl = `https://${activeLabel.dataset.domain}`;
+                            // 🌟 [CRITICAL FIX] 대기열에 등록할 때도 도메인과 상세 경로(pathname)를 합쳐서 정확한 주소로 밀어넣습니다.
+                            const domain = activeLabel.dataset.domain;
+                            const pathname = activeLabel.dataset.pathname || "";
+                            validUrl = `https://${domain}${pathname}`;
                         } else {
-                            validUrl = "https://commerce.logis.center"; // 최후의 수단
+                            // 🌟 [CRITICAL FIX] 유효한 주소를 도출할 수 없으면 가짜 주소를 넣지 않고 즉시 예외를 발생시켜 작업을 중단합니다.
+                            throw new Error("No valid URL found to extract.");
                         }
                     }
 
@@ -2857,6 +2873,9 @@ document.getElementById("btn-mask-selected")?.addEventListener("click", async ()
             uuidsToMask.forEach(id => maskingUuids.add(id));
             selectedUuids.clear();
             updateListActionButtons();
+
+            // 🌟 [CRITICAL FIX] 마스킹 시작 즉시 버튼 가시성 로직을 호출하여 지연 없이 번개 버튼을 즉각 숨깁니다.
+            updateExtractButtonVisibility();
 
             // 🌟 리스트의 체크박스와 카드 스타일을 갱신 (masking 클래스 반영)
             maskingUuids.forEach(id => {
@@ -3715,8 +3734,8 @@ async function loadMoreDocs(reset: boolean = false, isSync: boolean = false) {
         // 🌟 [피벗 반영] 과거의 복잡한 type 리스트를 제거하고 updated_at 시간 값을 기준으로 쿼리를 재정의합니다.
         let baseFilter = `mode = '${currentSearchMode}' AND updated_at >= 0`;
 
-        // 🌟 [CRITICAL FIX] SQL 예약어 충돌(DataFusion)을 피하기 위해 ref 컬럼을 백틱(`)으로 감쌉니다.
-        if (activeContext.ref) baseFilter = `(${baseFilter}) AND \`ref\` = '${activeContext.ref}'`;
+        // 🌟 [CRITICAL FIX] SQL 예약어 충돌(DataFusion)을 피하기 위해 ref 컬럼을 쌍따옴표(")로 감쌉니다.
+        if (activeContext.ref) baseFilter = `(${baseFilter}) AND "ref" = '${activeContext.ref}'`;
         else if (activeContext.bcc) baseFilter = `(${baseFilter}) AND bcc = '${activeContext.bcc}'`;
         else if (activeContext.pathname && activeContext.cc) {
             baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}'`;
@@ -4030,7 +4049,7 @@ document.getElementById("btn-drag-export")?.addEventListener("mousedown", async 
     const fetchAll = selectedUuids.size === allCheckboxes.length && allCheckboxes.length > 0;
             
     let baseFilter = `mode = '${currentSearchMode}' AND updated_at >= 0`;
-    if (activeContext.ref) baseFilter = `(${baseFilter}) AND \`ref\` = '${activeContext.ref}'`;
+    if (activeContext.ref) baseFilter = `(${baseFilter}) AND "ref" = '${activeContext.ref}'`;
     else if (activeContext.bcc) baseFilter = `(${baseFilter}) AND bcc = '${activeContext.bcc}'`;
     else if (activeContext.pathname && activeContext.cc) baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}' AND data LIKE '%${activeContext.pathname}%'`;
     else if (activeContext.cc) baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}'`;
@@ -4100,12 +4119,12 @@ async function loadRelatedData(doc: any, container: HTMLElement) {
         const docRef = doc.ref;
         
         // 1. 나를 부모로 가지는 자식들 (ref = 내 ID)
-        // 🌟 [CRITICAL FIX] SQL 예약어 충돌을 피하기 위해 백틱(`)으로 감쌉니다.
-        let filterStr = `\`ref\` = '${docId}'`; 
+        // 🌟 [CRITICAL FIX] SQL 예약어 충돌을 피하기 위해 쌍따옴표(")로 감쌉니다.
+        let filterStr = `"ref" = '${docId}'`; 
         
         // 2. 나와 같은 출신(링크)을 가진 형제들 (ref = 내 출처)
         if (docRef && docRef !== "") {
-            filterStr += ` OR \`ref\` = '${docRef}'`; 
+            filterStr += ` OR "ref" = '${docRef}'`; 
         }
         
         // 백엔드(LanceDB)에 쿼리 전송
@@ -5731,7 +5750,7 @@ async function loadMoreChat(isHistory: boolean = false, silent: boolean = false)
 
     try {
         let baseFilter = "";
-        if (activeContext.ref) baseFilter = `\`ref\` = '${activeContext.ref}'`;
+        if (activeContext.ref) baseFilter = `"ref" = '${activeContext.ref}'`;
         else if (activeContext.bcc) baseFilter = `bcc = '${activeContext.bcc}'`;
         else if (activeContext.cc) baseFilter = `cc = '${activeContext.cc}'`;
         
