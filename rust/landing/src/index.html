@@ -143,30 +143,26 @@
                     <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                     <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
                 </span>
-                <span class="text-xs text-green-400 font-medium font-mono uppercase" data-i18n="system_status">상태: 연결 준비 완료</span>
+                <span class="text-xs text-green-400 font-medium font-mono uppercase" data-i18n="system_status">Status: Ready</span>
             </div>
         </div>
 
         <div class="flex items-center gap-3">
-            <!-- Language Toggle -->
             <div class="relative flex items-center">
                 <select onchange="changeLanguage(this.value)" class="glass-panel text-xs font-bold font-mono text-white bg-transparent outline-none cursor-pointer rounded-full pl-4 pr-8 py-2.5 border border-white/10 hover:bg-white/10 transition-all appearance-none z-10 relative">
                     <option value="en" class="bg-[#1a1a1a] text-white">EN</option>
                     <option value="ja" class="bg-[#1a1a1a] text-white">JA</option>
-                    <option value="zh" class="bg-[#1a1a1a] text-white">ZH</option>
-                    <option value="ko" class="bg-[#1a1a1a] text-white">KO</option>
                 </select>
                 <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 z-10 text-white/50">
                     <i class="fa-solid fa-chevron-down text-[10px]"></i>
                 </div>
             </div>
 
-            <!-- Smart Download Button -->
             <div class="relative" id="download-wrapper">
                 <div class="flex items-center bg-white rounded-full overflow-hidden shadow-xl shadow-blue-900/10">
                     <button id="main-dl-btn" onclick="executeDownload()" class="text-xs bg-white text-black pl-5 pr-3 py-2.5 font-bold hover:bg-gray-100 transition-colors flex items-center gap-2">
                         <i id="main-dl-icon" class="fa-brands fa-windows"></i>
-                        <span id="main-dl-text" data-i18n="nav_download">설치파일 다운로드 (.exe)</span>
+                        <span id="main-dl-text" data-i18n="nav_download">Download Installer</span>
                     </button>
                     <button onclick="toggleDlMenu(event)" class="bg-white text-black pr-4 py-2.5 border-l border-gray-100 hover:bg-gray-100 transition-colors">
                         <i class="fa-solid fa-chevron-down text-[10px]"></i>
@@ -191,9 +187,9 @@
         <div class="max-w-3xl mx-auto w-full">
             <!-- Main Title & Desc -->
             <div class="text-center space-y-6 mb-16 py-2">
-                <h1 class="text-3xl md:text-5xl font-bold tracking-tighter text-gradient mb-4">Start difficult data management<br>keep it safe with privacy filters</h1>
+                <h1 class="text-3xl md:text-5xl font-bold tracking-tighter text-gradient mb-4" data-i18n="hero_title">Start difficult data management<br>keep it safe with privacy filters</h1>
                 <p class="text-gray-400 text-lg leading-relaxed break-keep" style="text-shadow: 0 0 20px #000;" data-i18n="hero_desc">
-                    복잡한 데이터 이제 마우스로 끌어서 AI에게 놓으세요.
+                    Now, just drag and drop complex data to AI.
                 </p>
             </div>
 
@@ -206,15 +202,15 @@
                 <div class="max-w-xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-4" style="position: relative; top: -90px;">
                     <button class="glass-panel px-2 py-4 rounded-2xl flex items-center justify-center gap-3 opacity-50 cursor-not-allowed border-white/5 text-gray-500 w-full">
                         <i class="fa-brands fa-linux text-xl"></i>
-                        <span data-i18n="btn_linux">준비중</span>
+                        <span data-i18n="btn_linux">Coming Soon</span>
                     </button>
                     <button class="glass-panel px-2 py-4 rounded-2xl flex items-center justify-center gap-3 opacity-50 cursor-not-allowed border-white/5 text-gray-500 w-full">
                         <i class="fa-brands fa-apple text-xl"></i>
-                        <span data-i18n="btn_mac">준비중</span>
+                        <span data-i18n="btn_mac">Coming Soon</span>
                     </button>
                     <button onclick="executeDownload()" class="glass-panel bg-blue-600/20 hover:bg-blue-600/40 border-blue-500/30 text-white font-bold px-2 py-4 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 w-full">
                         <i class="fa-brands fa-windows text-xl"></i>
-                        <span data-i18n="btn_win">다운로드</span>
+                        <span data-i18n="btn_win">Download</span>
                     </button>
                 </div>
             </div>
@@ -262,7 +258,7 @@
                                 <i class="fa-solid fa-file-invoice text-blue-400"></i> CI
                             </h3>
                             <p class="text-xs text-gray-400 mt-1 font-mono">Commercial Invoice</p>
-                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_ci">상업 송장: 결제 및 통관의 표준</p>
+                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_ci">Commercial Invoice: Standard for payment and customs</p>
                         </div>
                         <span class="text-[10px] font-mono text-blue-400 border border-blue-500/30 bg-blue-500/10 px-2 py-1 rounded-full uppercase">Essential</span>
                     </div>
@@ -276,7 +272,6 @@
                     </div>
                 </div>
 
-                <!-- PL -->
                 <div class="glass-panel p-8 rounded-3xl hover:bg-white/[0.05] transition-colors">
                     <div class="flex justify-between items-start mb-6">
                         <div>
@@ -284,7 +279,7 @@
                                 <i class="fa-solid fa-boxes-packing text-blue-400"></i> PL
                             </h3>
                             <p class="text-xs text-gray-400 mt-1 font-mono">Packing List</p>
-                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_pl">포장 명세서: 화물 물리 정보</p>
+                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_pl">Packing List: Cargo physical information</p>
                         </div>
                         <span class="text-[10px] font-mono text-blue-400 border border-blue-500/30 bg-blue-500/10 px-2 py-1 rounded-full uppercase">Essential</span>
                     </div>
@@ -297,7 +292,6 @@
                     </div>
                 </div>
 
-                <!-- BL -->
                 <div class="glass-panel p-8 rounded-3xl hover:bg-white/[0.05] transition-colors">
                     <div class="flex justify-between items-start mb-6">
                         <div>
@@ -305,7 +299,7 @@
                                 <i class="fa-solid fa-ship text-blue-400"></i> BL
                             </h3>
                             <p class="text-xs text-gray-400 mt-1 font-mono">Bill of Lading</p>
-                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_bl">선하증권: 해상 운송 권리증권</p>
+                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_bl">Bill of Lading: Ocean transport document of title</p>
                         </div>
                         <span class="text-[10px] font-mono text-blue-400 border border-blue-500/30 bg-blue-500/10 px-2 py-1 rounded-full uppercase">Essential</span>
                     </div>
@@ -318,7 +312,6 @@
                     </div>
                 </div>
 
-                <!-- PO -->
                 <div class="glass-panel p-8 rounded-3xl hover:bg-white/[0.05] transition-colors">
                     <div class="flex justify-between items-start mb-6">
                         <div>
@@ -326,7 +319,7 @@
                                 <i class="fa-solid fa-file-contract text-blue-400"></i> PO
                             </h3>
                             <p class="text-xs text-gray-400 mt-1 font-mono">Purchase Order</p>
-                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_po">구매 주문서: 발주 및 계약 기반</p>
+                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_po">Purchase Order: Ordering and contract base</p>
                         </div>
                         <span class="text-[10px] font-mono text-blue-400 border border-blue-500/30 bg-blue-500/10 px-2 py-1 rounded-full uppercase">Essential</span>
                     </div>
@@ -353,10 +346,10 @@
 
             <!-- Tabs -->
             <div class="flex items-center mb-8 overflow-x-auto pb-4 scrollbar-hide gap-2 flex-nowrap justify-start md:justify-start">
-                <button class="tab-btn active" onclick="openTab(event, 'tab-contract')" data-i18n="tab_contract">계약 / 결제</button>
-                <button class="tab-btn" onclick="openTab(event, 'tab-logis')" data-i18n="tab_logis">선적 / 물류</button>
-                <button class="tab-btn" onclick="openTab(event, 'tab-customs')" data-i18n="tab_customs">통관 / 신고</button>
-                <button class="tab-btn" onclick="openTab(event, 'tab-cert')" data-i18n="tab_cert">인증 / 특수</button>
+                <button class="tab-btn active" onclick="openTab(event, 'tab-contract')" data-i18n="tab_contract">Contract / Payment</button>
+                <button class="tab-btn" onclick="openTab(event, 'tab-logis')" data-i18n="tab_logis">Shipping / Logistics</button>
+                <button class="tab-btn" onclick="openTab(event, 'tab-customs')" data-i18n="tab_customs">Customs / Declaration</button>
+                <button class="tab-btn" onclick="openTab(event, 'tab-cert')" data-i18n="tab_cert">Certification / Special</button>
             </div>
 
             <!-- Tab Content Container -->
@@ -367,7 +360,7 @@
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">LC (Letter of Credit)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_lc">신용장: 은행 지급 보증 서류</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_lc">Letter of Credit: Bank payment guarantee document</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">LC No</span><span class="col-badge">Expiry Date</span><span class="col-badge">Latest Shipment</span><span class="col-badge">Partial/Transship</span>
@@ -376,7 +369,7 @@
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">SC (Sales Contract)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_sc">매매계약서: 공식 거래 계약서</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_sc">Sales Contract: Official transaction contract</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">Contract No</span><span class="col-badge">Validity</span><span class="col-badge">Claim Period</span>
@@ -385,7 +378,7 @@
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">PI (Proforma Invoice)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_pi">견적송장: 사전 결제 증빙</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_pi">Proforma Invoice: Advance payment proof</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">Ref No</span><span class="col-badge">Bank Info</span><span class="col-badge">Swift Code</span>
@@ -393,12 +386,11 @@
                     </div>
                 </div>
 
-                <!-- 2. Logistics -->
                 <div id="tab-logis" class="tab-content hidden space-y-4">
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">SA (Shipping Advice)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_sa">선적통지서: 선적 후 알림</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_sa">Shipping Advice: Post-shipment notification</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">Advice No</span><span class="col-badge">Vessel</span><span class="col-badge">BL No</span>
@@ -407,7 +399,7 @@
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">AN / DO</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_an">도착통지서 및 화물인도지시서</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_an">Arrival Notice and Delivery Order</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">Arrival Date</span><span class="col-badge">Free Time</span><span class="col-badge">CY Location</span>
@@ -416,7 +408,7 @@
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">AWB (Airway Bill)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_awb">항공운송장: 항공 화물 증빙</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_awb">Airway Bill: Air cargo proof</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">AWB No</span><span class="col-badge">Flight No</span><span class="col-badge">Handling Info</span>
@@ -429,7 +421,7 @@
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">ED / ID (Export/Import Dec)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_ed">면장: 관세청 신고 공식 문서</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_ed">Export/Import Declaration: Official customs declaration document</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">Dec No</span><span class="col-badge">Customs Value</span><span class="col-badge">Tax Amount</span>
@@ -438,7 +430,7 @@
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">CO (Cert of Origin)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_co">원산지 확인 및 FTA 적용 서류</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_co">Certificate of Origin: Verification of origin and FTA application document</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">Ref No</span><span class="col-badge">Criteria</span><span class="col-badge">Authority</span>
@@ -447,7 +439,7 @@
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">CINV (Customs Invoice)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_cinv">세관송장: 통관용 가액 증빙</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_cinv">Customs Invoice: Customs valuation proof</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">Origin</span><span class="col-badge">Market Value</span><span class="col-badge">Unit Price</span>
@@ -455,12 +447,11 @@
                     </div>
                 </div>
 
-                <!-- 4. Certs -->
                 <div id="tab-cert" class="tab-content hidden space-y-4">
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">IC / CA / WC</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_ic">품질 및 성분 분석 증명서</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_ic">Quality and ingredient analysis certificate</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">Result</span><span class="col-badge">Specification</span><span class="col-badge">Method</span>
@@ -469,7 +460,7 @@
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">DGD / MSDS</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_dgd">위험물 신고 및 물질안전보건자료</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_dgd">Dangerous goods declaration and MSDS</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">UN No</span><span class="col-badge">Flash Point</span><span class="col-badge">CAS No</span>
@@ -478,7 +469,7 @@
                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">PHYTO / HC</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_phyto">식물검역 및 위생증명서</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_phyto">Phytosanitary and health certificate</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">Scientific Name</span><span class="col-badge">Treatment</span><span class="col-badge">Org</span>
@@ -487,7 +478,7 @@
                      <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <div>
                             <span class="text-white font-bold text-lg block">POA / BIZ / INS</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_poa">위임장, 사업자등록증, 보험증권</span>
+                            <span class="text-xs text-gray-400" data-i18n="desc_poa">Power of attorney, business registration, insurance policy</span>
                         </div>
                         <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
                             <span class="col-badge">Reg No</span><span class="col-badge">Policy No</span><span class="col-badge">Authority</span>
@@ -515,7 +506,7 @@
     <script>
         const i18n = {
             "en": {
-                "nav_download": "Download Installer (.exe)",
+                "nav_download": "Download Installer",
                 "system_status": "Status: Ready",
                 "spec_speed": "Easy Data Collection",
                 "spec_security": "Privacy Filter",
@@ -552,7 +543,7 @@
                 "status_wait": "Preparing"
             },
             "ja": {
-                "nav_download": "インストーラーをダウンロード (.exe)",
+                "nav_download": "インストーラーをダウンロード",
                 "system_status": "ステータス: 準備完了",
                 "spec_speed": "簡単なデータ収集",
                 "spec_security": "プライバシーの自動保護",
@@ -587,84 +578,10 @@
                 "desc_poa": "委任状、事業者登録証、保険証券",
                 "status_ready": "準備完了",
                 "status_wait": "準備中"
-            },
-            "zh": {
-                "nav_download": "下载安装程序 (.exe)",
-                "system_status": "状态: 准备就绪",
-                "spec_speed": "便捷的数据收集",
-                "spec_security": "自动隐私保护",
-                "spec_capability": "直接与AI聊天",
-                "hero_title": "用对话开启困难的数据管理，\n并用安全过滤器保护它。",
-                "hero_desc": "现在，只需将复杂数据拖放到AI即可。",
-                "btn_win": "下载",
-                "btn_mac": "敬请期待",
-                "btn_linux": "敬请期待",
-                "core_docs_title": "核心支持文档",
-                "full_catalog_title": "完整支持目录",
-                "tab_contract": "合同 / 支付",
-                "tab_logis": "装运 / 物流",
-                "tab_customs": "清关 / 申报",
-                "tab_cert": "认证 / 特殊",
-                "desc_ci": "商业发票: 支付和清关的标准",
-                "desc_pl": "装箱单: 货物物理信息",
-                "desc_bl": "提单: 海运物权凭证",
-                "desc_po": "采购订单: 订购和合同基础",
-                "desc_lc": "信用证: 银行付款保证文件",
-                "desc_sc": "销售合同: 正式交易合同",
-                "desc_pi": "形式发票: 预先付款证明",
-                "desc_sa": "装运通知: 发货后通知",
-                "desc_an": "到货通知和提货单",
-                "desc_awb": "航空运单: 航空货物证明",
-                "desc_ed": "进出口申报单: 海关申报正式文件",
-                "desc_co": "原产地证明: 原产地确认和FTA适用文件",
-                "desc_cinv": "海关发票: 清关计价证明",
-                "desc_ic": "质量和成分分析证明",
-                "desc_dgd": "危险品申报单和MSDS",
-                "desc_phyto": "植物检疫和卫生证明",
-                "desc_poa": "授权书、营业执照、保险单",
-                "status_ready": "准备就绪",
-                "status_wait": "准备中"
-            },
-            "ko": {
-                "nav_download": "설치파일 다운로드 (.exe)",
-                "system_status": "상태: 준비 완료",
-                "spec_speed": "간편한 데이터 수집",
-                "spec_security": "개인정보 자동 보호",
-                "spec_capability": "AI와 바로 대화하기",
-                "hero_title": "어려운 데이터 관리 대화로 시작하고\n보안 마스킹으로 안전하게 지키세요",
-                "hero_desc": "복잡한 데이터 이제 마우스로 끌어서 AI에게 놓으세요.",
-                "btn_win": "다운로드",
-                "btn_mac": "준비중",
-                "btn_linux": "준비중",
-                "core_docs_title": "핵심 지원 서류",
-                "full_catalog_title": "전체 지원 목록",
-                "tab_contract": "계약 / 결제",
-                "tab_logis": "선적 / 물류",
-                "tab_customs": "통관 / 신고",
-                "tab_cert": "인증 / 특수",
-                "desc_ci": "상업 송장: 결제 및 통관의 표준",
-                "desc_pl": "포장 명세서: 화물 물리 정보",
-                "desc_bl": "선하증권: 해상 운송 권리증권",
-                "desc_po": "구매 주문서: 발주 및 계약 기반",
-                "desc_lc": "신용장: 은행 지급 보증 서류",
-                "desc_sc": "매매계약서: 공식 거래 계약서",
-                "desc_pi": "견적송장: 사전 결제 증빙",
-                "desc_sa": "선적통지서: 선적 후 알림",
-                "desc_an": "도착통지서 및 화물인도지시서",
-                "desc_awb": "항공운송장: 항공 화물 증빙",
-                "desc_ed": "면장: 관세청 신고 공식 문서",
-                "desc_co": "원산지 확인 및 FTA 적용 서류",
-                "desc_cinv": "세관송장: 통관용 가액 증빙",
-                "desc_ic": "품질 및 성분 분석 증명서",
-                "desc_dgd": "위험물 신고 및 물질안전보건자료",
-                "desc_phyto": "식물검역 및 위생증명서",
-                "desc_poa": "위임장, 사업자등록증, 보험증권",
-                "status_ready": "준비 완료",
-                "status_wait": "준비 중"
             }
         };
 
-        const langOrder = ['en', 'ja', 'zh', 'ko'];
+        const langOrder = ['en', 'ja'];
         let currentLangIndex = 0; // Default: 'en'
         let currentLang = langOrder[currentLangIndex];
 
@@ -685,10 +602,8 @@
         function applyLanguage() {
             document.querySelectorAll('[data-i18n]').forEach(el => {
                 const key = el.getAttribute('data-i18n');
-                if (key === 'hero_title' && currentLang === 'en') {
-                    el.innerHTML = `<span class="block md:text-3xl opacity-70">On a laptop, without WiFi</span><span class="block">Turning trade documents into structured data.</span>`;
-                } else if (i18n[currentLang][key]) {
-                    el.innerText = i18n[currentLang][key];
+                if (i18n[currentLang][key]) {
+                    el.innerHTML = i18n[currentLang][key].replace(/\n/g, '<br>');
                 }
             });
         }
@@ -720,7 +635,11 @@
             const mainIcon = document.getElementById('main-dl-icon');
             const optionsList = document.getElementById('dl-options-list');
 
-            mainText.innerText = i18n[currentLang][`btn_${detectedOS.id}`];
+            if (detectedOS.id === 'win') {
+                mainText.innerHTML = i18n[currentLang]['nav_download'];
+            } else {
+                mainText.innerHTML = i18n[currentLang][`btn_${detectedOS.id}`];
+            }
             mainIcon.className = detectedOS.icon;
 
             optionsList.innerHTML = '';

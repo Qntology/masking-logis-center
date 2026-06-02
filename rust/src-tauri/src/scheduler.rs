@@ -723,6 +723,8 @@ async fn process_task(
 
                     let mut all_matches = Vec::new();
                     masked_text = target_text.clone(); // 반복 마스킹을 위해 루프 진입 전 초기화
+                    // 🌟 [CRITICAL FIX] 타이틀에 남아있는 원본 값 때문에 LLM이 환각을 일으키는 것을 막기 위해 doc_title도 밖으로 빼냅니다.
+                    let mut doc_title = json_data.get("title").and_then(|v| v.as_str()).unwrap_or("Document").to_string();
                     let mut skip_counter = 0; // 🌟 추가: SKIP N 카운터
                     let mut skip_map = std::collections::HashMap::new(); // 🌟 추가: SKIP N -> Mnemonic 매핑
 
@@ -737,7 +739,6 @@ async fn process_task(
                             if cancellation_token.load(Ordering::Relaxed) { break; }
 
                             // 🌟 현재까지 치환(마스킹)이 완료된 최신 텍스트와 추출할 키워드, 그리고 무시 리스트를 공통 프롬프트 빌더에 주입합니다.
-                            let doc_title = json_data.get("title").and_then(|v| v.as_str()).unwrap_or("Document");
                             let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &masked_text, target_name, target_item);
 
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
@@ -834,24 +835,16 @@ async fn process_task(
                                 }).await;
                             }
 
-                            #[cfg(target_os = "windows")]
-                            unsafe {
-                                use windows_sys::Win32::System::Threading::GetCurrentProcess;
-                                use windows_sys::Win32::System::Memory::{SetProcessWorkingSetSizeEx, QUOTA_LIMITS_HARDWS_MIN_DISABLE, QUOTA_LIMITS_HARDWS_MAX_DISABLE};
-                                let _ = SetProcessWorkingSetSizeEx(GetCurrentProcess(), usize::MAX, usize::MAX, QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE);
-                            }
-                            #[cfg(target_os = "linux")]
-                            unsafe { extern "C" { fn malloc_trim(pad: usize) -> i32; } malloc_trim(0); }
-                            #[cfg(target_os = "macos")]
-                            unsafe { extern "C" { fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize; } malloc_zone_pressure_relief(std::ptr::null_mut(), 0); }
-
                             let parsed = crate::parsing::parse_json_from_llm(&res_mask);
                             
                             // 추출된 값이 있는지, 그리고 그 값이 현재 PUG_CONTENT(masked_text)에 실제로 존재하는지 확인
-                            let mut extracted_val = parsed.get(target_name).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let mut extracted_val = parsed.get(target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                             
+                            let exists_in_body = masked_text.contains(&extracted_val);
+                            let exists_in_title = doc_title.contains(&extracted_val);
+
                             // 🌟 [추가] 연락처(contact number)일 경우, LLM이 하이픈(-)이나 공백을 마음대로 제거/추가하여 매칭이 안 되는 현상 방어
-                            if !extracted_val.is_empty() && extracted_val != "..." && !masked_text.contains(&extracted_val) {
+                            if !extracted_val.is_empty() && extracted_val != "..." && extracted_val != "null" && !exists_in_body && !exists_in_title {
                                 if target_name == "contact_number" {
                                     // 순수 숫자만 추출
                                     let digits_only: String = extracted_val.chars().filter(|c| c.is_digit(10)).collect();
@@ -872,18 +865,24 @@ async fn process_task(
                             }
 
                             // 🌟 아예 빈 값이거나 "..." 형태인 경우 더 이상 추출할 항목이 없다고 판단하고 완전히 루프를 탈출합니다.
-                            if extracted_val.is_empty() || extracted_val == "..." {
-                                continue;
+                            if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
+                                break; 
                             }
 
-                            // 🌟 값이 추출되긴 했으나 원본 텍스트에 존재하지 않는(환각/변형된) 값인 경우, 
+                            // 🌟 값이 추출되긴 했으나 본문(masked_text)이나 제목(doc_title)에 존재하지 않는(환각/변형된) 값인 경우, 
                             // 무시 리스트(ignore_list)에 넣고 다시 프롬프트를 생성해 재시도(continue)합니다.
-                            if !masked_text.contains(&extracted_val) {
+                            let re_check_body = masked_text.contains(&extracted_val);
+                            let re_check_title = doc_title.contains(&extracted_val);
+
+                            if !re_check_body && !re_check_title {
                                 miss_counter += 1;
-                                // if miss_counter > 3 {
-                                //     break; // 재시도를 3번 이상 실패하면 무한 루프를 방지하기 위해 강제 탈출
-                                // }
+                                if miss_counter > 3 {
+                                    break; 
+                                }
+                                // 🌟 [CRITICAL FIX] Tokenizer 꼼수를 부리지 못하도록 공백을 포함한 변형도 함께 억제 리스트에 넣습니다.
                                 ignore_list.push(extracted_val.clone());
+                                ignore_list.push(format!(" {}", extracted_val));
+                                ignore_list.push(extracted_val.to_lowercase());
                                 continue;
                             }
 
@@ -897,8 +896,10 @@ async fn process_task(
                             let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
                             let skip_marker = format!("**SKIP READ {}**", skip_counter);
                             
-                            // 원본 텍스트를 임시 마커로 치환하여 이어지는 LLM 추론에서 혼선을 방지
+                            // 🌟 [CRITICAL FIX] 원본 텍스트(본문+제목) 모두에서 임시 마커로 치환하여 이어지는 LLM 추론에서 혼선을 원천 방지합니다.
                             masked_text = masked_text.replace(&extracted_val, &skip_marker);
+                            doc_title = doc_title.replace(&extracted_val, &skip_marker);
+                            
                             skip_map.insert(skip_marker, final_replacement);
                             skip_counter += 1;
 

@@ -618,6 +618,9 @@ if (pillNav) {
 let extractClickLock = false; 
 
 async function updateExtractButtonVisibility() {
+    // 🌟 [CRITICAL FIX] 앱이 백그라운드(숨김) 상태일 때는 무한 DB 조회를 유발하는 가시성 업데이트를 즉각 중단합니다!
+    if (!isFocus) return; 
+
     if (!btnExtract || !btnAutoLaunch) return;
 
     // 1. 브라우저 물리 상태 체크 (동기/즉시 실행)
@@ -706,8 +709,8 @@ async function updateExtractButtonVisibility() {
             // 🌟 [추가] 현재 마스킹 대기열(maskingUuids)에 이 이미지(ref)가 포함되어 있는지 대조 확인
             let isMasking = false;
             if (maskingUuids.size > 0) {
-                // 🌟 [CRITICAL FIX] 동일한 이미지를 여러 번 추출했을 경우를 대비해 탐색 리밋을 100으로 대폭 상향
-                const docs = await invoke<any[]>("get_all_documents", { limit: 100, offset: 0, filter: `ref = '${imageRefHash}'` });
+                // 🌟 [CRITICAL FIX] SQL 파싱 에러 방지를 위해 ref 컬럼명을 백틱(`)으로 감쌉니다.
+                const docs = await invoke<any[]>("get_all_documents", { limit: 100, offset: 0, filter: `\`ref\` = '${imageRefHash}'` });
                 if (docs.some(d => maskingUuids.has(d.id || d.uuid))) isMasking = true;
             }
 
@@ -719,7 +722,8 @@ async function updateExtractButtonVisibility() {
             const ccHash = await hashId(urlObj.hostname);
             const hashedRefId = await hashId((currentSession.team || "") + ccHash + link);
 
-            const currentRefToCheck = activeContext.ref || hashedRefId;
+            // 🌟 [CRITICAL FIX] 필터 컨텍스트(activeContext.ref)에 의존하지 않고, 현재 활성화된 브라우저 탭의 고유 해시값만 사용하여 판별합니다.
+            const currentRefToCheck = hashedRefId;
             
             const isActive = await invoke<boolean>("check_active_task", { payload: { cc: ccHash, ref: currentRefToCheck } });
             // 🌟 프론트엔드 대기 큐 및 백엔드 대기 큐(backendQueued) 동시 확인
@@ -732,8 +736,8 @@ async function updateExtractButtonVisibility() {
             // 🌟 [추가] 현재 마스킹 대기열(maskingUuids)에 이 웹페이지 주소(ref)가 포함되어 있는지 대조 확인
             let isMasking = false;
             if (maskingUuids.size > 0) {
-                // 🌟 [CRITICAL FIX] 동일한 주소의 과거 문서들이 10개 이상 쌓여있을 경우를 대비해 탐색 리밋을 100으로 대폭 상향
-                const docs = await invoke<any[]>("get_all_documents", { limit: 100, offset: 0, filter: `ref = '${currentRefToCheck}'` });
+                // 🌟 [CRITICAL FIX] SQL 파싱 에러(DataFusion 예약어 충돌) 방지를 위해 ref 컬럼명을 백틱(`)으로 감쌉니다.
+                const docs = await invoke<any[]>("get_all_documents", { limit: 100, offset: 0, filter: `\`ref\` = '${currentRefToCheck}'` });
                 if (docs.some(d => maskingUuids.has(d.id || d.uuid))) isMasking = true;
             }
 
@@ -777,21 +781,30 @@ listen("browser-status", async (event: any) => {
     const payload = event.payload; 
     const statusStr = typeof payload === "object" ? payload.status : payload;
     
+    let urlChanged = false;
+    let statusChanged = false;
+
     if (typeof payload === "object" && payload.url !== undefined) {
+        if (currentDetectedUrl !== payload.url) urlChanged = true;
         currentDetectedUrl = payload.url || "";
         isCurrentShop = payload.is_client || payload.is_admin || false;
     }
 
     if (statusStr === "running") {
+        if (!isBrowserRunning) statusChanged = true;
         isBrowserRunning = true;
         // 🌟 [CRITICAL FIX] 브라우저 생존 확인 시 큐(대기열)를 무한 루프에 빠지게 하던 전역 락(Lock) 강제 설정을 삭제합니다.
     } else if (statusStr === "stopped") {
+        if (isBrowserRunning) statusChanged = true;
         isBrowserRunning = false;
         // 🌟 [CRITICAL FIX] 큐 매니저가 락을 독립적으로 관리하므로 여기서 건드리지 않습니다.
         currentDetectedUrl = "";
     }
     
-    await updateExtractButtonVisibility();
+    // 🌟 [CRITICAL FIX] 브라우저의 URL이나 실행 상태가 실제로 변경되었을 때만 무거운 DB 조회를 수행합니다.
+    if (urlChanged || statusChanged) {
+        await updateExtractButtonVisibility();
+    }
 });
 
 const handleSearchInteraction = () => {
@@ -2791,7 +2804,7 @@ listen("browser-status", async (event: any) => {
             currentDetectedUrl = "";
         }
     }
-    await updateExtractButtonVisibility();
+    // 🌟 [CRITICAL FIX] 위쪽 리스너에서 이미 가시성(DB) 업데이트를 처리하므로, 여기서 발생하는 중복/무한 조회를 삭제합니다.
 });
 
 // --- List Logic (Updated for Cards) ---
@@ -3702,8 +3715,8 @@ async function loadMoreDocs(reset: boolean = false, isSync: boolean = false) {
         // 🌟 [피벗 반영] 과거의 복잡한 type 리스트를 제거하고 updated_at 시간 값을 기준으로 쿼리를 재정의합니다.
         let baseFilter = `mode = '${currentSearchMode}' AND updated_at >= 0`;
 
-        // 🌟 [수정] pathname 속성을 이용해 LanceDB의 data(JSON 텍스트)를 LIKE 검색하여 해당 경로 폴더의 데이터를 가져옵니다.
-        if (activeContext.ref) baseFilter = `(${baseFilter}) AND ref = '${activeContext.ref}'`;
+        // 🌟 [CRITICAL FIX] SQL 예약어 충돌(DataFusion)을 피하기 위해 ref 컬럼을 백틱(`)으로 감쌉니다.
+        if (activeContext.ref) baseFilter = `(${baseFilter}) AND \`ref\` = '${activeContext.ref}'`;
         else if (activeContext.bcc) baseFilter = `(${baseFilter}) AND bcc = '${activeContext.bcc}'`;
         else if (activeContext.pathname && activeContext.cc) {
             baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}'`;
@@ -3814,7 +3827,7 @@ async function loadMoreDocs(reset: boolean = false, isSync: boolean = false) {
     finally { 
         isLoading = false; 
         
-        // 🌟 로딩 종료: Loading... 글자를 완전히 숨김 (아무것도 표시 안 됨)
+        // 🌟 로딩 종료: Loading 지우기
         if (headerLoading) {
             headerLoading.style.display = "none";
         }
@@ -4017,7 +4030,7 @@ document.getElementById("btn-drag-export")?.addEventListener("mousedown", async 
     const fetchAll = selectedUuids.size === allCheckboxes.length && allCheckboxes.length > 0;
             
     let baseFilter = `mode = '${currentSearchMode}' AND updated_at >= 0`;
-    if (activeContext.ref) baseFilter = `(${baseFilter}) AND ref = '${activeContext.ref}'`;
+    if (activeContext.ref) baseFilter = `(${baseFilter}) AND \`ref\` = '${activeContext.ref}'`;
     else if (activeContext.bcc) baseFilter = `(${baseFilter}) AND bcc = '${activeContext.bcc}'`;
     else if (activeContext.pathname && activeContext.cc) baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}' AND data LIKE '%${activeContext.pathname}%'`;
     else if (activeContext.cc) baseFilter = `(${baseFilter}) AND cc = '${activeContext.cc}'`;
@@ -4087,11 +4100,12 @@ async function loadRelatedData(doc: any, container: HTMLElement) {
         const docRef = doc.ref;
         
         // 1. 나를 부모로 가지는 자식들 (ref = 내 ID)
-        let filterStr = `ref = '${docId}'`; 
+        // 🌟 [CRITICAL FIX] SQL 예약어 충돌을 피하기 위해 백틱(`)으로 감쌉니다.
+        let filterStr = `\`ref\` = '${docId}'`; 
         
         // 2. 나와 같은 출신(링크)을 가진 형제들 (ref = 내 출처)
         if (docRef && docRef !== "") {
-            filterStr += ` OR ref = '${docRef}'`; 
+            filterStr += ` OR \`ref\` = '${docRef}'`; 
         }
         
         // 백엔드(LanceDB)에 쿼리 전송
@@ -5717,7 +5731,7 @@ async function loadMoreChat(isHistory: boolean = false, silent: boolean = false)
 
     try {
         let baseFilter = "";
-        if (activeContext.ref) baseFilter = `ref = '${activeContext.ref}'`;
+        if (activeContext.ref) baseFilter = `\`ref\` = '${activeContext.ref}'`;
         else if (activeContext.bcc) baseFilter = `bcc = '${activeContext.bcc}'`;
         else if (activeContext.cc) baseFilter = `cc = '${activeContext.cc}'`;
         

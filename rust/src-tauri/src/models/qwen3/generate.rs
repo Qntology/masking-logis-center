@@ -287,7 +287,7 @@ impl Qwen3GenerateModel {
             
             let logits = self.qwen3.forward(Some(&chunk_ids), None, seqlen_offset)?;
             
-            // 🌟 [VRAM/RAM 최적화] 청크 연산 직후 GPU를 동기화하고 시스템 메모리를 즉각 수거하여 피크를 억제합니다.
+            // 🌟 [VRAM/RAM 최적화] 청크 연산 직후 GPU를 동기화하고 시스템 메모리(RAM)를 강제로 반환시킵니다.
             if self.device.is_cuda() { let _ = self.device.synchronize(); }
 
             #[cfg(target_os = "windows")]
@@ -370,11 +370,11 @@ impl Qwen3GenerateModel {
                         let next_tok = ign_toks[overlap] as usize;
                         if next_tok < len {
                             if overlap > 0 {
-                                // 이미 토큰 시퀀스가 일부 매칭되었다면 완성을 방지하기 위해 강하게 억제 (-100.0)
-                                logits_vec[next_tok] -= 100.0;
-                            } else if gen_text.ends_with('"') {
-                                // 새로운 JSON value가 시작되는 시점(")에 첫 토큰이 등장하는 것을 억제 (-50.0)
-                                logits_vec[next_tok] -= 50.0;
+                                // 이미 토큰 시퀀스가 일부 매칭되었다면 완성을 방지하기 위해 강하게 억제 (-10000.0)
+                                logits_vec[next_tok] -= 10000.0;
+                            } else if gen_text.ends_with('"') || gen_text.ends_with(':') || gen_text.ends_with(": ") {
+                                // 🌟 [CRITICAL FIX] 따옴표가 없는 불량 JSON 출력을 대비하여 콜론(:) 감지 추가 및 패널티 대폭 상향 (-10000.0)
+                                logits_vec[next_tok] -= 10000.0;
                             }
                         }
                     }
@@ -575,11 +575,11 @@ impl Qwen3GenerateModel {
                         let next_tok = ign_toks[overlap] as usize;
                         if next_tok < len {
                             if overlap > 0 {
-                                // 이미 토큰 시퀀스가 일부 매칭되었다면 완성을 방지하기 위해 강하게 억제 (-100.0)
-                                logits_vec[next_tok] -= 100.0;
-                            } else if gen_text.ends_with('"') {
-                                // 새로운 JSON value가 시작되는 시점(")에 첫 토큰이 등장하는 것을 억제 (-50.0)
-                                logits_vec[next_tok] -= 50.0;
+                                // 이미 토큰 시퀀스가 일부 매칭되었다면 완성을 방지하기 위해 강하게 억제 (-10000.0)
+                                logits_vec[next_tok] -= 10000.0;
+                            } else if gen_text.ends_with('"') || gen_text.ends_with(':') || gen_text.ends_with(": ") {
+                                // 🌟 [CRITICAL FIX] 따옴표가 없는 불량 JSON 출력을 대비하여 콜론(:) 감지 추가 및 패널티 대폭 상향 (-10000.0)
+                                logits_vec[next_tok] -= 10000.0;
                             }
                         }
                     }
