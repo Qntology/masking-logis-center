@@ -1803,7 +1803,8 @@ pub fn normalize_to_json_string(input: &str) -> String {
     }).to_string();
 
     // 2. Key quotes correction (key: -> "key":)
-    let re_keys = Regex::new(r"([{,])\s*([a-zA-Z0-9_]+)\s*:").unwrap();
+    // 🌟 [CRITICAL FIX] 줄 시작 지점(^), 중괄호({), 쉼표(,) 뒤에 나오는 Unquoted Key를 모두 확실히 잡아내어 따옴표로 감쌉니다.
+    let re_keys = Regex::new(r"(?m)(^|[{,])\s*([a-zA-Z0-9_]+)\s*:").unwrap();
     s = re_keys.replace_all(&s, "$1\"$2\":").to_string();
 
     // 3. Single quotes to double quotes for values

@@ -375,6 +375,17 @@ export default {
 			asOrganization,
 		} = request.cf;
 
+		
+		const blockedCountries = ['KR', 'CN'];
+
+		if (country && blockedCountries.includes(country)) {
+			// 403 Forbidden 응답 반환
+			return new Response('', {
+				status: 200,
+				headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+			});
+		}
+
 		// 요청자의 IP 주소
 		var ip = request.headers.get('cf-connecting-ip');
 
