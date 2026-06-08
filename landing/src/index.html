@@ -240,7 +240,50 @@
         </div>
     </section>
 
-    <!-- Core Supported Docs Section -->
+    <section class="py-24 border-t border-white/5 bg-[#030303] relative z-20">
+        <div class="max-w-3xl mx-auto px-6">
+            
+            <div class="mb-12 flex items-center gap-4">
+                <h2 class="text-xs font-bold text-gray-500 uppercase tracking-[0.3em] font-mono" data-i18n="how_it_works_title">How It Works</h2>
+                <div class="flex-1 h-[1px] bg-gradient-to-r from-white/10 to-transparent"></div>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div class="glass-panel p-8 rounded-3xl flex flex-col justify-between gap-6 hover:bg-white/[0.04] transition-colors duration-300">
+                    <div>
+                        <div class="flex items-center gap-3 mb-4">
+                            <span class="flex items-center justify-center w-8 h-8 rounded-full bg-blue-500/10 text-blue-400 font-mono text-xs font-bold border border-blue-500/20">01</span>
+                            <h3 class="text-xl font-bold text-white tracking-tight" data-i18n="scan_title">Intelligent Scan</h3>
+                        </div>
+                        <p class="text-sm text-gray-400 leading-relaxed break-keep" data-i18n="scan_desc">
+                            Scan documents, images, or webpages to automatically extract data.
+                        </p>
+                    </div>
+                    <div class="aspect-video w-full bg-black/40 border border-white/10 rounded-2xl flex flex-col items-center justify-center gap-2 text-gray-500 hover:border-blue-500/40 transition-colors group cursor-pointer shadow-inner">
+                        <i class="fa-solid fa-expand text-xl group-hover:text-blue-400 transition-colors"></i>
+                        <span class="text-xs font-mono tracking-wider group-hover:text-gray-400 transition-colors" data-i18n="scan_video">[ Scan Demonstration Video ]</span>
+                    </div>
+                </div>
+
+                <div class="glass-panel p-8 rounded-3xl flex flex-col justify-between gap-6 hover:bg-white/[0.04] transition-colors duration-300">
+                    <div>
+                        <div class="flex items-center gap-3 mb-4">
+                            <span class="flex items-center justify-center w-8 h-8 rounded-full bg-green-500/10 text-green-400 font-mono text-xs font-bold border border-green-500/20">02</span>
+                            <h3 class="text-xl font-bold text-white tracking-tight" data-i18n="drag_title">Drag & Drop</h3>
+                        </div>
+                        <p class="text-sm text-gray-400 leading-relaxed break-keep" data-i18n="drag_desc">
+                            Simply drag and drop files onto the screen to start AI analysis instantly.
+                        </p>
+                    </div>
+                    <div class="aspect-video w-full bg-black/40 border border-white/10 rounded-2xl flex flex-col items-center justify-center gap-2 text-gray-500 hover:border-green-500/40 transition-colors group cursor-pointer shadow-inner">
+                        <i class="fa-solid fa-arrow-down-line text-xl group-hover:text-green-400 transition-colors"></i>
+                        <span class="text-xs font-mono tracking-wider group-hover:text-gray-400 transition-colors" data-i18n="drag_video">[ Drag & Drop Demonstration Video ]</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
     <section class="py-24 border-t border-white/0 bg-black relative z-20">
         <div class="max-w-3xl mx-auto px-6">
             
@@ -516,6 +559,13 @@
                 "btn_win": "Download",
                 "btn_mac": "Coming Soon",
                 "btn_linux": "Coming Soon",
+                "how_it_works_title": "How It Works",
+                "scan_title": "Intelligent Scan",
+                "scan_desc": "Scan documents, images, or webpages to automatically extract data.",
+                "scan_video": "[ Scan Demonstration Video ]",
+                "drag_title": "Drag & Drop",
+                "drag_desc": "Simply drag and drop files onto the screen to start AI analysis instantly.",
+                "drag_video": "[ Drag & Drop Demonstration Video ]",
                 "core_docs_title": "Core Supported Documents",
                 "full_catalog_title": "Full Support Catalog",
                 "tab_contract": "Contract / Payment",
@@ -546,32 +596,39 @@
                 "nav_download": "インストーラーをダウンロード",
                 "system_status": "ステータス: 準備完了",
                 "spec_speed": "簡単なデータ収集",
-                "spec_security": "プライバシーの自動保護",
+                "spec_security": "プライバシーフィルター",
                 "spec_capability": "AIと直接チャット",
-                "hero_title": "複雑なデータ管理を会話から始め、\nセキュリティフィルターで安全に守ります。",
+                "hero_title": "複雑なデータ管理を会話から始め、\nプライバシーフィルターで安全に守ります。",
                 "hero_desc": "複雑なデータをAIにドラッグ＆ドロップするだけです。",
                 "btn_win": "ダウンロード",
                 "btn_mac": "準備中",
                 "btn_linux": "準備中",
-                "core_docs_title": "コアサポートドキュメント",
-                "full_catalog_title": "サポートカタログ全体",
+                "how_it_works_title": "機能のご案内",
+                "scan_title": "インテリジェントスキャン",
+                "scan_desc": "文書、画像、またはウェブページをスキャンして、データを自動的に抽出します。",
+                "scan_video": "[ スキャンデモ映像 ]",
+                "drag_title": "ドラッグ＆ドロップ",
+                "drag_desc": "ファイルを画面にドラッグ＆ドロップするだけで、すぐにAI分析を開始します。",
+                "drag_video": "[ ドラッグ＆ドロップデモ映像 ]",
+                "core_docs_title": "主要対応文書",
+                "full_catalog_title": "対応カタログ一覧",
                 "tab_contract": "契約 / 決済",
-                "tab_logis": "船積み / 物流",
+                "tab_logis": "配送 / 物流",
                 "tab_customs": "通関 / 申告",
-                "tab_cert": "認証 / 特殊",
-                "desc_ci": "商業送り状: 決済と通関の基準",
-                "desc_pl": "梱包明細書: 貨物の物理情報",
+                "tab_cert": "証明書 / 特殊",
+                "desc_ci": "商業インボイス: 決済と通関の基準",
+                "desc_pl": "パッキングリスト: 貨物の物理情報",
                 "desc_bl": "船荷証券: 海上輸送の権利証券",
                 "desc_po": "発注書: 発注と契約の基盤",
                 "desc_lc": "信用状: 銀行の支払保証書類",
                 "desc_sc": "売買契約書: 公式な取引契約書",
-                "desc_pi": "見積送り状: 事前決済の証憑",
-                "desc_sa": "船積通知書: 出荷後の通知",
-                "desc_an": "到着通知書および貨物引渡指示書",
+                "desc_pi": "プロフォルマインボイス: 事前決済の証憑",
+                "desc_sa": "船積み通知書: 出荷後の通知",
+                "desc_an": "到着案内書および貨物引渡指示書",
                 "desc_awb": "航空運送状: 航空貨物の証憑",
                 "desc_ed": "輸出入申告書: 税関申告の公式文書",
                 "desc_co": "原産地証明書: 原産地の確認とFTA適用書類",
-                "desc_cinv": "税関送り状: 通関用の価格証憑",
+                "desc_cinv": "税関インボイス: 通関用の価格証憑",
                 "desc_ic": "品質および成分分析証明書",
                 "desc_dgd": "危険物申告書およびMSDS",
                 "desc_phyto": "植物検疫および衛生証明書",
