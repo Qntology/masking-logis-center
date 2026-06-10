@@ -883,6 +883,7 @@ async fn process_task(
                         
                         let mut ignore_list: Vec<String> = Vec::new(); // 🌟 추가: 본문에 존재하지 않는 잘못된 추출값 기록
                         let mut miss_counter = 0; // 🌟 추가: 무한 루프 방지 카운터
+                        let mut item_extract_count = 0; // 🌟 [추가] 각 항목별 최대 추출 횟수 제한 카운터
                         
                         // 🌟 [CRITICAL FIX] Qwen3에게 전체 문서(masked_text)를 주지 않고, 
                         // 앞서 벡터 유사도로 0.10점을 넘긴(통과한) PUG 라인들만 묶어서 제공합니다!
@@ -897,10 +898,19 @@ async fn process_task(
 
                         loop {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
+                            
+                            // 🌟 [추가] 3번 추출 성공 시 무한루프를 종료하고 다음 항목으로 넘어갑니다.
+                            if item_extract_count >= 3 {
+                                emit_term(&format!("[EXTRACTION] 🛑 최대 추출 횟수(3회) 도달. {} 항목 종료.", target_item));
+                                break;
+                            }
 
                             // 🌟 [CRITICAL FIX] Qwen3가 추출할 때는 `masked_text` 전체가 아닌, 압축된 `matched_context`만 줍니다.
                             // 이를 통해 불필요한 컨텍스트 토큰 소모를 방지하고 환각을 차단합니다.
-                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, target_name, &target_item);
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, target_name, &target_item);
+                            
+                            // 🌟 [CRITICAL FIX] 불필요한 메타데이터 제거 및 단일 키 출력 강제
+                            system_prompt.push_str(&format!("\n\nCRITICAL INSTRUCTION:\nOutput ONLY a single JSON object containing EXACTLY ONE KEY: \"{}\". Do NOT output 'has_header', 'title', 'language', 'has_list', 'detail', 'description', or any other keys.", target_name));
 
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -1027,9 +1037,16 @@ async fn process_task(
                                 }
                             }
 
-                            // 🌟 아예 빈 값이거나 "..." 형태인 경우 더 이상 추출할 항목이 없다고 판단하고 완전히 루프를 탈출합니다.
+                            // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
-                                break; 
+                                miss_counter += 1;
+                                if miss_counter > 3 {
+                                    break; 
+                                }
+                                // 빈 값 꼼수 방지 및 재시도 유도
+                                ignore_list.push("".to_string());
+                                ignore_list.push("null".to_string());
+                                continue;
                             }
 
                             // 🌟 [환각 방지 3번 재시도 루프 (유지됨)]
@@ -1053,6 +1070,7 @@ async fn process_task(
 
                             // 정상 추출되었으므로 연속 실패 카운터를 리셋합니다.
                             miss_counter = 0;
+                            item_extract_count += 1; // 🌟 성공 횟수 증가
 
                             // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 SKIP READ 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
