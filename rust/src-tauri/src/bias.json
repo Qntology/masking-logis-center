@@ -13,7 +13,7 @@
     "name": {
       "semantic": "person's name",
       "bias": "reporter, player, coach, representative, council member, mr, ms, name, person, first name, full name",
-      "prejudice": "company, team, location, place, animal, object"
+      "prejudice": "company, corporate, business, team, location, place, animal, object"
     },
     "username": {
       "semantic": "user ID, account name, nickname",
@@ -29,6 +29,11 @@
       "semantic": "person's biological sex or gender",
       "bias": "man, woman, male, female, sex, gender",
       "prejudice": "age, name, address, job"
+    },
+    "company": {
+      "semantic": "company name, organization, institution, corporate",
+      "bias": "company, inc, corp, ltd, organization, institution, corporation, firm, agency, enterprise, business",
+      "prejudice": "person, individual, man, woman, human, name, player, reporter"
     }
   },
   "ignore": {

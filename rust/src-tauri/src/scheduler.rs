@@ -761,7 +761,7 @@ async fn process_task(
                         // ("profession", "person's profession or field of work"),
                         // ("job_position", "person's specific job position or role"),
                         // ("department", "person's specific organizational division or department"),
-                        // ("company", "person's the name of a company, institution, or group"),
+                        ("company", "the name of a company, institution, or group"),
                     ];
 
                     // 🌟 [추가] bias.json 파일을 로드하여 privacy 객체 파싱 (선행 필터링용)
@@ -799,7 +799,7 @@ async fn process_task(
                     }
 
                     // 벡터 통과한 아이템만 담을 배열 및 매칭된 라인 저장 맵
-                    let mut valid_targets = Vec::new();
+                    let mut valid_targets: Vec<(&str, String)> = Vec::new();
                     let mut target_matched_lines: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
                     for (target_name, target_item) in target_items {
@@ -819,14 +819,24 @@ async fn process_task(
                             for (i, line_emb) in line_embs.iter().enumerate() {
                                 let b_score = cosine_similarity(line_emb, &bias_emb_vec);
                                 let p_score = cosine_similarity(line_emb, &prej_emb_vec);
-                                let score = b_score - p_score;
+                                
+                                // 🌟 [개선] 사람 이름과 회사 이름이 한 문장에 공존할 때 서로 점수를 갉아먹는 현상 방지
+                                // prejudice 점수의 페널티 비중을 100%에서 30%(0.3)로 줄여서, 완전한 오탐지만 살짝 눌러주는 역할로 변경합니다.
+                                // 만약 아예 prejudice를 무시하고 싶다면 `let score = b_score;` 로 테스트해 볼 수 있습니다.
+                                let penalty_weight = 0.3;
+                                let score = b_score - (p_score * penalty_weight);
                                 
                                 if score > best_score { best_score = score; }
 
-                                // 🌟 [추가] 사용자가 요청한 모든 PUG 라인의 평가 점수를 로그로 남깁니다.
-                                // 텍스트가 너무 길어 콘솔이 지저분해지는 것을 방지하기 위해 50자로 자릅니다.
-                                let short_line = if lines[i].len() > 50 { format!("{}...", &lines[i][..50]) } else { lines[i].clone() };
-                                emit_term(&format!("  🔍 [VECTOR] Item: [{}] | Score: {:.4} | Line: '{}'", target_item, score, short_line));
+                                // 🌟 [CRITICAL FIX] 한글 바이트 깨짐(Panic) 방지: 
+                                // 단순히 바이트 길이(len)로 자르지 않고, chars()를 이용해 유니코드 글자 수 기준으로 안전하게 50글자만 잘라냅니다.
+                                let short_line = if lines[i].chars().count() > 50 {
+                                    format!("{}...", lines[i].chars().take(50).collect::<String>())
+                                } else {
+                                    lines[i].clone()
+                                };
+                                
+                                emit_term(&format!("  🔍 [VECTOR] Item: [{}] | Score: {:.4} (Bias: {:.4}, Prej: {:.4}) | Line: '{}'", target_item, score, b_score, p_score, short_line));
 
                                 // 0.10 이상인 유효 라인만 모아둡니다.
                                 if score >= 0.10 {
@@ -839,7 +849,10 @@ async fn process_task(
                             } else {
                                 emit_term(&format!("[EXTRACTION] ✅ Vector matched for {} (최고 점수: {:.4}, 매칭된 줄 수: {})", target_item, best_score, passed_lines.len()));
                                 target_matched_lines.insert(target_name.to_string(), passed_lines);
-                                valid_targets.push((target_name, target_item));
+                                
+                                // 🌟 [CRITICAL FIX] bias.json의 풍부한 semantic 값을 추출하여 Qwen3에게 프롬프트 문맥으로 전달합니다!
+                                let semantic_item = privacy_node.get("semantic").and_then(|v| v.as_str()).unwrap_or(target_item);
+                                valid_targets.push((target_name, semantic_item.to_string()));
                             }
                         }
                     }
@@ -860,6 +873,7 @@ async fn process_task(
                     let mut doc_title = json_data.get("title").and_then(|v| v.as_str()).unwrap_or("Document").to_string();
                     let mut skip_counter = 0; // 🌟 추가: SKIP N 카운터
                     let mut skip_map = std::collections::HashMap::new(); // 🌟 추가: SKIP N -> Mnemonic 매핑
+                    let mut replacement_history: Vec<(String, String)> = Vec::new(); // 🌟 [CRITICAL FIX] 이전 타겟에서 추출된 원본->마커 치환 내역 보존
 
                     let total_valid = valid_targets.len();
 
@@ -875,12 +889,18 @@ async fn process_task(
                         let matched_lines = target_matched_lines.get(target_name).cloned().unwrap_or_default();
                         let mut matched_context = matched_lines.join("\n");
 
+                        // 🌟 [CRITICAL FIX] 이전 항목(target)에서 추출하여 치환해둔 마커를 이번 컨텍스트에도 강제로 적용합니다. 
+                        // 이를 통해 Qwen3가 동일한 값을 중복 추출하거나 혼동하는 현상을 완벽히 차단합니다.
+                        for (original_val, marker) in &replacement_history {
+                            matched_context = matched_context.replace(original_val, marker);
+                        }
+
                         loop {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
 
                             // 🌟 [CRITICAL FIX] Qwen3가 추출할 때는 `masked_text` 전체가 아닌, 압축된 `matched_context`만 줍니다.
                             // 이를 통해 불필요한 컨텍스트 토큰 소모를 방지하고 환각을 차단합니다.
-                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, target_name, target_item);
+                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, target_name, &target_item);
 
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -981,11 +1001,13 @@ async fn process_task(
                             // 추출된 값이 있는지, 그리고 그 값이 현재 PUG_CONTENT(masked_text)에 실제로 존재하는지 확인
                             let mut extracted_val = parsed.get(target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                             
+                            // 🌟 [CRITICAL FIX] Qwen3가 압축된 문맥(matched_context)을 읽고 있으므로, 환각 검사도 동일한 문맥에서 수행해야 완벽합니다.
+                            let exists_in_context = matched_context.contains(&extracted_val);
                             let exists_in_body = masked_text.contains(&extracted_val);
                             let exists_in_title = doc_title.contains(&extracted_val);
 
                             // 🌟 [추가] 연락처(contact number)일 경우, LLM이 하이픈(-)이나 공백을 마음대로 제거/추가하여 매칭이 안 되는 현상 방어
-                            if !extracted_val.is_empty() && extracted_val != "..." && extracted_val != "null" && !exists_in_body && !exists_in_title {
+                            if !extracted_val.is_empty() && extracted_val != "..." && extracted_val != "null" && !exists_in_context && !exists_in_body && !exists_in_title {
                                 if target_name == "contact_number" {
                                     // 순수 숫자만 추출
                                     let digits_only: String = extracted_val.chars().filter(|c| c.is_digit(10)).collect();
@@ -1010,12 +1032,14 @@ async fn process_task(
                                 break; 
                             }
 
-                            // 🌟 값이 추출되긴 했으나 본문(masked_text)이나 제목(doc_title)에 존재하지 않는(환각/변형된) 값인 경우, 
-                            // 무시 리스트(ignore_list)에 넣고 다시 프롬프트를 생성해 재시도(continue)합니다.
+                            // 🌟 [환각 방지 3번 재시도 루프 (유지됨)]
+                            // 값이 추출되긴 했으나 LLM이 실제로 읽은 압축 문맥(matched_context)이나 원본에 없는 환각(Hallucination)인 경우, 
+                            // 무시 리스트(ignore_list)에 넣고 다시 프롬프트를 생성해 최대 3번까지 재시도(continue)합니다.
+                            let re_check_context = matched_context.contains(&extracted_val);
                             let re_check_body = masked_text.contains(&extracted_val);
                             let re_check_title = doc_title.contains(&extracted_val);
 
-                            if !re_check_body && !re_check_title {
+                            if !re_check_context && !re_check_body && !re_check_title {
                                 miss_counter += 1;
                                 if miss_counter > 3 {
                                     break; 
@@ -1042,7 +1066,8 @@ async fn process_task(
                             doc_title = doc_title.replace(&extracted_val, &skip_marker);
                             matched_context = matched_context.replace(&extracted_val, &skip_marker); // 🌟 [추가] Qwen3가 읽고 있는 컨텍스트도 동기화 치환!
                             
-                            skip_map.insert(skip_marker, final_replacement);
+                            skip_map.insert(skip_marker.clone(), final_replacement);
+                            replacement_history.push((extracted_val.clone(), skip_marker.clone())); // 🌟 [CRITICAL FIX] 다음 루프 복구를 위해 치환 이력 기록
                             skip_counter += 1;
 
                             // 최종 저장용 JSON 객체를 all_matches 배열에 기록
