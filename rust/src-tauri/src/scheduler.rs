@@ -274,6 +274,28 @@ pub async fn start_background_worker(
                                     continue;
                                 }
                             }
+                        } else if err_msg.contains("No valid model found") || err_msg.to_lowercase().contains("model is missing") {
+                            // 🌟 [추가] 모델 파일 누락 에러 감지 시 세팅 화면으로 이동 유도
+                            let final_err = "Model files are missing. Please go to Settings and download the required models.";
+                            println!("[Scheduler] Model missing error detected. Redirecting user to settings.");
+
+                            let store_guard = store.lock().await;
+                            if let Some(db) = store_guard.as_ref() {
+                                let _ = db.update_task_status(&task.id, crate::logic::parse_status("error")).await;
+                                let _ = db.update_message_status(&task.id, crate::logic::parse_status("error"), Some(&format!("Error: {}", final_err))).await;
+                            }
+
+                            let _ = app_handle.emit("extraction-progress", json!({
+                                "task_id": task.id,
+                                "category": "Error",
+                                "summary": final_err,
+                                "spinner": "❌"
+                            }));
+
+                            // 프론트엔드에 세팅 창을 열도록 특수 이벤트 발송
+                            let _ = app_handle.emit("require-model-download", json!({}));
+
+                            current_device_pref = None;
                         } else {
                             let store_guard = store.lock().await;                            
                             if let Some(db) = store_guard.as_ref() {
@@ -707,7 +729,19 @@ async fn process_task(
                     // 🌟 [OOM 원인 분석용 로그] 모델에 투입되기 직전 전체 컨텍스트의 문자열 길이를 터미널에 출력합니다.
                     emit_term(&format!("[DEBUG-OOM] 현재 투입되는 컨텍스트 사이즈(문자 수): {}. 선택된 모델: {:?}", target_text.len(), target_model_size));
 
-                    model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await?;
+                    // 🌟 [CRITICAL FIX] Qwen3(LLM) 모델 백그라운드 로딩 트리거!
+                    // 임베딩 연산과 동시에 모델이 VRAM에 올라가도록 스레드를 분리합니다.
+                    let bg_model = model.clone();
+                    let bg_cancel = cancellation_token.clone();
+                    let llm_load_handle = tokio::spawn(async move {
+                        if bg_cancel.load(Ordering::Relaxed) { return; }
+                        // deep_purge를 피하기 위해 ensure_ 계열을 직접 호출하여 임베딩 모델 생존 보장
+                        match target_model_size {
+                            crate::model::ModelSize::Qwen => { let _ = bg_model.ensure_generator_ext(crate::model::ModelSize::Qwen, false, false).await; },
+                            crate::model::ModelSize::Qwen3 => { let _ = bg_model.ensure_qwen3().await; },
+                            _ => {}
+                        }
+                    });
 
                     // 🌟 16개의 마스킹 타겟 항목에 대해 (JSON_키, 추출_설명) 튜플 형태로 분리합니다.
                     let target_items = vec![
@@ -730,6 +764,96 @@ async fn process_task(
                         // ("company", "person's the name of a company, institution, or group"),
                     ];
 
+                    // 🌟 [추가] bias.json 파일을 로드하여 privacy 객체 파싱 (선행 필터링용)
+                    let bias_str = include_str!("bias.json");
+                    let bias_json: Value = serde_json::from_str(bias_str).unwrap_or(json!({}));
+
+                    // 🌟 [추가] 코사인 유사도 산출 헬퍼 함수
+                    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+                        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if norm_a == 0.0 || norm_b == 0.0 { 0.0 } else { dot_product / (norm_a * norm_b) }
+                    }
+
+                    emit_term("[EXTRACTION] 🧠 [포그라운드] Embedding 모델 로드 및 벡터 유사도 사전 검증 시작...");
+
+                    // 🌟 포그라운드: 임베딩 모델 명시적 로드
+                    model.ensure_embedding().await?;
+                    
+                    // 🌟 [CRITICAL FIX] 전체 텍스트를 하나의 벡터로 뭉개지 않고, 
+                    // 한 줄씩(Line-by-line) 쪼개서 개별 벡터로 만든 뒤 가장 높은 점수를 뽑아냅니다.
+                    let lines: Vec<String> = target_text.lines()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| s.len() > 2) // 의미 없는 짧은 기호나 공백 줄은 임베딩 제외
+                        .collect();
+                        
+                    emit_term(&format!("[EXTRACTION] 본문을 {}개의 라인으로 분할하여 순차 임베딩 진행 중...", lines.len()));
+                    
+                    // 🌟 LogisModel 구조체에는 단일 임베딩 메서드만 존재하므로 순회하며 배열로 수집합니다.
+                    let mut line_embs: Vec<Vec<f32>> = Vec::with_capacity(lines.len());
+                    for line in &lines {
+                        if cancellation_token.load(Ordering::Relaxed) { break; }
+                        let emb = model.get_embedding(line.clone()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                        line_embs.push(emb);
+                    }
+
+                    // 벡터 통과한 아이템만 담을 배열 및 매칭된 라인 저장 맵
+                    let mut valid_targets = Vec::new();
+                    let mut target_matched_lines: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+
+                    for (target_name, target_item) in target_items {
+                        if cancellation_token.load(Ordering::Relaxed) { break; }
+
+                        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(target_name)) {
+                            let bias_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("");
+                            let prej_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("");
+
+                            let bias_emb_vec = model.get_embedding(bias_val.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                            let prej_emb_vec = model.get_embedding(prej_val.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                            
+                            let mut passed_lines = Vec::new();
+                            let mut best_score = -1.0;
+
+                            // 🌟 각 라인별로 코사인 유사도를 모두 비교하고 터미널에 상세 로그를 출력합니다!
+                            for (i, line_emb) in line_embs.iter().enumerate() {
+                                let b_score = cosine_similarity(line_emb, &bias_emb_vec);
+                                let p_score = cosine_similarity(line_emb, &prej_emb_vec);
+                                let score = b_score - p_score;
+                                
+                                if score > best_score { best_score = score; }
+
+                                // 🌟 [추가] 사용자가 요청한 모든 PUG 라인의 평가 점수를 로그로 남깁니다.
+                                // 텍스트가 너무 길어 콘솔이 지저분해지는 것을 방지하기 위해 50자로 자릅니다.
+                                let short_line = if lines[i].len() > 50 { format!("{}...", &lines[i][..50]) } else { lines[i].clone() };
+                                emit_term(&format!("  🔍 [VECTOR] Item: [{}] | Score: {:.4} | Line: '{}'", target_item, score, short_line));
+
+                                // 0.10 이상인 유효 라인만 모아둡니다.
+                                if score >= 0.10 {
+                                    passed_lines.push(lines[i].clone());
+                                }
+                            }
+
+                            if passed_lines.is_empty() {
+                                emit_term(&format!("[EXTRACTION] ⏭️ Skipping {} (최고 점수: {:.4} < 0.10)", target_item, best_score));
+                            } else {
+                                emit_term(&format!("[EXTRACTION] ✅ Vector matched for {} (최고 점수: {:.4}, 매칭된 줄 수: {})", target_item, best_score, passed_lines.len()));
+                                target_matched_lines.insert(target_name.to_string(), passed_lines);
+                                valid_targets.push((target_name, target_item));
+                            }
+                        }
+                    }
+
+                    emit_term("[EXTRACTION] 🧠 벡터 유사도 검증 완료. LLM 로딩 동기화 대기 중...");
+                    
+                    // 🌟 Qwen3 로드가 안 끝났다면 여기서 완료될 때까지 대기
+                    let _ = llm_load_handle.await;
+                    
+                    // 🌟 혹시라도 bg 락 충돌이나 기타 이유로 실패했을 경우를 대비한 안전망 
+                    // (이미 로드되어 있으면 secure_vram_relay는 내부적으로 purge 없이 0ms만에 패스합니다)
+                    model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await?;
+                    emit_term("[EXTRACTION] ✅ LLM 로딩 완료. 추론 루프 시작.");
+
                     let mut all_matches = Vec::new();
                     masked_text = target_text.clone(); // 반복 마스킹을 위해 루프 진입 전 초기화
                     // 🌟 [CRITICAL FIX] 타이틀에 남아있는 원본 값 때문에 LLM이 환각을 일으키는 것을 막기 위해 doc_title도 밖으로 빼냅니다.
@@ -737,18 +861,26 @@ async fn process_task(
                     let mut skip_counter = 0; // 🌟 추가: SKIP N 카운터
                     let mut skip_map = std::collections::HashMap::new(); // 🌟 추가: SKIP N -> Mnemonic 매핑
 
+                    let total_valid = valid_targets.len();
+
                     // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
-                    for (p_idx, (target_name, target_item)) in target_items.into_iter().enumerate() {
+                    for (p_idx, (target_name, target_item)) in valid_targets.into_iter().enumerate() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
                         
                         let mut ignore_list: Vec<String> = Vec::new(); // 🌟 추가: 본문에 존재하지 않는 잘못된 추출값 기록
                         let mut miss_counter = 0; // 🌟 추가: 무한 루프 방지 카운터
                         
+                        // 🌟 [CRITICAL FIX] Qwen3에게 전체 문서(masked_text)를 주지 않고, 
+                        // 앞서 벡터 유사도로 0.10점을 넘긴(통과한) PUG 라인들만 묶어서 제공합니다!
+                        let matched_lines = target_matched_lines.get(target_name).cloned().unwrap_or_default();
+                        let mut matched_context = matched_lines.join("\n");
+
                         loop {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
 
-                            // 🌟 현재까지 치환(마스킹)이 완료된 최신 텍스트와 추출할 키워드, 그리고 무시 리스트를 공통 프롬프트 빌더에 주입합니다.
-                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &masked_text, target_name, target_item);
+                            // 🌟 [CRITICAL FIX] Qwen3가 추출할 때는 `masked_text` 전체가 아닌, 압축된 `matched_context`만 줍니다.
+                            // 이를 통해 불필요한 컨텍스트 토큰 소모를 방지하고 환각을 차단합니다.
+                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, target_name, target_item);
 
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -908,6 +1040,7 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 원본 텍스트(본문+제목) 모두에서 임시 마커로 치환하여 이어지는 LLM 추론에서 혼선을 원천 방지합니다.
                             masked_text = masked_text.replace(&extracted_val, &skip_marker);
                             doc_title = doc_title.replace(&extracted_val, &skip_marker);
+                            matched_context = matched_context.replace(&extracted_val, &skip_marker); // 🌟 [추가] Qwen3가 읽고 있는 컨텍스트도 동기화 치환!
                             
                             skip_map.insert(skip_marker, final_replacement);
                             skip_counter += 1;

@@ -1,0 +1,233 @@
+{
+  "privacy": {
+    "email": {
+      "semantic": "electronic mail address",
+      "bias": "@, .com, .net, .co.kr, .org, email, e-mail, mailto, mail",
+      "prejudice": "physical address, postal code, phone number"
+    },
+    "contact_number": {
+      "semantic": "phone number, mobile number, contact number",
+      "bias": "010, 02, 031, 070, phone, mobile, tel, contact, number, +82",
+      "prejudice": "email, address, age, price, amount"
+    },
+    "name": {
+      "semantic": "person's name",
+      "bias": "reporter, player, coach, representative, council member, mr, ms, name, person, first name, full name",
+      "prejudice": "company, team, location, place, animal, object"
+    },
+    "username": {
+      "semantic": "user ID, account name, nickname",
+      "bias": "id, username, nickname, account, user, login",
+      "prejudice": "real name, email, password"
+    },
+    "address": {
+      "semantic": "physical street address, location",
+      "bias": "city, province, district, neighborhood, town, village, road, street, house number, apartment, building, address, location",
+      "prejudice": "email, ip address, URL, web link"
+    },
+    "biological_sex": {
+      "semantic": "person's biological sex or gender",
+      "bias": "man, woman, male, female, sex, gender",
+      "prejudice": "age, name, address, job"
+    }
+  },
+  "ignore": {
+    "semantic": "System commands, analytical requests, urgency markers, and conversational fillers that do not correspond to actual database column values. These must be ignored in database filtering.",
+    "bias": "analyze, analysis, urgent, ASAP, quickly, immediately, hurry, reason, cause, why, show me, display, separate them, list out, report, statistics, investigate, figure out, find out, please, tell me, summarize, explain, insight, overview, details on why, what happened, drill down, break down",
+    "prejudice": "id, link, status, price, quantity, address, date, code, name, product, order, shipping, carrier, tracking number, refund, exchange, dimensions, weight, currency"
+  },
+  "metrics": {
+    "date": {
+      "semantic": "calendar date, day, month, year, season",
+      "bias": "date, day, month, year, today, yesterday, tomorrow, season, period, last month, last year, recently, lately, this week, this year",
+      "prejudice": "price, cost, money, percentage, amount, quantity, volume, ratio"
+    },
+    "time": {
+      "semantic": "clock time, hour, minute, duration",
+      "bias": "time, hour, minute, second, duration, o'clock",
+      "prejudice": "price, cost, money, percentage, amount, quantity, volume, date, year"
+    },
+    "price": {
+      "semantic": "price, cost, money, currency",
+      "bias": "price, cost, amount, dollars, won, fee, expensive, cheap",
+      "prejudice": "date, time, percentage, ratio, rate, quantity, volume, weight"
+    },
+    "discount": {
+      "semantic": "discount, sale, price reduction",
+      "bias": "discount, off, sale, coupon, reduced, markdown, save",
+      "prejudice": "date, time, quantity, volume, weight, original price"
+    },
+    "quantity": {
+      "semantic": "quantity, count, volume, traffic, inventory",
+      "bias": "quantity, count, volume, views, clicks, items, total, amount, stock",
+      "prejudice": "date, time, price, cost, money, percentage, ratio, rate"
+    },
+    "ratio": {
+      "semantic": "percentage, ratio, rate, proportion, probability",
+      "bias": "percent, %, ratio, rate, conversion, proportion, probability",
+      "prejudice": "date, time, price, cost, money, quantity, volume, weight"
+    }
+  },
+  "operators": {
+    "eq": {
+      "semantic": "exact match, equal",
+      "bias": "exactly, equal, same, precisely, identical",
+      "prejudice": "less, under, below, maximum, greater, over, above, minimum, top, highest, bottom, lowest"
+    },
+    "lte": {
+      "semantic": "less than or equal to, maximum",
+      "bias": "less than or equal, maximum, up to, no more than, within",
+      "prejudice": "greater, over, above, minimum, more than, starting from, top, highest, bottom, lowest"
+    },
+    "lt": {
+      "semantic": "less than, strictly under",
+      "bias": "less than, under, below, cheaper than, lower than, fewer",
+      "prejudice": "greater, over, above, minimum, more than, starting from, equal, top, highest, bottom, lowest"
+    },
+    "gte": {
+      "semantic": "greater than or equal to, minimum",
+      "bias": "greater than or equal, minimum, starting from, at least",
+      "prejudice": "less, under, below, maximum, up to, no more than, within, top, highest, bottom, lowest"
+    },
+    "gt": {
+      "semantic": "greater than, strictly over",
+      "bias": "greater than, over, above, more than, exceeds, higher, expensive, heavy",
+      "prejudice": "less, under, below, maximum, up to, no more than, within, equal, top, highest, bottom, lowest"
+    },
+    "top": {
+      "semantic": "top, highest, maximum percentile, rank ascending",
+      "bias": "top, highest, best, upper, most, maximum, peak, rank, leader, many, often, popular, frequent",
+      "prejudice": "bottom, lowest, worst, under, least, minimum, below, drop, equal, few, rarely, unpopular"
+    },
+    "bottom": {
+      "semantic": "bottom, lowest, minimum percentile, rank descending",
+      "bias": "bottom, lowest, worst, under, least, minimum, drop, trailing, few, rarely, unpopular, infrequent",
+      "prejudice": "top, highest, best, upper, most, maximum, peak, rank, leader, equal, many, often, popular"
+    }
+  },
+  "time_filters": {
+    "today": {
+      "semantic": "current day, today",
+      "bias": "today, current day, this day, right now, present 24 hours, instantaneous",
+      "prejudice": "yesterday, tomorrow, last week, next month, past, future, year, month, ago, history"
+    },
+    "yesterday": {
+      "semantic": "previous day, yesterday",
+      "bias": "yesterday, previous day, day before today, past 24 hours, one day ago",
+      "prejudice": "today, tomorrow, last week, next month, future, year, month, now, current, present"
+    },
+    "this_month": {
+      "semantic": "current month",
+      "bias": "this month, current month, present 30 days, current calendar month",
+      "prejudice": "last month, next month, today, yesterday, year, week, day, specific hour, exact minute"
+    },
+    "last_month": {
+      "semantic": "previous month",
+      "bias": "last month, previous month, past 30 days, preceding calendar month",
+      "prejudice": "this month, next month, today, yesterday, year, week, day, future, present"
+    },
+    "this_year": {
+      "semantic": "current year",
+      "bias": "this year, current year, present 365 days, ongoing twelve months",
+      "prejudice": "last year, next year, month, day, week, specific hour, exact minute, ago"
+    },
+    "last_year": {
+      "semantic": "previous year",
+      "bias": "last year, previous year, past 365 days, preceding twelve months",
+      "prejudice": "this year, next year, month, day, week, future, today, tomorrow, present"
+    },
+    "recently": {
+      "semantic": "recent past, lately",
+      "bias": "recently, lately, these days, recent times, past few days, short while ago",
+      "prejudice": "future, exactly today, tomorrow, next year, long ago, ancient, decade, century"
+    }
+  },
+  "season_filters": {
+    "spring": {
+      "semantic": "spring season",
+      "bias": "spring, springtime, vernal equinox, blooming, flowers, sprout, thaw, rebirth, blossom",
+      "prejudice": "summer, autumn, winter, fall, heat, hot, scorcher, cold, freezing, snow, ice, frost, harvest, falling leaves",
+      "exact_match": [
+        "spring", "봄", "春", "春天", "primavera", "printemps", "frühling", "весна", "الربيع", "वसंत", 
+        "pranverë", "yaz", "বসন্ত", "пролет", "proljeće", "jaro", "forår", "lente", "voorjaar", "kevad", 
+        "kevät", "გაზაფხული", "άνοιξη", "אביב", "tavasz", "vor", "musim semi", "kөктем", "រដូវផ្ការីក", 
+        "pavasaris", "musim bunga", "vår", "بهار", "wiosna", "primăvară", "пролеће", "jar", "pomlad", 
+        "majira ya kuchipua", "tagsibol", "వసంత", "ฤดูใบไม้ผลิ", "ilkbahar", "bahar", "mùa xuân", "bahor", "بہار"
+      ]
+    },
+    "summer": {
+      "semantic": "summer season",
+      "bias": "summer, summertime, summer solstice, heat, hot, warm, beach, sunny, sweat",
+      "prejudice": "spring, autumn, winter, fall, cold, freezing, snow, ice, frost, blooming, harvest, sprout",
+      "exact_match": [
+        "summer", "여름", "夏", "夏天", "verano", "été", "sommer", "лето", "صيف", "गर्मी", 
+        "verë", "yay", "গ্রীষ্ম", "лято", "estiu", "ljeto", "léto", "zomer", "suvi", "kesä", 
+        "ზაფხული", "καλοκαίρι", "קיץ", "nyár", "sumar", "musim panas", "estate", "жаз", "រដូវក្តៅ", 
+        "vasara", "उन्हाळा", "تابستان", "lato", "vară", "leto", "poletje", "majira ya joto", "tag-araw", 
+        "tag-init", "వేసవి", "ฤดูร้อน", "yaz", "літо", "موسم گرما", "yoz", "mùa hè", "mùa hạ"
+      ]
+    },
+    "autumn": {
+      "semantic": "autumn season, fall",
+      "bias": "autumn, autumnal equinox, falling leaves, foliage, breeze",
+      "prejudice": "spring, summer, winter, heat, hot, warm, blooming, blossom, snow, freezing, ice, frost",
+      "exact_match": [
+        "autumn", "fall", "가을", "秋", "秋天", "otoño", "automne", "herbst", "осень", "خريف", 
+        "पतझड़", "vjeshtë", "payız", "শরৎ", "есен", "tardor", "jesen", "podzim", "efterår", "herfst", 
+        "najaar", "sügis", "syksy", "შემოდგომა", "φθινόπωρο", "סתיו", "ősz", "haust", "musim gugur", 
+        "autunno", "күз", "រដូវស្លឹកឈើជ្រุះ", "rudens", "ruduo", "musim luruh", "høst", "پاییز", "jesień", 
+        "outono", "toamnă", "vuli", "höst", "taglagas", "శరదృతువు", "ฤดูใบไม้ร่วง", "sonbahar", "güz", 
+        "осінь", "خزاں", "kuz", "mùa thu"
+      ]
+    },
+    "winter": {
+      "semantic": "winter season",
+      "bias": "winter, wintertime, winter solstice, cold, freezing, snow, ice, frost, chill, blizzard",
+      "prejudice": "spring, summer, autumn, fall, heat, hot, warm, sunny, beach, blooming, blossom, harvest",
+      "exact_match": [
+        "winter", "겨울", "冬", "冬天", "invierno", "hiver", "зима", "شتاء", "सर्दी", "dimër", 
+        "qış", "শীত", "hivern", "zima", "talv", "talvi", "ზამთარი", "χειμώνας", "חורף", "tél", 
+        "vetur", "musim dingin", "inverno", "қыс", "រដូវរងារ", "ziema", "žiema", "musim sejuk", "हिवाळा", 
+        "زمستان", "iarnă", "majira ya baridi", "taglamig", "చలికాలం", "ฤดูหนาว", "kış", "موسم سرما", 
+        "qish", "mùa đông"
+      ]
+    }
+  },
+  "status_filters": {
+    "draft": { "bias": "draft, preparation, pending pickup, cart", "prejudice": "complete, delivered, closed, running, active" },
+    "progress": { "bias": "progress, processing, active, running, transit", "prejudice": "draft, complete, error, stop, pause" },
+    "return": { "bias": "return, returning", "prejudice": "progress, complete, draft" },
+    "complete": { "bias": "complete, delivered, closed, finished, published", "prejudice": "draft, progress, error, stop, return" },
+    "error": { "bias": "error, exception, failed, spam, blocked, rejected", "prejudice": "complete, progress, active, draft" },
+    "show": { "bias": "show, visible, active", "prejudice": "hide, hidden, stop" },
+    "hide": { "bias": "hide, hidden", "prejudice": "show, visible, active" },
+    "stop": { "bias": "stop, hold, pause, suspended, blocked", "prejudice": "progress, active, running, complete" },
+    "cancel": { "bias": "cancel, cancelled, deleted, withdrawn, discontinued", "prejudice": "progress, complete, draft, active" },
+    "refund": { "bias": "refund, refunded", "prejudice": "progress, active, complete" },
+    "exchange": { "bias": "exchange, exchanged", "prejudice": "refund, return, complete" },
+    "expire": { "bias": "expire, expired", "prejudice": "progress, active, complete" },
+    "remove": { "bias": "remove, deleted", "prejudice": "show, complete, draft" }
+  },
+  "substantial_filters": {
+    "size": { "bias": "size, physical dimensions, volume, width, height, length", "prejudice": "weight, price, discount, quantity" },
+    "weight": { "bias": "weight, mass, heaviness", "prejudice": "size, price, discount, quantity" },
+    "shipping_fee": { "bias": "shipping fee, cost of delivery, freight", "prejudice": "sale price, supply price, size, weight" },
+    "shipping_duration": { "bias": "shipping duration, time taken for delivery", "prejudice": "size, weight, price, fee" },
+    "sale_price": { "bias": "sale price, selling price, final price, customer price", "prejudice": "shipping fee, weight, size, quantity" },
+    "supply_price": { "bias": "supply price, wholesale, original cost, purchase price", "prejudice": "sale price, shipping fee, weight, size" },
+    "low_stock_threshold": { "bias": "low stock threshold, minimum inventory alert level", "prejudice": "price, weight, size, fee" },
+    "discount": { "bias": "discount, price reduction, markdown", "prejudice": "sale price, weight, size, duration" },
+    "min_order_amount": { "bias": "minimum order amount, spend required", "prejudice": "sale price, weight, size" },
+    "max_discount_amount": { "bias": "maximum discount amount, discount cap", "prejudice": "sale price, weight, size" },
+    "usage_limit": { "bias": "usage limit, maximum number of times usable globally", "prejudice": "sale price, weight, size" },
+    "usage_per": { "bias": "usage per user, maximum times usable per user", "prejudice": "sale price, weight, size" }
+  },
+  "find_filters": {
+    "many": { "bias": "many, high quantity, count, volume", "prejudice": "few, little, low, light, heavy" },
+    "few": { "bias": "few, low quantity, count, volume", "prejudice": "many, much, high, light, heavy" },
+    "much": { "bias": "much, high financial value, price, amount", "prejudice": "few, little, low, light, heavy" },
+    "little": { "bias": "little, low financial value, price, amount", "prejudice": "many, much, high, light, heavy" },
+    "heavy": { "bias": "heavy, high physical weight", "prejudice": "many, few, much, little, light" },
+    "light": { "bias": "light, low physical weight", "prejudice": "many, few, much, little, heavy" }
+  }
+}

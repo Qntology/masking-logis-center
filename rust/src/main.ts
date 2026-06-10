@@ -5043,6 +5043,35 @@ listen("download_error", (event: any) => {
     alert(`Error downloading ${payload.model}: ${payload.error}`);
 });
 
+// 🌟 [추가] 백엔드에서 모델 누락 에러 발생 시 세팅 탭으로 강제 이동 및 모델 다운로드 유도
+listen("require-model-download", () => {
+    // 🌟 [CRITICAL FIX] 상세 진행 화면(detailView)이 전체를 덮고 있다면 강제로 닫아줍니다!
+    if (detailView && detailView.style.display !== "none") {
+        detailView.style.display = "none";
+        if (listView) listView.style.display = "block";
+    }
+
+    openWidget("settings");
+    
+    // 🌟 스피너 강제 정지 및 프론트엔드 락 초기화
+    isExtracting = false;
+    isSearching = false;
+    stopSpinner();
+    if (btnExtract) {
+        btnExtract.classList.remove("active-spinner");
+        btnExtract.innerText = "⚡";
+        btnExtract.style.display = "flex";
+    }
+    
+    // 모델 관리 UI 영역이 잘 보이도록 스크롤을 하단으로 이동시킵니다.
+    setTimeout(() => {
+        const scrollEl = document.getElementById("chat-scroll");
+        if (scrollEl) {
+            scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: 'smooth' });
+        }
+    }, 300);
+});
+
 document.getElementById("btn-download-all-models")?.addEventListener("click", async () => {
     const missing = TARGET_MODELS.filter(m => !modelStatus[m]);
     if (missing.length === 0) {
