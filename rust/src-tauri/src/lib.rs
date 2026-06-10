@@ -1387,6 +1387,16 @@ async fn ai_search_complex(
                 // 🚨 [CRITICAL FIX] 에러 시에도 사용자의 쿼리를 덧붙이지 않고 깔끔하게 에러 사유만 표시합니다.
                 let error_msg = format!("Task failed or cancelled: {}", e);
                 let _ = store.update_message_status(&task_id, status_code, Some(&error_msg)).await;
+
+                // 🌟 [CRITICAL FIX] 프론트엔드에 에러 이벤트를 발송하여 무한 스피너에 빠지는 현상을 완벽 차단합니다!
+                let payload_err = serde_json::json!({ 
+                    "task_id": task_id, 
+                    "category": "Error", 
+                    "summary": error_msg, 
+                    "spinner": "❌",
+                    "data": null 
+                });
+                let _ = app_handle.emit("extraction-progress", &payload_err);
             }
         }
     }

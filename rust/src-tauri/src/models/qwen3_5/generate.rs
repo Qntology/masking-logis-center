@@ -119,15 +119,8 @@ impl Qwen3_5GenerateModel {
 
         let tokenizer = model_gguf.build_tokenizer(Some(false), Some(false), Some(false))?;
         
-        // 🚀 mmproj_file 인자가 None이더라도, 같은 폴더에 다운로드된 mmproj-BF16.gguf 파일이 존재하면 자동으로 합체하도록 개선
-        let auto_mmproj = std::path::Path::new(model_file).with_file_name("mmproj-BF16.gguf");
-        let target_mmproj = if let Some(f) = mmproj_file {
-            Some(f.to_string())
-        } else if auto_mmproj.exists() {
-            Some(auto_mmproj.to_string_lossy().to_string())
-        } else {
-            None
-        };
+        // 외부에서 명시적으로 비전 가중치 경로를 지정했을 때만 로드하도록 제한하여 텍스트 전용 모드 최적화
+        let target_mmproj = mmproj_file.map(|f| f.to_string());
 
         let (pre_processor, mut mmproj_gguf) = if let Some(mmproj_f) = target_mmproj {
             let mut reader = std::fs::File::open(&mmproj_f)?;
@@ -190,7 +183,9 @@ impl Qwen3_5GenerateModel {
         mes: ChatCompletionParameters, 
         cancel_flag: Option<Arc<AtomicBool>>, 
         session_id: Option<String>, 
-        kv_name: Option<String>
+        kv_name: Option<String>,
+        ignore_list: Option<&[String]>,
+        semantic_prejudice: Option<&str> // 🌟 [추가] Semantic Prejudice 타겟
     ) -> Result<String> {
         let seed = mes.seed.unwrap_or(32768) as u64;
         let temperature = mes.temperature.unwrap_or(0.0);
@@ -287,6 +282,46 @@ impl Qwen3_5GenerateModel {
         let mut gen_text_buffer = String::new(); 
         let mut print_buffer = String::new();
 
+        // 🌟 [Contrastive Semantic Steering] 오답 레이블 진영을 밀어내는 Prejudice 텐서 연산
+        let mut semantic_prejudice_tensor: Option<Tensor> = None;
+        if let Some(target_text) = semantic_prejudice {
+            if let Ok(target_ids) = self.tokenizer.text_encode_vec(target_text.to_string(), false) {
+                if !target_ids.is_empty() {
+                    let calc_prej = || -> Result<Tensor> {
+                        let target_tensor = Tensor::from_vec(target_ids.clone(), (1, target_ids.len()), &self.device)?;
+                        let target_emb = self.qwen3_5.embedding_token_id(&target_tensor)?.to_dtype(DType::F32)?;
+                        let target_emb_sum = target_emb.sum_keepdim(1)?;
+                        let len_tensor = Tensor::new(target_ids.len() as f32, &self.device)?;
+                        let target_emb_avg = target_emb_sum.broadcast_div(&len_tensor)?;
+                        let target_vec = target_emb_avg.squeeze(0)?.squeeze(0)?;
+                        
+                        let all_embs = self.qwen3_5.get_embed_tokens().to_dtype(DType::F32)?;
+                        let target_norm = target_vec.sqr()?.sum_all()?.sqrt()?;
+                        let target_normalized = target_vec.broadcast_div(&target_norm)?;
+                        
+                        let all_sqr = all_embs.sqr()?.sum_keepdim(candle_core::D::Minus1)?;
+                        let all_norm = all_sqr.sqrt()?;
+                        let all_normalized = all_embs.broadcast_div(&all_norm)?;
+                        
+                        let sim = all_normalized.matmul(&target_normalized.unsqueeze(1)?)?.squeeze(1)?;
+                        // 🌟 [방향 B: Threshold 노이즈 게이트 + Exponential 증폭]
+                        let threshold = Tensor::new(0.65f32, &self.device)?;
+                        let one = Tensor::new(1.0f32, &self.device)?;
+                        let sim_relu = sim.broadcast_sub(&threshold)?.relu()?;
+                        let prejudice = sim_relu.affine(15.0, 0.0)?.exp()?.broadcast_sub(&one)?;
+                        Ok(prejudice) 
+                    };
+                    match calc_prej() {
+                        Ok(prej) => {
+                            semantic_prejudice_tensor = Some(prej);
+                            println!("[SEMANTIC-PREJUDICE] Generated Vector Prejudice for target: '{}'", target_text);
+                        }
+                        Err(e) => println!("[SEMANTIC-PREJUDICE] Failed to calculate prejudice: {}", e),
+                    }
+                }
+            }
+        }
+
         for i in 0..sample_len {
             if let Some(flag) = &cancel_flag { if flag.load(Ordering::Relaxed) { break; } }
 
@@ -303,17 +338,39 @@ impl Qwen3_5GenerateModel {
             ).await?;
             
             let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?.contiguous()?;
+
+            // 🌟 오답 진영의 단어들은 아예 생성되지 못하도록 억제력(Sub)을 가합니다!
+            let logits = if let Some(ref prej) = semantic_prejudice_tensor {
+                logits.broadcast_sub(prej)?
+            } else {
+                logits
+            };
+
             let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
             let len = logits_vec.len();
             
             if !generate.is_empty() {
-                let penalty = 1.1; 
+                // 🌟 [CRITICAL FIX] 반복을 끊기 위해 페널티를 유지하되, JSON 필수 문법만 보호합니다.
+                let penalty = self.repeat_penalty; 
                 let mut set = std::collections::HashSet::new();
                 let start_at = generate.len().saturating_sub(self.repeat_last_n);
                 for &t in &generate[start_at..] {
                     if !set.contains(&t) && (t as usize) < len {
-                        let logit = logits_vec[t as usize];
-                        logits_vec[t as usize] = if logit < 0.0 { logit * penalty } else { logit / penalty };
+                        // 🌟 JSON 필수 문법(따옴표, 괄호 등)이 페널티를 먹고 붕괴하는 현상 방어
+                        let mut apply_rep_penalty = true;
+                        if is_strict_json {
+                            if let Ok(piece) = self.tokenizer.token_decode(vec![t]) {
+                                let p = piece.trim();
+                                if p == "\"" || p == "{" || p == "[" || p == "}" || p == "]" || p == "," || p == ":" {
+                                    apply_rep_penalty = false;
+                                }
+                            }
+                        }
+
+                        if apply_rep_penalty {
+                            let logit = logits_vec[t as usize];
+                            logits_vec[t as usize] = if logit < 0.0 { logit * penalty } else { logit / penalty };
+                        }
                         set.insert(t);
                     }
                 }
@@ -332,6 +389,53 @@ impl Qwen3_5GenerateModel {
                 if !is_url_double {
                     if (double_slash_id as usize) < len { logits_vec[double_slash_id as usize] -= 10000.0; }
                     if (space_double_slash_id as usize) < len { logits_vec[space_double_slash_id as usize] -= 10000.0; }
+                }
+            }
+
+            // 🌟 [CRITICAL FIX] Qwen 3.5에도 완성된 ignore_list 방어 로직을 100% 이식합니다.
+            if let Some(ignores) = ignore_list {
+                for ign in ignores {
+                    // 🌟 [최강 방어 로직 통일] 이전 실패 데이터의 JSON 구조 전체({ 등)가 장부에 들어온 경우, 문법 파괴 예방을 위해 스킵 처리합니다.
+                    if is_strict_json && (ign.trim().starts_with('{') || ign.trim().starts_with('[')) {
+                        continue;
+                    }
+
+                    let ign_toks = self.tokenizer.text_encode_vec(ign.to_string(), false).unwrap_or_default();
+                    if ign_toks.is_empty() { continue; }
+                    
+                    let mut overlap = 0;
+                    for l in (1..=ign_toks.len().min(generate.len())).rev() {
+                        if generate.ends_with(&ign_toks[..l]) {
+                            overlap = l;
+                            break;
+                        }
+                    }
+                    
+                    if overlap < ign_toks.len() {
+                        let next_tok = ign_toks[overlap] as usize;
+                        if next_tok < len {
+                            let mut apply_bias = false;
+                            if overlap > 0 {
+                                apply_bias = true;
+                            } else if gen_text_buffer.ends_with('"') || gen_text_buffer.ends_with(':') || gen_text_buffer.ends_with(": ") {
+                                apply_bias = true;
+                            }
+                            
+                            // 🌟 [최강 방어 로직] 필수 JSON 문법(따옴표 등) 강제 보호
+                            if apply_bias && is_strict_json {
+                                if let Ok(piece) = self.tokenizer.token_decode(vec![next_tok as u32]) {
+                                    let p = piece.trim();
+                                    if p == "\"" || p == "{" || p == "[" || p == "}" || p == "]" || p == "," || p == ":" {
+                                        apply_bias = false;
+                                    }
+                                }
+                            }
+
+                            if apply_bias {
+                                logits_vec[next_tok] -= 10000.0;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -461,7 +565,9 @@ impl Qwen3_5GenerateModel {
         cancel_flag: Option<Arc<AtomicBool>>,
         last_token: Option<u32>,
         session_id: Option<String>,
-        kv_name: Option<String>
+        kv_name: Option<String>,
+        ignore_list: Option<&[String]>,
+        semantic_prejudice: Option<&str> // 🌟 [추가] Semantic Prejudice 타겟
     ) -> Result<GenerationResult> {
         let mut logit_processor = get_logit_processor(
             Some(mes.temperature.unwrap_or(0.0) as f32), 
@@ -559,6 +665,46 @@ impl Qwen3_5GenerateModel {
         let mut gen_text_buffer = String::new();
         let mut print_buffer = String::new();
 
+        // 🌟 [Contrastive Semantic Steering] 오답 레이블 진영 밀어내기 (Prejudice)
+        let mut semantic_prejudice_tensor: Option<Tensor> = None;
+        if let Some(target_text) = semantic_prejudice {
+            if let Ok(target_ids) = self.tokenizer.text_encode_vec(target_text.to_string(), false) {
+                if !target_ids.is_empty() {
+                    let calc_prej = || -> Result<Tensor> {
+                        let target_tensor = Tensor::from_vec(target_ids.clone(), (1, target_ids.len()), &self.device)?;
+                        let target_emb = self.qwen3_5.embedding_token_id(&target_tensor)?.to_dtype(DType::F32)?;
+                        let target_emb_sum = target_emb.sum_keepdim(1)?;
+                        let len_tensor = Tensor::new(target_ids.len() as f32, &self.device)?;
+                        let target_emb_avg = target_emb_sum.broadcast_div(&len_tensor)?;
+                        let target_vec = target_emb_avg.squeeze(0)?.squeeze(0)?;
+                        
+                        let all_embs = self.qwen3_5.get_embed_tokens().to_dtype(DType::F32)?;
+                        let target_norm = target_vec.sqr()?.sum_all()?.sqrt()?;
+                        let target_normalized = target_vec.broadcast_div(&target_norm)?;
+                        
+                        let all_sqr = all_embs.sqr()?.sum_keepdim(candle_core::D::Minus1)?;
+                        let all_norm = all_sqr.sqrt()?;
+                        let all_normalized = all_embs.broadcast_div(&all_norm)?;
+                        
+                        let sim = all_normalized.matmul(&target_normalized.unsqueeze(1)?)?.squeeze(1)?;
+                        // 🌟 [방향 B: Threshold 노이즈 게이트 + Exponential 증폭]
+                        let threshold = Tensor::new(0.65f32, &self.device)?;
+                        let one = Tensor::new(1.0f32, &self.device)?;
+                        let sim_relu = sim.broadcast_sub(&threshold)?.relu()?;
+                        let prejudice = sim_relu.affine(15.0, 0.0)?.exp()?.broadcast_sub(&one)?;
+                        Ok(prejudice)
+                    };
+                    match calc_prej() {
+                        Ok(prej) => {
+                            semantic_prejudice_tensor = Some(prej);
+                            println!("[SEMANTIC-PREJUDICE] Generated Vector Prejudice for target: '{}'", target_text);
+                        }
+                        Err(e) => println!("[SEMANTIC-PREJUDICE] Failed to calculate prejudice: {}", e),
+                    }
+                }
+            }
+        }
+
         for i in 0..sample_len {
             if let Some(flag) = &cancel_flag {
                 if flag.load(Ordering::Relaxed) {
@@ -580,18 +726,40 @@ impl Qwen3_5GenerateModel {
                 kv_name.clone()
             ).await?;
             
-            let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?.contiguous()?;
-            let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+            let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
+
+            // 🌟 오답 진영 억제력(Sub) 적용
+            let logits = if let Some(ref prej) = semantic_prejudice_tensor {
+                logits.broadcast_sub(prej)?
+            } else {
+                logits
+            };
+
+            let mut logits_vec = logits.to_vec1::<f32>()?;
             let len = logits_vec.len();
 
             if !generate.is_empty() {
-                let penalty = 1.1; 
+                // 🌟 [CRITICAL FIX] 반복을 끊기 위해 페널티를 유지하되, JSON 필수 문법만 보호합니다.
+                let penalty = self.repeat_penalty; 
                 let mut set = std::collections::HashSet::new();
                 let start_at = generate.len().saturating_sub(self.repeat_last_n);
                 for &t in &generate[start_at..] {
                     if !set.contains(&t) && (t as usize) < len {
-                        let logit = logits_vec[t as usize];
-                        logits_vec[t as usize] = if logit < 0.0 { logit * penalty } else { logit / penalty };
+                        // 🌟 JSON 필수 문법(따옴표, 괄호 등)이 페널티를 먹고 붕괴하는 현상 방어
+                        let mut apply_rep_penalty = true;
+                        if is_strict_json {
+                            if let Ok(piece) = self.tokenizer.token_decode(vec![t]) {
+                                let p = piece.trim();
+                                if p == "\"" || p == "{" || p == "[" || p == "}" || p == "]" || p == "," || p == ":" {
+                                    apply_rep_penalty = false;
+                                }
+                            }
+                        }
+
+                        if apply_rep_penalty {
+                            let logit = logits_vec[t as usize];
+                            logits_vec[t as usize] = if logit < 0.0 { logit * penalty } else { logit / penalty };
+                        }
                         set.insert(t);
                     }
                 }
@@ -610,6 +778,53 @@ impl Qwen3_5GenerateModel {
                 if !is_url_double {
                     if (double_slash_id as usize) < len { logits_vec[double_slash_id as usize] -= 10000.0; }
                     if (space_double_slash_id as usize) < len { logits_vec[space_double_slash_id as usize] -= 10000.0; }
+                }
+            }
+
+            // 🌟 [CRITICAL FIX] Qwen 3.5에도 완성된 ignore_list 방어 로직을 100% 이식합니다.
+            if let Some(ignores) = ignore_list {
+                for ign in ignores {
+                    // 🌟 [최강 방어 로직 통일] 이전 실패 데이터의 JSON 구조 전체({ 등)가 장부에 들어온 경우, 문법 파괴 예방을 위해 스킵 처리합니다.
+                    if is_strict_json && (ign.trim().starts_with('{') || ign.trim().starts_with('[')) {
+                        continue;
+                    }
+
+                    let ign_toks = self.tokenizer.text_encode_vec(ign.to_string(), false).unwrap_or_default();
+                    if ign_toks.is_empty() { continue; }
+                    
+                    let mut overlap = 0;
+                    for l in (1..=ign_toks.len().min(generate.len())).rev() {
+                        if generate.ends_with(&ign_toks[..l]) {
+                            overlap = l;
+                            break;
+                        }
+                    }
+                    
+                    if overlap < ign_toks.len() {
+                        let next_tok = ign_toks[overlap] as usize;
+                        if next_tok < len {
+                            let mut apply_bias = false;
+                            if overlap > 0 {
+                                apply_bias = true;
+                            } else if gen_text_buffer.ends_with('"') || gen_text_buffer.ends_with(':') || gen_text_buffer.ends_with(": ") {
+                                apply_bias = true;
+                            }
+                            
+                            // 🌟 [최강 방어 로직] 필수 JSON 문법(따옴표 등) 강제 보호
+                            if apply_bias && is_strict_json {
+                                if let Ok(piece) = self.tokenizer.token_decode(vec![next_tok as u32]) {
+                                    let p = piece.trim();
+                                    if p == "\"" || p == "{" || p == "[" || p == "}" || p == "]" || p == "," || p == ":" {
+                                        apply_bias = false;
+                                    }
+                                }
+                            }
+
+                            if apply_bias {
+                                logits_vec[next_tok] -= 10000.0;
+                            }
+                        }
+                    }
                 }
             }
 

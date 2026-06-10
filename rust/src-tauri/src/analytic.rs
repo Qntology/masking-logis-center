@@ -91,7 +91,7 @@ pub async fn process_analytic_task(
     
     // 4. LLM 모델 추론 실행
     let res_text = if let Some(gen) = model.qwen3_5_generator.lock().await.as_mut() {
-        gen.generate(params, Some(cancellation_token.clone()), Some(format!("{}_analytic", task.id)), None).await?
+        gen.generate(params, Some(cancellation_token.clone()), Some(format!("{}_analytic", task.id)), None, None, None).await?
     } else {
         return Err(anyhow::anyhow!("Qwen 3.5 Generator not available"));
     };

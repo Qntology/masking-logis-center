@@ -226,11 +226,15 @@ class GlobalTaskManager {
         if (task.type === "ai_search") {
             invoke("ai_search_complex", task.payload).catch(async e => {
                 console.error(`[QUEUE] Task execution failed:`, e);
+                // 🌟 [CRITICAL FIX] 백엔드 호출 실패 시 무한 스피너 방어 및 에러 UI 강제 렌더링
+                await renderProgressToUI({ task_id: task.taskId, category: "Error", summary: `Task failed: ${e}`, spinner: "❌" });
                 await this.release(task.taskId, task.taskId);
             });
         } else {
             emit("new-task-from-browser", task.payload).catch(async e => {
                 console.error(`[QUEUE] Task execution failed:`, e);
+                // 🌟 [CRITICAL FIX] 백엔드 호출 실패 시 무한 스피너 방어 및 에러 UI 강제 렌더링
+                await renderProgressToUI({ task_id: task.taskId, category: "Error", summary: `Task failed: ${e}`, spinner: "❌" });
                 await this.release(task.taskId, task.taskId);
             });
         }
@@ -2290,7 +2294,11 @@ btnExtract?.addEventListener("click", async () => {
     } catch (e) {
         console.error("[WIDGET] Extraction failed:", e);
         extractClickLock = false;
-        // 다른 작업이 정상적으로 돌아가고 있을 수 있으므로 sys_lock이나 전역 스피너를 함부로 날리지 않습니다.
+        
+        // 🌟 [CRITICAL FIX] 로컬 파이프라인에서 에러가 발생하여 백엔드로 넘어가지 못한 경우 무한 스피너 방어
+        isExtracting = false;
+        stopSpinner();
+        
         updateExtractButtonVisibility();
     } finally {
         // 🌟 [CRITICAL FIX] Rust 백엔드(DB)에 작업이 완전히 등재되도록 1.5초간 여유를 줍니다.
@@ -2307,6 +2315,17 @@ listen("task-db-registered", async (event: any) => {
     const p = event.payload;
     console.log(`[WIDGET] Task ${p.task_id} successfully registered in Backend DB.`);
     
+    // 🌟 [CRITICAL FIX] 이미 해당 테스크가 UI에 존재하고, 그 상태가 진행 중(1)이거나 완료(9)라면,
+    // 늦게 도착한 초기화 이벤트(task-db-registered)가 텍스트를 덮어씌우는 것을 원천 차단합니다!
+    const existingEl = document.getElementById(p.task_id);
+    if (existingEl) {
+        const cachedStatus = parseInt(existingEl.dataset.status || "0");
+        if ([1, 2, 6, 9].includes(cachedStatus)) {
+            console.log(`[WIDGET] Task ${p.task_id} is already in state ${cachedStatus}. Ignoring late registration event.`);
+            return;
+        }
+    }
+
     await renderMessage({
         id: p.task_id,
         task_id: p.task_id,
@@ -2370,43 +2389,46 @@ listen("extraction-progress", async (event: any) => {
 
         // 🌟 [CRITICAL FIX] #btn-extract 클릭 후 LanceDB 등록(Done)이 완료되면 지연 없이 즉시 Pages 트리를 렌더링합니다!
         if (payload.category === "Done") {
-            await renderNavigation();
-        }
-
-        // 🌟 [추가] 검색 작업이 완료(Done)되었을 경우, 백엔드가 보내준 데이터를 결과창에 렌더링합니다.
-        if (payload.task_id.startsWith("search_") && payload.category === "Done" && payload.data) {
-            const response = payload.data; 
-            if (aiResultsArea && aiResultsContent) {
-                aiResultsArea.style.display = "block";
-                aiResultsTitle.innerText = "🧠 AI Deep Analysis";
-                
-                let html = `<div><strong>Query Intent:</strong>`;
-                if (response.structured && response.structured.context) {
-                    response.structured.context.forEach((ctx: any) => {
-                        html += `<div>• ${ctx.text} <span>[${ctx.type}]</span></div>`;
-                    });
+            // 🌟 [버그 수정] 서버 모드이든 로컬 모드이든 무조건 로컬 LanceDB의 최신 전처리 결과를 Dexie에 먼저 덮어써야 합니다!
+            Promise.all([
+                invoke<any[]>("get_known_users"),
+                invoke<any[]>("get_known_pages") 
+            ]).then(async ([users, pages]) => {
+                console.log("\n[TRACKING-1] Rust(LanceDB)에서 가져온 get_known_users 목록 수:", users ? users.length : 0);
+                if (users && users.length > 0) {
+                    const teamDocs = users.filter(u => u.type === "team" || (u.data && u.data.type === "team"));
+                    console.log("[TRACKING-2] 그 중 'team' 타입 문서 파악:", teamDocs);
+                    if (teamDocs.length > 0) {
+                        // 🌟 [CRITICAL FIX] 로그 출력을 위해 json_data 문자열을 객체로 안전하게 파싱합니다.
+                        let tData: any = null;
+                        if (teamDocs[0].json_data && typeof teamDocs[0].json_data === "string") {
+                            try { tData = JSON.parse(teamDocs[0].json_data); } catch(e) {}
+                        }
+                        if (!tData && teamDocs[0].data) {
+                            tData = typeof teamDocs[0].data === "string" ? JSON.parse(teamDocs[0].data) : teamDocs[0].data;
+                        }
+                        tData = tData || teamDocs[0];
+                        
+                        console.log("[TRACKING-3] 화면에 반영될 최신 Base 통계:", JSON.stringify(tData.base?.pages, null, 2));
+                    } else {
+                        console.warn("[TRACKING-WARN] get_known_users에 'team' 문서가 포함되지 않았습니다! (Limit 제한 의심)");
+                    }
                 }
-                html += `</div>`;
                 
-                if(!response.results || response.results.length === 0) {
-                    html += `<div class="empty">No matching data found</div>`;
-                } else {
-                    html += response.results.map((res: any) => 
-                        `<div>
-                           <div>
-                             <strong>${res.context_type} (Score: ${res.score.toFixed(2)})</strong>
-                             <button class="link-btn" onclick="document.dispatchEvent(new CustomEvent('show-doc', {detail:'${res.id}'}))">View Detail</button>
-                           </div>
-                           <div>${res.text}</div>
-                         </div>`
-                    ).join("");
+                // 🌟 [CRITICAL FIX] 프론트엔드 최신화 버그 해결! 서버 동기화(네트워크 상태)와 무관하게, 백엔드 로컬 통계가 갱신되었으므로 무조건 즉시 UI를 새로고침합니다.
+                await renderNavigation();
+                if (currentTab === "list") {
+                    refreshList();
+                } else if (currentTab === "settings") {
+                    // 🌟 [CRITICAL FIX] 완료 즉시 채팅 화면도 최신 DB 상태로 갱신하여 새로고침 없이도 즉각 반영되게 만듭니다!
+                    fetchChatHistory(false, true);
                 }
-                aiResultsContent.innerHTML = html;
-                aiResultsArea.scrollIntoView({ behavior: 'smooth' });
-
-                // 🌟 추가된 코드: 생성된 검색 결과 HTML을 로컬 DB에 영구 저장합니다.
-                kvSet(`search_res_${payload.task_id}`, html).catch(e => console.error("Failed to cache search result:", e));
-            }
+                
+                // 🌟 UI를 100% 최신 상태로 바꾼 뒤에 백그라운드에서 조용히 서버와 동기화를 진행합니다.
+                if (currentSession.email) {
+                    syncData(); 
+                }
+            });
         }
     }
 

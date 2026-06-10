@@ -493,6 +493,15 @@ async fn process_task(
 
             let display_summary = format!("{} - {}", extracted_title, extracted_desc);
 
+            // 🌟 [CRITICAL FIX] 상태(1)가 UI에 덮어씌워지는 것을 방어하기 위해 Done 이벤트 발송 직전에 DB도 9로 굳힙니다.
+            {
+                let store_guard = store_mutex.lock().await;
+                if let Some(db) = store_guard.as_ref() {
+                    let _ = db.update_task_status(&task.id, 9).await;
+                    let _ = db.update_message_status(&task.id, 9, Some(&display_summary)).await;
+                }
+            }
+
             let payload = json!({
                 "task_id": task.id, 
                 "category": "Done", 
@@ -779,8 +788,8 @@ async fn process_task(
                                         ..Default::default()
                                     };
                                     // 🌟 [CRITICAL FIX] Qwen(대형 문맥) 추론 시 session_id와 kv_name을 주입하여 SSD 오프로딩 및 청크 병렬 처리가 동작하도록 수정합니다.
-                                    let res = gen.generate(params, Some(cancel_clone), None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
-                                    // let res = gen.generate(params, Some(cancel_clone), Some(session_id_clone), Some("masking".to_string())).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
+                                    let res = gen.generate(params, Some(cancel_clone), None, None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
+                                    // let res = gen.generate(params, Some(cancel_clone), Some(session_id_clone), Some("masking".to_string()), None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
                                     
                                     let _ = gen.clear_kv_cache();
                                     
@@ -948,10 +957,21 @@ async fn process_task(
             }
         }
 
+        let summary_msg = "Extraction & Masking complete. Refreshing list...".to_string();
+
+        // 🌟 [CRITICAL FIX] 상태(1)가 UI에 덮어씌워지는 것을 방어하기 위해 Done 이벤트 발송 직전에 DB도 9로 굳힙니다.
+        {
+            let store_guard = store_mutex.lock().await;
+            if let Some(db) = store_guard.as_ref() {
+                let _ = db.update_task_status(&task.id, 9).await;
+                let _ = db.update_message_status(&task.id, 9, Some(&summary_msg)).await;
+            }
+        }
+
         let payload = json!({
             "task_id": task.id,
             "category": "Done",
-            "summary": "Extraction & Masking complete. Refreshing list...",
+            "summary": summary_msg,
             "spinner": "✅",
             "data": null
         });
@@ -1192,6 +1212,15 @@ async fn process_task(
         } else {
             format!("{} - {}", extracted_title, extracted_desc)
         };
+
+        // 🌟 [CRITICAL FIX] 상태(1)가 UI에 덮어씌워지는 것을 방어하기 위해 Done 이벤트 발송 직전에 DB도 9로 굳힙니다.
+        {
+            let store_guard = store_mutex.lock().await;
+            if let Some(db) = store_guard.as_ref() {
+                let _ = db.update_task_status(&task.id, 9).await;
+                let _ = db.update_message_status(&task.id, 9, Some(&display_summary)).await;
+            }
+        }
 
         let payload = json!({
             "task_id": task.id, 

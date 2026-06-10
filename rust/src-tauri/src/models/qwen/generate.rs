@@ -1,7 +1,7 @@
 use crate::models::qwen::quantized_model::{KVLocation, KVBlock, KVRegistry, BitKVMetadata, QuantizedQwenVLModel, MemorySlot};
 use anyhow::{Result, anyhow};
 use candle_core::{quantized::gguf_file, DType, Device, Tensor};
-use candle_nn::VarBuilder;
+use candle_nn::{VarBuilder, Module}; // 🌟 [CRITICAL FIX] Module 트레이트를 추가하여 embed_tokens.forward()를 활성화합니다.
 use std::io::Write;
 
 use crate::{
@@ -286,11 +286,7 @@ fn spawn_slot_worker(mut rx: mpsc::Receiver<SlotTask>) {
                     let tmp_path = tp_clone.with_extension("tmp");
                     candle_core::safetensors::save(&ts, &tmp_path)?;
                     
-                    let plain_data = std::fs::read(&tmp_path)?;
-                    let encrypted_data = crate::utils::crypto::encrypt_data(&plain_data)?;
-                    
-                    std::fs::write(&tp_clone, encrypted_data)?;
-                    let _ = std::fs::remove_file(tmp_path);
+                    std::fs::rename(&tmp_path, &tp_clone)?;
                     
                     Ok::<_, anyhow::Error>(())
                 }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Thread error: {}", e)));
@@ -426,42 +422,40 @@ fn spawn_slot_worker(mut rx: mpsc::Receiver<SlotTask>) {
                         
                         let file_path = provided_path.join(format!("l{}.st", target_layer));
                         if file_path.is_file() {
-                            if let Ok(encrypted_content) = load_kv_block(&file_path) {
-                                if let Ok(content) = crate::utils::crypto::decrypt_data(&encrypted_content) {
-                                    if let Ok(st) = safetensors::SafeTensors::deserialize(&content) {
-                                        let prefix = format!("b{}_l{}_", b_idx_off, target_layer);
-                                        let get_t = |s: &str| st.tensor(&format!("{}{}", prefix, s)).ok();
-                                    
-                                        if let (Some(kd), Some(vd), Some(sh)) = (get_t("k_data"), get_t("v_data"), get_t("k_shape")) {
-                                            let sh_u32: Vec<u32> = sh.data().chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-                                            let file_shape: Vec<usize> = sh_u32.iter().map(|&x| x as usize).collect();
+                            if let Ok(content) = load_kv_block(&file_path) {
+                                if let Ok(st) = safetensors::SafeTensors::deserialize(&content) {
+                                    let prefix = format!("b{}_l{}_", b_idx_off, target_layer);
+                                    let get_t = |s: &str| st.tensor(&format!("{}{}", prefix, s)).ok();
+                                
+                                    if let (Some(kd), Some(vd), Some(sh)) = (get_t("k_data"), get_t("v_data"), get_t("k_shape")) {
+                                        let sh_u32: Vec<u32> = sh.data().chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+                                        let file_shape: Vec<usize> = sh_u32.iter().map(|&x| x as usize).collect();
 
-                                            let dev = &Device::Cpu;
-                                            // 저장된 파일의 DType을 감지하여 FP8, F32 모두 호환되도록 로드합니다.
-                                            let saved_dtype = match kd.dtype() {
-                                                safetensors::Dtype::F8_E4M3 => DType::F8E4M3,
-                                                safetensors::Dtype::F32 => DType::F32,
-                                                safetensors::Dtype::F16 => DType::F16,
-                                                _ => DType::BF16,
-                                            };
-                                            
-                                            let mut kd_t = Tensor::from_raw_buffer(kd.data(), saved_dtype, &file_shape, dev).unwrap_or_else(|_| Tensor::zeros(file_shape.clone(), saved_dtype, dev).unwrap());
-                                            let mut vd_t = Tensor::from_raw_buffer(vd.data(), saved_dtype, &file_shape, dev).unwrap_or_else(|_| Tensor::zeros(file_shape.clone(), saved_dtype, dev).unwrap());
-                                            
-                                            if load.is_cpu {
-                                                kd_t = kd_t.to_dtype(DType::F32).unwrap_or(kd_t);
-                                                vd_t = vd_t.to_dtype(DType::F32).unwrap_or(vd_t);
-                                            }
-                                            let meta = BitKVMetadata { k_data: kd_t, v_data: vd_t, original_shape: file_shape };
-                                            
-                                            if let Ok(mut r) = reg.entries.write() {
-                                                if b_idx < r.len() {
-                                                    {
-                                                        let mut cache = r[b_idx].bitkv_cache.write().unwrap();
-                                                        cache[target_layer] = Some(meta);
-                                                    }
-                                                    r[b_idx].location[target_layer] = KVLocation::RAM;
+                                        let dev = &Device::Cpu;
+                                        // 저장된 파일의 DType을 감지하여 FP8, F32 모두 호환되도록 로드합니다.
+                                        let saved_dtype = match kd.dtype() {
+                                            safetensors::Dtype::F8_E4M3 => DType::F8E4M3,
+                                            safetensors::Dtype::F32 => DType::F32,
+                                            safetensors::Dtype::F16 => DType::F16,
+                                            _ => DType::BF16,
+                                        };
+                                        
+                                        let mut kd_t = Tensor::from_raw_buffer(kd.data(), saved_dtype, &file_shape, dev).unwrap_or_else(|_| Tensor::zeros(file_shape.clone(), saved_dtype, dev).unwrap());
+                                        let mut vd_t = Tensor::from_raw_buffer(vd.data(), saved_dtype, &file_shape, dev).unwrap_or_else(|_| Tensor::zeros(file_shape.clone(), saved_dtype, dev).unwrap());
+                                        
+                                        if load.is_cpu {
+                                            kd_t = kd_t.to_dtype(DType::F32).unwrap_or(kd_t);
+                                            vd_t = vd_t.to_dtype(DType::F32).unwrap_or(vd_t);
+                                        }
+                                        let meta = BitKVMetadata { k_data: kd_t, v_data: vd_t, original_shape: file_shape };
+                                        
+                                        if let Ok(mut r) = reg.entries.write() {
+                                            if b_idx < r.len() {
+                                                {
+                                                    let mut cache = r[b_idx].bitkv_cache.write().unwrap();
+                                                    cache[target_layer] = Some(meta);
                                                 }
+                                                r[b_idx].location[target_layer] = KVLocation::RAM;
                                             }
                                         }
                                     }
@@ -483,6 +477,23 @@ impl Drop for ReadSlotGuard { fn drop(&mut self) { if self.active { let sid = se
 pub enum ModelVariant { Standard(QwenVLModel), QuantizedVL(QuantizedQwenVLModel), QuantizedText(crate::models::qwen::quantized_model::QuantizedQwenTextModel) }
 
 impl ModelVariant {
+    // 🌟 [추가] Semantic Bias 연산을 위해 전체 단어장의 벡터(Weight)를 그대로 반환합니다.
+    pub fn get_embed_tokens(&self) -> Result<Tensor> {
+        match self {
+            Self::Standard(m) => Ok(m.language_model.embed_tokens.embeddings().clone()),
+            Self::QuantizedVL(m) => Ok(m.language_model.embed_tokens.embeddings().clone()),
+            Self::QuantizedText(m) => Ok(m.language_model.embed_tokens.embeddings().clone()),
+        }
+    }
+
+    pub fn embedding_token_id(&self, input_ids: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Standard(m) => Ok(m.language_model.embed_tokens.forward(input_ids)?),
+            Self::QuantizedVL(m) => Ok(m.language_model.embed_tokens.forward(input_ids)?),
+            Self::QuantizedText(m) => Ok(m.language_model.embed_tokens.forward(input_ids)?),
+        }
+    }
+
     pub async fn forward(&mut self, input_ids: &Tensor, pixel_values: Option<&Tensor>, image_grid_thw: Option<&Tensor>, video_pixel_values: Option<&Tensor>, video_grid_thw: Option<&Tensor>, cache_position: Option<&Tensor>, seqlen_offset: usize, total_len: usize, session_id: Option<String>, kv_name: Option<String>) -> Result<Tensor> {
         match self {
             Self::Standard(m) => m.forward(input_ids, pixel_values, image_grid_thw, video_pixel_values, video_grid_thw, cache_position, seqlen_offset),
@@ -590,7 +601,8 @@ impl QwenVLGenerateModel {
         Ok(total_toks)
     }
 
-    pub async fn generate(&mut self, mes: ChatCompletionParameters, cancel_flag: Option<Arc<AtomicBool>>, session_id: Option<String>, _kv_name: Option<String>) -> Result<String> {
+    // 🌟 [추가] semantic_prejudice 파라미터를 받습니다.
+    pub async fn generate(&mut self, mes: ChatCompletionParameters, cancel_flag: Option<Arc<AtomicBool>>, session_id: Option<String>, _kv_name: Option<String>, semantic_prejudice: Option<&str>) -> Result<String> {
         let mut is_reference_snapshot = false;
         if let Some(s_id) = &session_id {
             let snapshot_root = crate::utils::paths::get_kv_dir(None).join(s_id);
@@ -602,7 +614,7 @@ impl QwenVLGenerateModel {
             ];
 
             for snapshot_path in paths_to_try {
-                if snapshot_path.exists() && fs::read_dir(&snapshot_path).map(|mut d| d.next().is_some()).unwrap_or(false) {
+                if snapshot_path.exists() && std::fs::read_dir(&snapshot_path).map(|mut d| d.next().is_some()).unwrap_or(false) {
                     println!("[GEN-LOAD] Loading existing snapshot from {:?}...", snapshot_path);
                     
                     if snapshot_path.to_string_lossy().contains("reference") {
@@ -614,10 +626,10 @@ impl QwenVLGenerateModel {
                     if is_reference_snapshot {
                         println!("[GEN-LOAD] Reference snapshot detected. Resetting Registry Entry states for Full 28-Layer Prefill...");
                         
-                        let reset_reg = |reg: &KVRegistry| {
+                        let reset_reg = |reg: &crate::models::qwen::quantized_model::KVRegistry| {
                             let mut entries = reg.entries.write().unwrap();
                             for (i, entry) in entries.iter_mut().enumerate() {
-                                for loc in entry.location.iter_mut() { *loc = KVLocation::RAM; }
+                                for loc in entry.location.iter_mut() { *loc = crate::models::qwen::quantized_model::KVLocation::RAM; }
                                 for slot in entry.slot_ids.iter_mut() { *slot = None; }
                                 entry.token_start = i * 1024; 
                                 entry.token_len = 0;
@@ -627,10 +639,10 @@ impl QwenVLGenerateModel {
                             }
                         };
 
-                        if let ModelVariant::QuantizedVL(m) = &mut self.qwen {
+                        if let crate::models::qwen::generate::ModelVariant::QuantizedVL(m) = &mut self.qwen {
                             reset_reg(&m.language_model.registry);
                             let _ = m.language_model.truncate_kv_cache(0);
-                        } else if let ModelVariant::QuantizedText(m) = &mut self.qwen {
+                        } else if let crate::models::qwen::generate::ModelVariant::QuantizedText(m) = &mut self.qwen {
                             reset_reg(&m.language_model.registry);
                             let _ = m.language_model.truncate_kv_cache(0);
                         }
@@ -675,38 +687,99 @@ impl QwenVLGenerateModel {
         };
         
         let total_tokens_after_prefill = offset + input_ids.dim(1)?;
-    
-        wait_for_global_io().await; 
+
+        // 🌟 [Contrastive Semantic Steering] 오답 레이블 진영 밀어내기 (Prejudice)
+        let mut semantic_prejudice_tensor: Option<Tensor> = None;
+        if let Some(target_text) = semantic_prejudice {
+            if let Ok(target_ids) = self.tokenizer.text_encode_vec(target_text.to_string(), false) {
+                if !target_ids.is_empty() {
+                    let calc_prej = || -> Result<Tensor> {
+                        let target_tensor = Tensor::from_vec(target_ids.clone(), (1, target_ids.len()), &self.text_device)?;
+                        let target_emb = self.qwen.embedding_token_id(&target_tensor)?.to_dtype(DType::F32)?;
+                        let target_emb_sum = target_emb.sum_keepdim(1)?;
+                        let len_tensor = Tensor::new(target_ids.len() as f32, &self.text_device)?;
+                        let target_emb_avg = target_emb_sum.broadcast_div(&len_tensor)?;
+                        let target_vec = target_emb_avg.squeeze(0)?.squeeze(0)?;
+                        
+                        let all_embs = self.qwen.get_embed_tokens()?.to_dtype(DType::F32)?;
+                        let target_norm = target_vec.sqr()?.sum_all()?.sqrt()?;
+                        let target_normalized = target_vec.broadcast_div(&target_norm)?;
+                        
+                        let all_sqr = all_embs.sqr()?.sum_keepdim(candle_core::D::Minus1)?;
+                        let all_norm = all_sqr.sqrt()?;
+                        let all_normalized = all_embs.broadcast_div(&all_norm)?;
+                        
+                        let sim = all_normalized.matmul(&target_normalized.unsqueeze(1)?)?.squeeze(1)?;
+                        // 🌟 [방향 B: Threshold 노이즈 게이트 + Exponential 증폭]
+                        let threshold = Tensor::new(0.65f32, &self.text_device)?;
+                        let one = Tensor::new(1.0f32, &self.text_device)?;
+                        let sim_relu = sim.broadcast_sub(&threshold)?.relu()?;
+                        let prejudice = sim_relu.affine(15.0, 0.0)?.exp()?.broadcast_sub(&one)?;
+                        Ok(prejudice)
+                    };
+                    match calc_prej() {
+                        Ok(prej) => {
+                            semantic_prejudice_tensor = Some(prej);
+                            println!("[SEMANTIC-PREJUDICE] Generated Vector Prejudice for target: '{}'", target_text);
+                        }
+                        Err(e) => println!("[SEMANTIC-PREJUDICE] Failed to calculate prejudice: {}", e),
+                    }
+                }
+            }
+        }
+
+        // 🌟 [CRITICAL FIX] qwen3의 청크 루프 찌꺼기를 지우고 원래 0.6B의 정상적인 단일 Forward 연산으로 복구합니다!
+        crate::models::qwen::generate::wait_for_global_io().await; 
         let mut logits = self.qwen.forward(&input_ids, None, None, None, None, None, offset, total_tokens_after_prefill, session_id.clone(), _kv_name.clone()).await?;
         
         println!("[DEBUG-GEN] Prefill Complete. Sampling first token...");
 
         let mut gen_ids = vec![];
+        let think_token_id = self.tokenizer.text_encode_vec("<think>".to_string(), false).unwrap_or_default().into_iter().next().unwrap_or(999999);
+        let open_bracket_id = self.tokenizer.text_encode_vec("{".to_string(), false).unwrap_or_default().into_iter().next().unwrap_or(123);
+        let lt_id = self.tokenizer.text_encode_vec("<".to_string(), false).unwrap_or_default().into_iter().next().unwrap_or(999999);
+        let enter_id = self.tokenizer.text_encode_vec("\n".to_string(), false).unwrap_or_default().into_iter().next().unwrap_or(999999);
 
-        let think_token_id = self.tokenizer.text_encode_vec("<think>".to_string(), false).ok().and_then(|v: Vec<u32>| v.first().cloned()).unwrap_or(999999);
-        let open_bracket_id = self.tokenizer.text_encode_vec("{".to_string(), false).ok().and_then(|v: Vec<u32>| v.first().cloned()).unwrap_or(123);
-        let lt_id = self.tokenizer.text_encode_vec("<".to_string(), false).ok().and_then(|v: Vec<u32>| v.first().cloned()).unwrap_or(999999);
-        let enter_id = self.tokenizer.text_encode_vec("\n".to_string(), false).ok().and_then(|v: Vec<u32>| v.first().cloned()).unwrap_or(999999);
-
-        let slash_id = self.tokenizer.text_encode_vec("/".to_string(), false).ok().and_then(|v: Vec<u32>| v.first().cloned()).unwrap_or(999999);
-        let double_slash_id = self.tokenizer.text_encode_vec("//".to_string(), false).ok().and_then(|v: Vec<u32>| v.first().cloned()).unwrap_or(999999);
-        let space_double_slash_id = self.tokenizer.text_encode_vec(" //".to_string(), false).ok().and_then(|v: Vec<u32>| v.first().cloned()).unwrap_or(999999);
+        let slash_id = self.tokenizer.text_encode_vec("/".to_string(), false).unwrap_or_default().into_iter().next().unwrap_or(999999);
+        let double_slash_id = self.tokenizer.text_encode_vec("//".to_string(), false).unwrap_or_default().into_iter().next().unwrap_or(999999);
+        let space_double_slash_id = self.tokenizer.text_encode_vec(" //".to_string(), false).unwrap_or_default().into_iter().next().unwrap_or(999999);
 
         let is_strict_json = input.replace_text.contains("/no_think") || input.replace_text.contains("RETURN JSON ONLY");
 
         for i in 0..mes.max_tokens.unwrap_or(2048) {
-            if let Some(flag) = &cancel_flag { if flag.load(Ordering::Relaxed) { break; } }
+            if let Some(flag) = &cancel_flag { if flag.load(std::sync::atomic::Ordering::Relaxed) { break; } }
             
-            let mut logits_vec = logits.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+            let logits_squeezed = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
+
+            // 🌟 오답 진영 억제력(Sub) 적용
+            let logits_steered = if let Some(ref prej) = semantic_prejudice_tensor {
+                logits_squeezed.broadcast_sub(prej)?
+            } else {
+                logits_squeezed
+            };
+
+            let mut logits_vec = logits_steered.flatten_all()?.to_vec1::<f32>()?;
             let len = logits_vec.len();
 
             if !gen_ids.is_empty() {
                 let penalty = 1.2;
                 let mut set = std::collections::HashSet::new();
-                for &t in &gen_ids {
+                let start_at = gen_ids.len().saturating_sub(64);
+                for &t in &gen_ids[start_at..] {
                     if !set.contains(&t) && (t as usize) < len {
-                        let logit = logits_vec[t as usize];
-                        logits_vec[t as usize] = if logit < 0.0 { logit * penalty } else { logit / penalty };
+                        let mut apply_rep_penalty = true;
+                        if is_strict_json {
+                            if let Ok(piece) = self.tokenizer.token_decode(vec![t]) {
+                                let p = piece.trim();
+                                if p == "\"" || p == "{" || p == "[" || p == "}" || p == "]" || p == "," || p == ":" {
+                                    apply_rep_penalty = false;
+                                }
+                            }
+                        }
+                        if apply_rep_penalty {
+                            let logit = logits_vec[t as usize];
+                            logits_vec[t as usize] = if logit < 0.0 { logit * penalty } else { logit / penalty };
+                        }
                         set.insert(t);
                     }
                 }
@@ -714,7 +787,7 @@ impl QwenVLGenerateModel {
 
             if (think_token_id as usize) < len { logits_vec[think_token_id as usize] -= 1000.0; }
             if (lt_id as usize) < len { logits_vec[lt_id as usize] -= 10.0; }
-
+            
             if is_strict_json {
                 let is_url_single = gen_text.ends_with("http:/") || gen_text.ends_with("https:/");
                 let is_url_double = gen_text.ends_with("http:") || gen_text.ends_with("https:");
@@ -727,7 +800,7 @@ impl QwenVLGenerateModel {
                     if (space_double_slash_id as usize) < len { logits_vec[space_double_slash_id as usize] -= 10000.0; }
                 }
             }
-            
+
             if i == 0 {
                 if (self.eos_token_id1 as usize) < len { logits_vec[self.eos_token_id1 as usize] = -10000.0; }
                 if (self.eos_token_id2 as usize) < len { logits_vec[self.eos_token_id2 as usize] = -10000.0; }
@@ -740,21 +813,19 @@ impl QwenVLGenerateModel {
             }
 
             let logits_tensor = Tensor::from_vec(logits_vec, (len,), &Device::Cpu)?;
-            let mut next_id = lp.sample(&logits_tensor)?;
+            let mut next_token = lp.sample(&logits_tensor)?;
             
             if i == 0 {
                 if is_strict_json {
-                    next_id = open_bracket_id;
-                } else if next_id == self.eos_token_id1 || next_id == self.eos_token_id2 {
-                    println!("[DEBUG-GEN] EOS detected on first token. Overriding with '{{' to force JSON.");
-                    next_id = open_bracket_id;
+                    next_token = open_bracket_id;
+                } else if next_token == self.eos_token_id1 || next_token == self.eos_token_id2 {
+                    next_token = open_bracket_id;
                 }
             }
 
-            let is_eos = next_id == self.eos_token_id1 || next_id == self.eos_token_id2;
-
-            gen_ids.push(next_id);
-            if let Ok(piece) = self.tokenizer.token_decode(vec![next_id]) {
+            let is_eos = next_token == self.eos_token_id1 || next_token == self.eos_token_id2;
+            gen_ids.push(next_token);
+            if let Ok(piece) = self.tokenizer.token_decode(vec![next_token]) {
                 gen_text.push_str(&piece);
             }
 
@@ -767,22 +838,16 @@ impl QwenVLGenerateModel {
                     else if c == '}' { depth -= 1; }
                 }
                 if has_started && depth == 0 && gen_text.trim_end().ends_with('}') {
-                    println!("[DEBUG-GEN] Balanced JSON detected (Depth 0). Stopping at token {}.", i + 1);
                     is_json_finished = true; 
                 }
             }
             
             let current_pos = total_tokens_after_prefill + i as usize;
             
-            
             if true {
                 let pct = if is_json_finished || is_eos {
                     100
                 } else {
-                    
-                    // 기존 가속도(-0.05)가 너무 빨라 20토큰 만에 69%에 도달한 뒤 100%로 튀는 현상을 방지합니다.
-                    // 일반적인 JSON 응답 길이(50~200토큰)에 맞춰 -0.012로 조정하여 부드럽고 정확하게 증가하도록 개선했습니다.
-                    // (예: 10토큰=25%, 50토큰=53%, 100토큰=73%, 200토큰=91%)
                     15 + (84.0 * (1.0 - (-0.012 * (i as f32)).exp())) as i32
                 };
 
@@ -795,7 +860,6 @@ impl QwenVLGenerateModel {
                         
                         let current_cat = crate::CURRENT_UI_CATEGORY.read().unwrap().clone();
 
-                        
                         let summary_msg = if current_cat.contains("Classification") {
                             format!("Analyzing structure ({}%)...", pct)
                         } else if task_id.starts_with("search_") {
@@ -815,16 +879,15 @@ impl QwenVLGenerateModel {
                 
                 if !is_strict_json {
                     print!("\r[DECODING] {} tokens generated (Context: {})    ", i + 1, current_pos + 1);
+                    use std::io::Write;
                     let _ = std::io::stdout().flush();
                 }
             }
 
-            if is_json_finished || is_eos { 
-                break; 
-            }
+            if is_json_finished || is_eos { break; }
 
-            wait_for_global_io().await;
-            logits = self.qwen.forward(&Tensor::from_vec(vec![next_id], (1, 1), &self.text_device)?, None, None, None, None, None, current_pos, current_pos + 1, session_id.clone(), _kv_name.clone()).await?;
+            crate::models::qwen::generate::wait_for_global_io().await;
+            logits = self.qwen.forward(&Tensor::from_vec(vec![next_token], (1, 1), &self.text_device)?, None, None, None, None, None, current_pos, current_pos + 1, session_id.clone(), _kv_name.clone()).await?;
 
             if i > 0 && i % 30 == 0 {
                 #[cfg(target_os = "windows")]
@@ -839,7 +902,7 @@ impl QwenVLGenerateModel {
                 unsafe { extern "C" { fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize; } malloc_zone_pressure_relief(std::ptr::null_mut(), 0); }
             }
         }
-
+        
         if let Some(s_id) = &session_id {
             let _ = self.force_flush_all_active_blocks(s_id, _kv_name.as_deref()).await;
         }
