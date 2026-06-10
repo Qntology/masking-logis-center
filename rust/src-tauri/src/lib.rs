@@ -2101,11 +2101,13 @@ async fn check_model_status() -> Result<serde_json::Value, String> {
     let app_dir = crate::utils::get_app_dir();
     let base_path = app_dir.join("models");
 
-    // 특정 폴더 내에 10MB 이상의 GGUF 파일이 존재하는지 검사 (이름 무관)
-    let has_gguf = |dir: &std::path::PathBuf| -> bool {
+    // 특정 폴더 내에 10MB 이상의 GGUF 또는 safetensors 파일이 존재하는지 검사 (이름 무관)
+    let has_model_file = |dir: &std::path::PathBuf| -> bool {
         if let Ok(entries) = std::fs::read_dir(dir) {
             entries.flatten().any(|e| {
-                e.path().extension().map_or(false, |ext| ext == "gguf") && 
+                let path = e.path();
+                let ext = path.extension().and_then(|ex| ex.to_str()).unwrap_or("");
+                (ext == "gguf" || ext == "safetensors") && 
                 e.metadata().map(|m| m.len()).unwrap_or(0) > 10_000_000
             })
         } else {
@@ -2115,12 +2117,12 @@ async fn check_model_status() -> Result<serde_json::Value, String> {
     
     let qwen3_dir = base_path.join("Qwen3-0.6B-Instruct-gguf");
     let qwen3_5_dir = base_path.join("Qwen3.5-2B-Instruct-gguf");
-    let embed_dir = base_path.join("embeddinggemma-300m");
+    let embed_dir = base_path.join("granite-embedding-97m-multilingual-r2");
 
     Ok(serde_json::json!({
-        "Qwen3": has_gguf(&qwen3_dir),
-        "Qwen3.5": has_gguf(&qwen3_5_dir),
-        "Embedding": has_gguf(&embed_dir)
+        "Qwen3": has_model_file(&qwen3_dir),
+        "Qwen3.5": has_model_file(&qwen3_5_dir),
+        "Embedding": has_model_file(&embed_dir)
     }))
 }
 
@@ -2145,7 +2147,7 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
         let folder_name = match model_name.as_str() {
             "Qwen3" => "Qwen3-0.6B-Instruct-gguf",
             "Qwen3.5" => "Qwen3.5-2B-Instruct-gguf",
-            "Embedding" => "embeddinggemma-300m",
+            "Embedding" => "granite-embedding-97m-multilingual-r2",
             _ => "unknown"
         };
 
@@ -2164,7 +2166,7 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
                 ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q8_0.gguf", "Qwen3.5-2B-Q8_0.gguf")
             ],
             "Embedding" => vec![
-                ("https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300m-Q4_0.gguf", "embeddinggemma-300m-Q4_0.gguf")
+                ("https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2/resolve/main/model.safetensors", "model.safetensors")
             ],
             _ => vec![]
         };
@@ -2177,7 +2179,7 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
             let file_path = dir_path.join(filename);
             let tmp_path = dir_path.join(format!("{}.tmp", filename));
             
-            let min_size = if filename.ends_with(".gguf") { 10_000_000 } else { 0 };
+            let min_size = if filename.ends_with(".gguf") || filename.ends_with(".safetensors") { 10_000_000 } else { 0 };
             if file_path.exists() && std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0) > min_size {
                 let percent = (((file_idx as f64 + 1.0) / total_files as f64) * 100.0) as u32;
                 let _ = app_handle.emit("download_progress", serde_json::json!({"model": model_name, "percent": percent}));

@@ -795,7 +795,7 @@ impl LogisModel {
         let qwen_model_path = normalize_path(base_path.join("Qwen3-0.6B-Instruct-gguf")); 
         let qwen3_model_path = normalize_path(base_path.join("Qwen3-0.6B-Instruct-gguf")); 
         let qwen3_5_model_path = normalize_path(base_path.join("Qwen3.5-2B-Instruct-gguf"));
-        let embedding_path = base_path.join("embeddinggemma-300m");
+        let embedding_path = base_path.join("granite-embedding-97m-multilingual-r2");
 
         let max_tokens_limit = 65536; 
 
@@ -1166,7 +1166,9 @@ impl LogisModel {
             params, 
             cancellation_token.clone(),
             session_id, // 🌟 SSD 저장 및 병합 캐시 활성화!
-            Some("inference".to_string())
+            Some("inference".to_string()),
+            None,
+            None
         ).await.map_err(|e| anyhow!("Qwen 3.5 Inference failed: {}", e))
     }
 
@@ -1585,7 +1587,7 @@ impl LogisModel {
                         top_p: Some(1.0), 
                         ..Default::default()
                     };
-                    gen.generate(params, Some(cancel_clone), None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e))
+                    gen.generate(params, Some(cancel_clone), None, None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e))
                 } else {
                     Err(anyhow::anyhow!("Qwen3 Generator is missing"))
                 }
@@ -1656,7 +1658,7 @@ impl LogisModel {
                             model: "qwen3".to_string(), max_tokens: Some(256), temperature: Some(0.0), top_p: Some(0.01),
                             ..Default::default()
                         };
-                        gen.generate(params, Some(cancel_clone), None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e))
+                        gen.generate(params, Some(cancel_clone), None, None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e))
                     } else {
                         Err(anyhow::anyhow!("Qwen3 Generator is missing"))
                     }
@@ -1839,7 +1841,7 @@ impl LogisModel {
                     model: "qwen3".to_string(), max_tokens: Some(256), temperature: Some(0.0), top_p: Some(0.01),
                     ..Default::default()
                 };
-                gen.generate(params, Some(cancel_clone), None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e))
+                gen.generate(params, Some(cancel_clone), None, None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e))
             } else {
                 Err(anyhow::anyhow!("Qwen3 Generator is missing"))
             }

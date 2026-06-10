@@ -821,7 +821,7 @@ async fn process_task(
                                             ..Default::default()
                                         };
                                         // 🌟 Qwen3 생성기의 Bias 조작을 위해 ignore_list를 파라미터로 함께 주입합니다.
-                                        let res = gen.generate(params, Some(cancel_clone), Some(&ignore_list_clone)).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e));
+                                        let res = gen.generate(params, Some(cancel_clone), Some(&ignore_list_clone), None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e));
                                         
                                         // 🌟 [CRITICAL FIX] 4GB VRAM 메모리 누수 방지
                                         gen.clear_kv_cache();
