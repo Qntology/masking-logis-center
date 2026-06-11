@@ -513,6 +513,9 @@ async fn process_task(
                 }
             }
 
+            // 🌟 [CRITICAL FIX] 첫 번째 Mutex 락(store_guard)을 명시적으로 해제하여, 아래의 두 번째 락에서 데드락(Deadlock)이 발생하는 것을 원천 차단합니다!
+            drop(store_guard);
+
             let display_summary = format!("{} - {}", extracted_title, extracted_desc);
 
             // 🌟 [CRITICAL FIX] 상태(1)가 UI에 덮어씌워지는 것을 방어하기 위해 Done 이벤트 발송 직전에 DB도 9로 굳힙니다.
@@ -1379,6 +1382,9 @@ async fn process_task(
                 }
             }
         }
+
+        // 🌟 [CRITICAL FIX] 첫 번째 Mutex 락(store_guard)을 명시적으로 해제하여, 아래의 두 번째 락에서 데드락(Deadlock)이 발생하는 것을 원천 차단합니다!
+        drop(store_guard);
 
         // 🌟 [채팅 말풍선 텍스트 반영] 추출된 제목과 설명이 있다면 이를 바탕으로 요약 텍스트를 구성합니다.
         let display_summary = if extracted_title.is_empty() {

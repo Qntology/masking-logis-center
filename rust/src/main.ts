@@ -431,6 +431,15 @@ settingsToggle?.addEventListener("change", (e) => {
     const label = document.querySelector('label[for="settings-toggle"]') as HTMLElement;
     const listRefreshBtn = document.getElementById("list-refresh-btn"); // 🌟 버튼 참조 추가
     
+    // 🌟 [추가] 화면 전환 시 선택 상태 및 체크박스 초기화
+    selectedUuids.clear();
+    document.querySelectorAll('.item-select-checkbox').forEach(cb => {
+        if (!(cb as HTMLInputElement).disabled) {
+            (cb as HTMLInputElement).checked = false;
+        }
+    });
+    updateListActionButtons();
+
     if (isChecked) {
         // 설정 켜짐: 설정 패널 표시, 리스트 및 네비게이션 숨김
         if (settingsPanel) settingsPanel.style.display = "block";
@@ -2117,15 +2126,20 @@ btnExtract?.addEventListener("click", async () => {
                 taskId = `task_${hashedRefId}`;
             }
             
-            // 🌟 [CRITICAL FIX] HTML 추출(extract_html_from_current_tab) 과정이 1~2초 지연되어 
-            // 앱이 멈춘 것처럼 보이는 프리징 현상을 방어하기 위해 즉시 프로그레스 UI(말풍선 및 스피너)를 선행 렌더링합니다!
-            await renderProgressToUI({ 
-                task_id: taskId, 
-                category: "Processing", 
-                summary: "Extracting webpage content...", 
-                spinner: "⠋" 
-            });
+            // 🌟 [CRITICAL FIX] 큐 매니저 락(isBusy)을 강제로 잠가버리는 renderProgressToUI 대신,
+            // 시각적인 말풍선(UI)만 1(진행중) 상태로 선행 렌더링하여 앱이 멈춘 것 같은 지연 현상을 방어합니다.
+            isExtracting = true; // 스피너 보호 락 활성화
             startSpinner();
+            
+            await renderMessage({
+                id: taskId,
+                task_id: taskId,
+                role: "system_task",
+                text: "Extracting webpage content...",
+                status: 1, 
+                created_at: Date.now(),
+                updated_at: Date.now()
+            });
             
             const isCloudMode = (document.getElementById("cloud-mode-toggle") as HTMLInputElement)?.checked;
 
@@ -4246,6 +4260,16 @@ async function showDetail(uuid: string) {
         console.error("[WIDGET] Cannot open detail: ID is undefined");
         return;
     }
+
+    // 🌟 [추가] 상세 화면 전환 시 선택 상태 및 체크박스 초기화
+    selectedUuids.clear();
+    document.querySelectorAll('.item-select-checkbox').forEach(cb => {
+        if (!(cb as HTMLInputElement).disabled) {
+            (cb as HTMLInputElement).checked = false;
+        }
+    });
+    updateListActionButtons();
+
     currentDetailUuid = uuid;
     listView.style.display = "none";
     detailView.style.display = "flex";
@@ -5098,7 +5122,18 @@ document.getElementById("btn-delete-all-models")?.addEventListener("click", asyn
 // 앱 렌더링 시 모델 UI 즉시 초기화
 updateModelStatusUI();
 
-settingsBtn?.addEventListener("click", () => { if (currentTab === "settings" && isExpanded) collapseWidget(); else openWidget("settings"); });
+settingsBtn?.addEventListener("click", () => { 
+    // 🌟 [추가] 화면 전환 시 선택 상태 및 체크박스 초기화
+    selectedUuids.clear();
+    document.querySelectorAll('.item-select-checkbox').forEach(cb => {
+        if (!(cb as HTMLInputElement).disabled) {
+            (cb as HTMLInputElement).checked = false;
+        }
+    });
+    updateListActionButtons();
+    
+    if (currentTab === "settings" && isExpanded) collapseWidget(); else openWidget("settings"); 
+});
 document.getElementById("nav-to-auto")?.addEventListener("click", () => switchTab("automation"));
 document.getElementById("unload-btn")?.addEventListener("click", async () => { 
     try { 
