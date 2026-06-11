@@ -911,36 +911,36 @@ pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, t
     let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
 
+    // 🌟 [CRITICAL FIX] 각 컬럼의 semantic, bias, prejudice 기준에 맞춰 LLM이 3단계로 검증하는 구체적인 CoT 사고 과정을 동적 생성합니다.
+    let column_specific_cot = match target_name {
+        "email" => "Step 1 (Semantic): Verify if the text represents an 'electronic mail address'. Step 2 (Bias): Check for the presence of elements like '@', '.com', '.net', '.co.kr', '.org', 'email', 'e-mail', 'mailto', or 'mail'. Step 3 (Prejudice): Strictly reject if the text is a physical address, postal code, or phone number.",
+        "contact_number" => "Step 1 (Semantic): Verify if the text represents a 'phone number, mobile number, or contact number'. Step 2 (Bias): Check for patterns or keywords like '010', '02', '031', '070', 'phone', 'mobile', 'tel', 'contact', 'number', or '+82'. Step 3 (Prejudice): Strictly reject if the text matches an email, address, age, price, or amount.",
+        "name" => "Step 1 (Semantic): Verify if the text represents a 'person's name'. Step 2 (Bias): Check for associated clues like 'reporter', 'player', 'coach', 'representative', 'council member', 'mr', 'ms', 'name', 'person', 'first name', or 'full name'. Step 3 (Prejudice): Strictly reject if the text is a company, corporate, business, team, location, place, animal, or object.",
+        "username" => "Step 1 (Semantic): Verify if the text represents a 'user ID, account name, or nickname'. Step 2 (Bias): Check for contextual clues like 'id', 'username', 'nickname', 'account', or 'user'. Step 3 (Prejudice): Strictly reject if the text is a real human name, email, or password.",
+        "address" => "Step 1 (Semantic): Verify if the text represents a 'physical street address or location'. Step 2 (Bias): Look for geographic indicators like 'city', 'province', 'district', 'neighborhood', 'town', 'village', 'road', 'street', 'house number', 'apartment', 'building', 'address', or 'location'. Step 3 (Prejudice): Strictly reject if the text is an email, ip address, URL, web link, date (e.g., '25-01-07'), time (e.g., '16:24'), or order number.",
+        "company" => "Step 1 (Semantic): Verify if the text represents a 'company name, organization, institution, or corporate entity'. Step 2 (Bias): Look for business indicators like 'company', 'inc', 'corp', 'ltd', 'organization', 'institution', 'corporation', 'firm', 'agency', 'enterprise', or 'business'. Step 3 (Prejudice): Strictly reject if the text refers to a person, individual, man, woman, human, name, player, or reporter.",
+        _ => "Step 1 (Semantic): Identify the semantic meaning of the text. Step 2 (Bias): Compare the visible text against the Context clues (Bias). Step 3 (Prejudice): Strictly reject any text matching the (Prejudice) criteria."
+    };
+
     let user_template = r###"[TASK] Analyze the provided PUG/HTML content from top to bottom.
 
-[FORCED DOCUMENT SCANNING LOGIC]
-Read the entire document from top to bottom, applying the following strict filters and evaluations:
-
-1. IGNORE:
-   - Strictly ignore global navigation, menus, headers, footers, aside, search, filter, form.
-   - temporary placeholder (such as SKIP READ N, SKIP_READ_N, LINK_SKIP).
-2. TARGET:
-   - Focus purely on the main data payload where "{TARGET_ITEM}".
-3. EVALUATE:
-   - You MUST evaluate the concluding elements at the very bottom of the main content area first. Check for the following:
-     A. Does the page terminate with dataset navigation (pagination, "next/prev") or bulk-action execution elements?
-     B. Does the main data area consist of a repeating multi-entity grid?
-     C. Does the main data area contain an extensive configuration/input form (inputs, textareas, image uploads, save buttons) for a single entity?
-
 [SCHEMA DEFINITIONS]
-- {TARGET_NAME}: String. Extract the {TARGET_ITEM} value.
+- reasoning: String. Step-by-step chain of thought. {COLUMN_SPECIFIC_COT} If the text is a date, ID, or order number but you are looking for an address/name, explain why it should be rejected.
+- {TARGET_NAME}: String. Extract the {TARGET_ITEM} value. If no valid data matches the bias after reasoning, return an empty string "".
   * Context clues (Bias): {TARGET_BIAS}
   * DO NOT confuse with (Prejudice): {TARGET_PREJUDICE}
 
 [OUTPUT FORMAT]
 {
-    "{TARGET_NAME}": String
+    "reasoning": "Explain your evaluation here...",
+    "{TARGET_NAME}": "Extracted string or empty string"
 }
 
-[ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think"###;
+[ACTION] RETURN JSON ONLY."###;
 
     let system_prompt = system_template.replace("{PUG_CONTENT}", pug_content);
     let user_prompt = user_template
+        .replace("{COLUMN_SPECIFIC_COT}", column_specific_cot)
         .replace("{TITLE}", title)
         .replace("{TARGET_NAME}", target_name)
         .replace("{TARGET_ITEM}", target_item)

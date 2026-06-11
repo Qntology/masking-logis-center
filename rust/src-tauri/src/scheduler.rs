@@ -844,8 +844,8 @@ async fn process_task(
                                 
                                 emit_term(&format!("  🔍 [VECTOR] Item: [{}] | Score: {:.4} (Bias: {:.4}, Prej: {:.4}) | Line: '{}'", target_item, score, b_score, p_score, short_line));
 
-                                // 0.10 이상인 유효 라인만 모아둡니다.
-                                if score >= 0.10 {
+                                // 0.25 이상인 유효 라인만 모아두어 노이즈(가비지 텍스트)를 차단합니다.
+                                if score >= 0.25 {
                                     passed_lines.push(lines[i].clone());
                                 }
                             }
@@ -913,8 +913,8 @@ async fn process_task(
                             // 이를 통해 불필요한 컨텍스트 토큰 소모를 방지하고 환각을 차단합니다.
                             let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, target_name, &target_item, &target_bias, &target_prejudice);
                             
-                            // 🌟 [CRITICAL FIX] 불필요한 메타데이터 제거 및 단일 키 출력 강제
-                            system_prompt.push_str(&format!("\n\nCRITICAL INSTRUCTION:\nOutput ONLY a single JSON object containing EXACTLY ONE KEY: \"{}\". Do NOT output 'has_header', 'title', 'language', 'has_list', 'detail', 'description', or any other keys.", target_name));
+                            // 🌟 CoT(Chain of Thought)를 위해 reasoning 키를 허용하도록 지침 완화
+                            system_prompt.push_str(&format!("\n\nCRITICAL INSTRUCTION:\nOutput ONLY a valid JSON object containing exactly two keys: \"reasoning\" and \"{}\". Do NOT output any other keys.", target_name));
 
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
