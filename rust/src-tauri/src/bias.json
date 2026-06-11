@@ -17,13 +17,18 @@
     },
     "username": {
       "semantic": "user ID, account name, nickname",
-      "bias": "id, username, nickname, account, user, login",
+      "bias": "id, username, nickname, account, user",
       "prejudice": "real name, email, password"
     },
     "address": {
       "semantic": "physical street address, location",
       "bias": "city, province, district, neighborhood, town, village, road, street, house number, apartment, building, address, location",
       "prejudice": "email, ip address, URL, web link"
+    },
+    "age": {
+      "semantic": "person's age, years old",
+      "bias": "age, years old, year old, born in, birth year, elderly, youth, teen, adult",
+      "prejudice": "price, amount, weight, height, quantity, date, time"
     },
     "biological_sex": {
       "semantic": "person's biological sex or gender",

@@ -907,7 +907,7 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str) -> (String, String) {
+pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str) -> (String, String) {
     let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
 
@@ -928,25 +928,13 @@ Read the entire document from top to bottom, applying the following strict filte
      C. Does the main data area contain an extensive configuration/input form (inputs, textareas, image uploads, save buttons) for a single entity?
 
 [SCHEMA DEFINITIONS]
-- has_header: Boolean. True if the document contains a header.
-- has_footer: Boolean. True if the document contains a footer.
-- has_list: Boolean. True if the document contains a multi-entity grid, OR if the bottom of main content area has dataset navigation/bulk controls.
-- has_form: Boolean. True if the main data payload is heavily composed of data entry fields (text, select, radio, file uploads) dedicated to creating or updating a single entity.
-- detail: Boolean. True ONLY if has_list is false AND has_form is true.
-- title: String. Default '{TITLE}'.
-- language: String. Detect the language of PUG CONTENT and return ISO 639-1 code.
 - {TARGET_NAME}: String. Extract the {TARGET_ITEM} value.
+  * Context clues (Bias): {TARGET_BIAS}
+  * DO NOT confuse with (Prejudice): {TARGET_PREJUDICE}
 
 [OUTPUT FORMAT]
 {
-    "has_header": Boolean,
-    "title" : String,
-    "has_footer": Boolean,
-    "language": String,
-    "{TARGET_NAME}": String,
-    "has_list": Boolean,
-    "has_form": Boolean,
-    "detail": Boolean
+    "{TARGET_NAME}": String
 }
 
 [ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING. /no_think"###;
@@ -955,7 +943,9 @@ Read the entire document from top to bottom, applying the following strict filte
     let user_prompt = user_template
         .replace("{TITLE}", title)
         .replace("{TARGET_NAME}", target_name)
-        .replace("{TARGET_ITEM}", target_item);
+        .replace("{TARGET_ITEM}", target_item)
+        .replace("{TARGET_BIAS}", target_bias)
+        .replace("{TARGET_PREJUDICE}", target_prejudice);
 
     (system_prompt, user_prompt)
 }

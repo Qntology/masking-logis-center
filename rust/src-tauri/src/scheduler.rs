@@ -634,6 +634,8 @@ async fn process_task(
                 let mut target_text = String::new();
                 let mut extracted_json = json!({});
                 let mut masked_text = String::new(); // 🌟 변수 생명주기를 [STEP 3]까지 연장하기 위해 밖으로 빼냅니다.
+                let mut doc_title = json_data.get("title").and_then(|v| v.as_str()).unwrap_or("Document").to_string(); // 🌟 [스코프 연장] STEP 3에서 접근 가능하도록 상단으로 이동
+                let mut doc_desc = json_data.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(); // 🌟 [스코프 연장] STEP 3에서 접근 가능하도록 상단으로 이동
 
                 // 🌟 [STEP 1] 이미지인 경우 OCR을 선행하여 텍스트를 먼저 추출합니다.
                 if is_image {
@@ -732,7 +734,7 @@ async fn process_task(
                     // 🌟 [OOM 원인 분석용 로그] 모델에 투입되기 직전 전체 컨텍스트의 문자열 길이를 터미널에 출력합니다.
                     emit_term(&format!("[DEBUG-OOM] 현재 투입되는 컨텍스트 사이즈(문자 수): {}. 선택된 모델: {:?}", target_text.len(), target_model_size));
 
-                    // 🌟 [CRITICAL FIX] Qwen3(LLM) 모델 백그라운드 로딩 트리거!
+                    // 🌟 [CRITICAL FIX] Qwen3.5(LLM) 모델 백그라운드 로딩 트리거!
                     // 임베딩 연산과 동시에 모델이 VRAM에 올라가도록 스레드를 분리합니다.
                     let bg_model = model.clone();
                     let bg_cancel = cancellation_token.clone();
@@ -758,7 +760,7 @@ async fn process_task(
                         ("address", "physical street address"),
                         // ("age", "person's age"),
                         // ("gender_identity", "person's gender identity"),
-                        ("biological_sex", "person's biological sex"),
+                        // ("biological_sex", "person's biological sex"),
                         // ("eye_color", "the color of a person's eyes"),
                         // ("height", "person's physical height"),
                         // ("profession", "person's profession or field of work"),
@@ -802,7 +804,7 @@ async fn process_task(
                     }
 
                     // 벡터 통과한 아이템만 담을 배열 및 매칭된 라인 저장 맵
-                    let mut valid_targets: Vec<(&str, String)> = Vec::new();
+                    let mut valid_targets: Vec<(&str, String, String, String)> = Vec::new();
                     let mut target_matched_lines: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
                     for (target_name, target_item) in target_items {
@@ -811,10 +813,11 @@ async fn process_task(
                         if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(target_name)) {
                             let bias_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("");
                             let prej_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("");
-
+                            
+                            // 🌟 [추가] bias와 prejudice 문자열을 임베딩 벡터로 변환합니다.
                             let bias_emb_vec = model.get_embedding(bias_val.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
                             let prej_emb_vec = model.get_embedding(prej_val.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
-                            
+
                             let mut passed_lines = Vec::new();
                             let mut best_score = -1.0;
 
@@ -855,7 +858,7 @@ async fn process_task(
                                 
                                 // 🌟 [CRITICAL FIX] bias.json의 풍부한 semantic 값을 추출하여 Qwen3에게 프롬프트 문맥으로 전달합니다!
                                 let semantic_item = privacy_node.get("semantic").and_then(|v| v.as_str()).unwrap_or(target_item);
-                                valid_targets.push((target_name, semantic_item.to_string()));
+                                valid_targets.push((target_name, semantic_item.to_string(), bias_val.to_string(), prej_val.to_string()));
                             }
                         }
                     }
@@ -872,8 +875,6 @@ async fn process_task(
 
                     let mut all_matches = Vec::new();
                     masked_text = target_text.clone(); // 반복 마스킹을 위해 루프 진입 전 초기화
-                    // 🌟 [CRITICAL FIX] 타이틀에 남아있는 원본 값 때문에 LLM이 환각을 일으키는 것을 막기 위해 doc_title도 밖으로 빼냅니다.
-                    let mut doc_title = json_data.get("title").and_then(|v| v.as_str()).unwrap_or("Document").to_string();
                     let mut skip_counter = 0; // 🌟 추가: SKIP N 카운터
                     let mut skip_map = std::collections::HashMap::new(); // 🌟 추가: SKIP N -> Mnemonic 매핑
                     let mut replacement_history: Vec<(String, String)> = Vec::new(); // 🌟 [CRITICAL FIX] 이전 타겟에서 추출된 원본->마커 치환 내역 보존
@@ -881,7 +882,7 @@ async fn process_task(
                     let total_valid = valid_targets.len();
 
                     // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
-                    for (p_idx, (target_name, target_item)) in valid_targets.into_iter().enumerate() {
+                    for (p_idx, (target_name, target_item, target_bias, target_prejudice)) in valid_targets.into_iter().enumerate() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
                         
                         let mut ignore_list: Vec<String> = Vec::new(); // 🌟 추가: 본문에 존재하지 않는 잘못된 추출값 기록
@@ -910,7 +911,7 @@ async fn process_task(
 
                             // 🌟 [CRITICAL FIX] Qwen3가 추출할 때는 `masked_text` 전체가 아닌, 압축된 `matched_context`만 줍니다.
                             // 이를 통해 불필요한 컨텍스트 토큰 소모를 방지하고 환각을 차단합니다.
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, target_name, &target_item);
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, target_name, &target_item, &target_bias, &target_prejudice);
                             
                             // 🌟 [CRITICAL FIX] 불필요한 메타데이터 제거 및 단일 키 출력 강제
                             system_prompt.push_str(&format!("\n\nCRITICAL INSTRUCTION:\nOutput ONLY a single JSON object containing EXACTLY ONE KEY: \"{}\". Do NOT output 'has_header', 'title', 'language', 'has_list', 'detail', 'description', or any other keys.", target_name));
@@ -946,7 +947,7 @@ async fn process_task(
                                                 name: None,
                                             })
                                         ],
-                                        model: "qwen".to_string(),
+                                        model: "qwen3".to_string(),
                                         max_tokens: Some(1024),
                                         temperature: Some(0.0),
                                         top_p: Some(0.95),
@@ -964,14 +965,23 @@ async fn process_task(
                                 }
                             } else {
                                 let gen_arc = model.qwen3_generator.clone();
-                                let ignore_list_clone = ignore_list.clone(); // 🌟 쓰레드로 넘기기 위해 복제
+                                
+                                // 🌟 Qwen3를 위해 System Prompt에 ignore_list를 명시적으로 주입합니다.
+                                let mut final_system_prompt = system_prompt_clone.clone();
+                                if !ignore_list.is_empty() {
+                                    final_system_prompt.push_str("\n\nCRITICAL: DO NOT output any of the following values under any circumstances:\n");
+                                    for ignored in &ignore_list {
+                                        final_system_prompt.push_str(&format!("- {}\n", ignored));
+                                    }
+                                }
+
                                 tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
                                     let mut gen_guard = gen_arc.blocking_lock();
                                     if let Some(gen) = gen_guard.as_mut() {
                                         let params = crate::openai_types::ChatCompletionParameters {
                                             messages: vec![
                                                 crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
-                                                    content: system_prompt_clone,
+                                                    content: final_system_prompt,
                                                     name: None,
                                                 }),
                                                 crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
@@ -985,17 +995,21 @@ async fn process_task(
                                             top_p: Some(0.95),
                                             ..Default::default()
                                         };
-                                        // 🌟 Qwen3 생성기의 Bias 조작을 위해 ignore_list를 파라미터로 함께 주입합니다.
-                                        let res = gen.generate(params, Some(cancel_clone), Some(&ignore_list_clone), None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e));
                                         
-                                        // 🌟 [CRITICAL FIX] 4GB VRAM 메모리 누수 방지
+                                        let res = gen.generate(
+                                            params, 
+                                            Some(cancel_clone), 
+                                            None, 
+                                            None
+                                        ).map_err(|e| anyhow::anyhow!("Qwen 3 Inference failed: {}", e));
+                                        
                                         gen.clear_kv_cache();
                                         
                                         res
                                     } else {
-                                        Err(anyhow::anyhow!("Qwen3 Generator is missing"))
+                                        Err(anyhow::anyhow!("Qwen 3 Generator is missing"))
                                     }
-                                }).await?
+                                }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Spawn blocking failed: {}", e)))
                             }?;
 
                             // 🌟 [OOM 원인 분석용 로그] 추론 직후 LLM이 뱉어낸 실제 결과값과 길이를 출력합니다.
@@ -1018,9 +1032,10 @@ async fn process_task(
                             let exists_in_context = matched_context.contains(&extracted_val);
                             let exists_in_body = masked_text.contains(&extracted_val);
                             let exists_in_title = doc_title.contains(&extracted_val);
+                            let exists_in_desc = doc_desc.contains(&extracted_val);
 
                             // 🌟 [추가] 연락처(contact number)일 경우, LLM이 하이픈(-)이나 공백을 마음대로 제거/추가하여 매칭이 안 되는 현상 방어
-                            if !extracted_val.is_empty() && extracted_val != "..." && extracted_val != "null" && !exists_in_context && !exists_in_body && !exists_in_title {
+                            if !extracted_val.is_empty() && extracted_val != "..." && extracted_val != "null" && !exists_in_context && !exists_in_body && !exists_in_title && !exists_in_desc {
                                 if target_name == "contact_number" {
                                     // 순수 숫자만 추출
                                     let digits_only: String = extracted_val.chars().filter(|c| c.is_digit(10)).collect();
@@ -1058,8 +1073,9 @@ async fn process_task(
                             let re_check_context = matched_context.contains(&extracted_val);
                             let re_check_body = masked_text.contains(&extracted_val);
                             let re_check_title = doc_title.contains(&extracted_val);
+                            let re_check_desc = doc_desc.contains(&extracted_val);
 
-                            if !re_check_context && !re_check_body && !re_check_title {
+                            if !re_check_context && !re_check_body && !re_check_title && !re_check_desc {
                                 miss_counter += 1;
                                 if miss_counter > 3 {
                                     break; 
@@ -1073,7 +1089,8 @@ async fn process_task(
 
                             // 정상 추출되었으므로 연속 실패 카운터를 리셋합니다.
                             miss_counter = 0;
-                            item_extract_count += 1; // 🌟 성공 횟수 증가
+                            // 🌟 추론 결과에 컬럼이 있으면 3번에서 초기화하고 1회부터 다시 시작되게 반영
+                            item_extract_count = 0; 
 
                             // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 SKIP READ 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
@@ -1085,6 +1102,7 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 원본 텍스트(본문+제목) 모두에서 임시 마커로 치환하여 이어지는 LLM 추론에서 혼선을 원천 방지합니다.
                             masked_text = masked_text.replace(&extracted_val, &skip_marker);
                             doc_title = doc_title.replace(&extracted_val, &skip_marker);
+                            doc_desc = doc_desc.replace(&extracted_val, &skip_marker);
                             matched_context = matched_context.replace(&extracted_val, &skip_marker); // 🌟 [추가] Qwen3가 읽고 있는 컨텍스트도 동기화 치환!
                             
                             skip_map.insert(skip_marker.clone(), final_replacement);
@@ -1105,6 +1123,8 @@ async fn process_task(
                         let marker = format!("**SKIP READ {}**", i);
                         if let Some(final_repl) = skip_map.get(&marker) {
                             masked_text = masked_text.replace(&marker, final_repl);
+                            doc_title = doc_title.replace(&marker, final_repl);
+                            doc_desc = doc_desc.replace(&marker, final_repl);
                         }
                     }
 
@@ -1115,7 +1135,7 @@ async fn process_task(
 
                     if !all_matches.is_empty() {
                         // 🌟 마스킹된 전체 텍스트도 masked 오브젝트 내부의 text 필드로 함께 캡슐화합니다.
-                        extracted_json = json!({ "matches": all_matches, "text": masked_text });
+                        extracted_json = json!({ "matches": all_matches, "text": masked_text, "title": doc_title.clone(), "description": doc_desc.clone() });
                     }
                 }
 
@@ -1125,6 +1145,14 @@ async fn process_task(
                         obj.insert("masked".to_string(), extracted_json);
                         obj.insert("is_masked".to_string(), json!(true));
                         // 🌟 루트에 존재하던 masked_text 개별 삽입 로직은 삭제되었습니다.
+                        
+                        // 🌟 [추가] data 객체 내부에 masked_title을 명시적으로 반영합니다.
+                        if let Some(data_obj) = obj.get_mut("data").and_then(|v| v.as_object_mut()) {
+                            data_obj.insert("masked_title".to_string(), json!(doc_title.clone()));
+                            data_obj.insert("masked_description".to_string(), json!(doc_desc.clone()));
+                        } else {
+                            obj.insert("data".to_string(), json!({ "masked_title": doc_title.clone(), "masked_description": doc_desc.clone() }));
+                        }
                     }
 
                     // 🌟 [CRITICAL FIX] 하드코딩된 "items" 대신 문서를 찾아낸 실제 테이블(found_table)을 사용합니다!

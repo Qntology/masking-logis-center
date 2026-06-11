@@ -4124,9 +4124,39 @@ function updateListActionButtons() {
     }
 }
 
+// 드래그 승인 상태를 기억하는 변수 추가
+let isDragConfirmed = false;
+
 // 🌟 [추가] 브라우저 JS가 아닌 Rust 백엔드에서 네이티브 OS 드래그를 시작하도록 mousedown 이벤트로 연결
 document.getElementById("btn-drag-export")?.addEventListener("mousedown", async (e) => {
     e.preventDefault(); // 웹 브라우저의 기본 HTML5 드래그 방지
+
+    // 🌟 [보안 검사] 선택된 문서 중 마스킹 되지 않은 문서가 있는지 확인
+    let hasUnmasked = false;
+    selectedUuids.forEach(uuid => {
+        const card = document.getElementById(uuid);
+        if (card && card.dataset.isMasked !== "true") {
+            hasUnmasked = true;
+        }
+    });
+
+    if (hasUnmasked && !isDragConfirmed) {
+        // 드래그를 일시 중지하고 Confirm 창 표시 (await 팝업 때문에 드래그 세션은 끊어짐)
+        const confirmed = await ask("보안 관련 마스킹안된 값이 있습니다. 해당 파일을 허용하시겠습니까?", { 
+            title: "보안 경고", 
+            kind: "warning" 
+        });
+
+        if (confirmed) {
+            isDragConfirmed = true; // 승인 상태 기록
+            alert("승인되었습니다. 버튼을 다시 드래그하여 내보내기를 진행해주세요.");
+        }
+        return; // 현재 mousedown 이벤트는 여기서 종료
+    }
+
+    // 1회 성공(또는 마스킹 완료 문서만 있을 때) 후에는 승인 상태 초기화
+    isDragConfirmed = false;
+
     const allCheckboxes = document.querySelectorAll('.item-select-checkbox');
     const fetchAll = selectedUuids.size === allCheckboxes.length && allCheckboxes.length > 0;
             

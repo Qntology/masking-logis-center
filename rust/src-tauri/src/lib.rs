@@ -276,9 +276,15 @@ async fn start_file_drag(
         // [추가] JSON 데이터에서 title, link, description을 추출하여 마크다운 메타데이터(Frontmatter)로 주입하는 클로저
         let process_pug_meta = |json_val: &serde_json::Value| -> Option<String> {
             if let Some(yaml) = json_val.get("yaml").and_then(|v| v.as_str()) {
-                let title = json_val.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let title = json_val.get("data").and_then(|d| d.get("masked_title")).and_then(|v| v.as_str())
+                    .or_else(|| json_val.get("masked").and_then(|m| m.get("title")).and_then(|v| v.as_str()))
+                    .or_else(|| json_val.get("title").and_then(|v| v.as_str()))
+                    .unwrap_or("");
                 let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("");
-                let desc = json_val.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = json_val.get("data").and_then(|d| d.get("masked_description")).and_then(|v| v.as_str())
+                    .or_else(|| json_val.get("masked").and_then(|m| m.get("description")).and_then(|v| v.as_str()))
+                    .or_else(|| json_val.get("description").and_then(|v| v.as_str()))
+                    .unwrap_or("");
                 
                 // 🌟 최상단에 Markdown 문서 정보(Frontmatter) 블록 주입
                 let frontmatter = format!(

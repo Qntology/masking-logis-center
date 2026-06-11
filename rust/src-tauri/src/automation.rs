@@ -185,7 +185,8 @@ fn spawn_browser_monitor(browser: Arc<Browser>, app_handle: tauri::AppHandle) {
             let mut remembered_url = String::new();
             let mut remembered_visible = false;
 
-            
+            let mut target_page = None; // 🌟 [추가] DOM 조작을 위해 현재 페이지 객체를 참조로 보관합니다.
+
             for page in pages.iter().rev() {
                 let script = r#"
                     (function() {
@@ -222,12 +223,14 @@ fn spawn_browser_monitor(browser: Arc<Browser>, app_handle: tauri::AppHandle) {
                                     active_tab_id = tab_id.to_string();
                                     active_url = tab_url.to_string();
                                     found_focus = true;
+                                    target_page = Some(page.clone()); // 🌟 [추가] 타겟 페이지 할당
                                     break;
                                 }
 
                                 if !last_focused_tab_id.is_empty() && tab_id == last_focused_tab_id {
                                     remembered_url = tab_url.to_string();
                                     remembered_visible = json_val.get("visible").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    target_page = Some(page.clone()); // 🌟 [추가] 타겟 페이지 할당
                                 }
                             }
                         }
@@ -274,6 +277,7 @@ fn spawn_browser_monitor(browser: Arc<Browser>, app_handle: tauri::AppHandle) {
                                         last_focused_tab_id = tab_id.to_string(); // 장부 각인!
                                         active_tab_id = tab_id.to_string();
                                         active_url = tab_url.to_string();
+                                        target_page = Some(page.clone()); // 🌟 [추가] 타겟 페이지 할당
                                         break;
                                     }
                                 }
@@ -286,6 +290,74 @@ fn spawn_browser_monitor(browser: Arc<Browser>, app_handle: tauri::AppHandle) {
                     // 명시적으로 "about:blank"를 주어 프론트엔드가 즉시 번개 버튼(extract)을 숨기도록 유도합니다!
                     if active_url.is_empty() {
                         active_url = "about:blank".to_string();
+                    }
+                }
+            }
+
+            // 🌟 [추가] 우클릭 컨텍스트 메뉴에서 선택된 액션(recover/mask)이 있는지 감지하고 DB와 연동하여 DOM 치환
+            if let Some(page) = target_page {
+                if let Ok(Ok(res)) = tokio::time::timeout(Duration::from_millis(300), page.evaluate("window.__logis_action || ''")).await {
+                    if let Some(action) = res.into_value::<String>().ok() {
+                        if action == "recover" || action == "mask" {
+                            use tauri::Manager;
+                            let store_opt = app_handle.state::<crate::AppState>().store.clone();
+                            let mut dict = Vec::new();
+                            if let Some(store) = store_opt.lock().await.as_ref() {
+                                // DB에서 마스킹 처리가 완료된 문서들을 가져옵니다.
+                                if let Ok(docs) = store.get_all_items("items", 10000, 0, Some("is_masked = true".to_string())).await {
+                                    for doc in docs {
+                                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
+                                            if let Some(matches) = json_val.get("masked").and_then(|m| m.get("matches")).and_then(|v| v.as_array()) {
+                                                for m in matches {
+                                                    let original = m.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                                                    let mnemonic_val = m.get("mnemonic").and_then(|v| v.as_str()).unwrap_or("");
+                                                    let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                                    if !original.is_empty() && !mnemonic_val.is_empty() {
+                                                        dict.push(serde_json::json!({
+                                                            "original": original,
+                                                            "mnemonic": format!("[{}: {}]", name, mnemonic_val)
+                                                        }));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            let dict_json = serde_json::to_string(&dict).unwrap_or("[]".to_string());
+                            let js_code = format!(r#"
+                                (function() {{
+                                    const dict = {};
+                                    const direction = '{}';
+                                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                                    let node;
+                                    let changeCount = 0;
+                                    while (node = walker.nextNode()) {{
+                                        if (node.parentElement && (node.parentElement.tagName === 'SCRIPT' || node.parentElement.tagName === 'STYLE')) continue;
+                                        
+                                        let text = node.nodeValue;
+                                        let changed = false;
+                                        for (const item of dict) {{
+                                            const target = direction === 'recover' ? item.mnemonic : item.original;
+                                            const replacement = direction === 'recover' ? item.original : item.mnemonic;
+                                            if (text.includes(target)) {{
+                                                text = text.split(target).join(replacement);
+                                                changed = true;
+                                            }}
+                                        }}
+                                        if (changed) {{
+                                            node.nodeValue = text;
+                                            changeCount++;
+                                        }}
+                                    }}
+                                    window.__logis_action = '';
+                                    return changeCount;
+                                }})();
+                            "#, dict_json, action);
+
+                            let _ = page.evaluate(js_code).await;
+                        }
                     }
                 }
             }
@@ -495,6 +567,71 @@ async fn run_driverless_automation(browser: &str, url: &str, _script: &str, app_
 
     // [CRITICAL STEALTH] 탐지 우회 스크립트 설정
     let _ = page.evaluate_on_new_document("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})").await;
+
+    // 🌟 [추가] 내장 브라우저에서 Alt + 우클릭 시 마스킹 복원/적용 컨텍스트 메뉴를 띄우는 스크립트 주입
+    let _ = page.evaluate_on_new_document(r#"
+        window.addEventListener('contextmenu', function(e) {
+            if (e.altKey) {
+                e.preventDefault();
+                // 기존에 떠있는 커스텀 메뉴 제거
+                const existingMenu = document.getElementById('logis-custom-menu');
+                if (existingMenu) existingMenu.remove();
+
+                // 커스텀 컨텍스트 메뉴 DOM 생성
+                const menu = document.createElement('div');
+                menu.id = 'logis-custom-menu';
+                menu.style.position = 'fixed';
+                menu.style.left = e.clientX + 'px';
+                menu.style.top = e.clientY + 'px';
+                menu.style.backgroundColor = '#ffffff';
+                menu.style.border = '1px solid #d1d5db';
+                menu.style.boxShadow = '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)';
+                menu.style.padding = '4px 0';
+                menu.style.zIndex = '999999';
+                menu.style.cursor = 'pointer';
+                menu.style.fontFamily = 'sans-serif';
+                menu.style.fontSize = '13px';
+                menu.style.borderRadius = '6px';
+                menu.style.minWidth = '150px';
+
+                const recoverBtn = document.createElement('div');
+                recoverBtn.innerText = '🔓 Masking Recover';
+                recoverBtn.style.padding = '8px 16px';
+                recoverBtn.style.color = '#374151';
+                recoverBtn.onmouseover = () => recoverBtn.style.backgroundColor = '#f3f4f6';
+                recoverBtn.onmouseout = () => recoverBtn.style.backgroundColor = '#ffffff';
+                recoverBtn.onclick = () => {
+                    console.log("[Logis] Masking Recover Clicked!");
+                    // 🌟 [추가] 폴링 루프(Rust)가 감지할 수 있도록 액션 상태를 등록
+                    window.__logis_action = 'recover';
+                    menu.remove();
+                };
+
+                const applyBtn = document.createElement('div');
+                applyBtn.innerText = '🔒 Apply Masking';
+                applyBtn.style.padding = '8px 16px';
+                applyBtn.style.color = '#374151';
+                applyBtn.onmouseover = () => applyBtn.style.backgroundColor = '#f3f4f6';
+                applyBtn.onmouseout = () => applyBtn.style.backgroundColor = '#ffffff';
+                applyBtn.onclick = () => {
+                    console.log("[Logis] Apply Masking Clicked!");
+                    // 🌟 [추가] 폴링 루프(Rust)가 감지할 수 있도록 액션 상태를 등록
+                    window.__logis_action = 'mask';
+                    menu.remove();
+                };
+
+                menu.appendChild(recoverBtn);
+                menu.appendChild(applyBtn);
+                document.body.appendChild(menu);
+            }
+        });
+
+        // 빈 화면 클릭 시 메뉴 닫기
+        window.addEventListener('click', function() {
+            const existingMenu = document.getElementById('logis-custom-menu');
+            if (existingMenu) existingMenu.remove();
+        });
+    "#).await;
 
     Ok(format!("Automation Started."))
 }
