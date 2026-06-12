@@ -36,8 +36,8 @@
       "prejudice": "age, name, address, job"
     },
     "company": {
-      "semantic": "company name, organization, institution, corporate",
-      "bias": "company, inc, corp, ltd, organization, institution, corporation, firm, agency, enterprise, business",
+      "semantic": "company name, organization, institution, corporate, brand, sports team",
+      "bias": "company, inc, corp, ltd, organization, institution, corporation, firm, agency, enterprise, business, brand, sports team, football club, athletic club, esports team, group, studio",
       "prejudice": "person, individual, man, woman, human, name, player, reporter"
     }
   },

@@ -890,6 +890,17 @@ async fn process_task(
                         if cancellation_token.load(Ordering::Relaxed) { break; }
                         
                         let mut ignore_list: Vec<String> = Vec::new(); // 🌟 추가: 본문에 존재하지 않는 잘못된 추출값 기록
+                        
+                        // 🌟 [CRITICAL FIX] LLM이 임시 마커를 엔티티로 착각하고 뱉는 환각을 Logit 단계에서 원천 압살합니다!
+                        ignore_list.push("**SKIP READ".to_string());
+                        ignore_list.push("SKIP READ".to_string());
+                        ignore_list.push("SKIP".to_string());
+                        ignore_list.push("READ".to_string());
+                        ignore_list.push("Skip".to_string());
+                        ignore_list.push("Read".to_string());
+                        ignore_list.push("skip".to_string());
+                        ignore_list.push("read".to_string());
+
                         let mut miss_counter = 0; // 🌟 추가: 무한 루프 방지 카운터
                         let mut item_extract_count = 0; // 🌟 [추가] 각 항목별 최대 추출 횟수 제한 카운터
                         
@@ -907,9 +918,9 @@ async fn process_task(
                         loop {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
                             
-                            // 🌟 [추가] 3번 추출 성공 시 무한루프를 종료하고 다음 항목으로 넘어갑니다.
-                            if item_extract_count >= 3 {
-                                emit_term(&format!("[EXTRACTION] 🛑 최대 추출 횟수(3회) 도달. {} 항목 종료.", target_item));
+                            // 🌟 [추가] 최대 추출 횟수 대폭 해제 (3회 -> 20회)
+                            if item_extract_count >= 20 {
+                                emit_term(&format!("[EXTRACTION] 🛑 최대 추출 횟수(20회) 도달. {} 항목 종료.", target_item));
                                 break;
                             }
 
@@ -1109,8 +1120,8 @@ async fn process_task(
 
                             // 정상 추출되었으므로 연속 실패 카운터를 리셋합니다.
                             miss_counter = 0;
-                            // 🌟 추론 결과에 컬럼이 있으면 3번에서 초기화하고 1회부터 다시 시작되게 반영
-                            item_extract_count = 0; 
+                            // 🌟 성공적으로 추출했으므로 추출 횟수 카운터를 증가시킵니다. (무한 루프 방지용)
+                            item_extract_count += 1; 
 
                             // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 SKIP READ 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
