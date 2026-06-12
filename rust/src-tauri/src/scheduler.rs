@@ -854,7 +854,8 @@ async fn process_task(
                     }
 
                     // 벡터 통과한 아이템만 담을 배열 및 매칭된 라인 저장 맵
-                    let mut valid_targets: Vec<(String, String, String, String, String)> = Vec::new();
+                    // 🌟 [추가] 2-Phase 구조를 위해 boolean(is_phase2) 필드 추가
+                    let mut valid_targets: Vec<(String, String, String, String, String, bool)> = Vec::new();
                     let mut target_matched_lines: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
                     for (context_name, base_target, context_desc) in dynamic_target_items {
@@ -935,7 +936,8 @@ async fn process_task(
                                         base_target.to_string(),         // base_target: 실제 DB에 저장 및 치환될 부모 필터명 ("contact_number")
                                         split_target_desc,               // target_item: LLM에게 설명할 타겟 항목
                                         keyword.to_string(),             // target_bias: 통째가 아닌, 쪼개진 "단일 키워드"만 주입!
-                                        prej_val.to_string()             // target_prejudice: 배제 조건은 기존 유지
+                                        prej_val.to_string(),            // target_prejudice: 배제 조건은 기존 유지
+                                        false                            // 🌟 Phase 1 플래그!
                                     ));
                                 }
                             }
@@ -998,9 +1000,88 @@ async fn process_task(
 
                     let total_valid = valid_targets.len();
 
-                    // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
-                    for (p_idx, (target_name, base_target, target_item, target_bias, target_prejudice)) in valid_targets.into_iter().enumerate() {
+                    let mut p_idx = 0;
+                    let mut phase2_companies: Vec<String> = Vec::new();
+                    let mut phase2_executed = false; // Phase 2 진입 플래그
+
+                    // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다. (Phase 2 동적 펌핑 지원)
+                    while p_idx < valid_targets.len() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
+                        
+                        // 🌟 [추가] Phase 2 진입 확인 및 펌핑(Pumping) 로직
+                        if p_idx == total_valid && !phase2_executed {
+                            phase2_executed = true;
+                            if !phase2_companies.is_empty() {
+                                emit_term(&format!("[EXTRACTION] 🔄 Phase 2: Generating context-aware targets for {} companies...", phase2_companies.len()));
+                                
+                                for company in &phase2_companies {
+                                    let clean_company = company.trim();
+                                    if clean_company.is_empty() { continue; }
+
+                                    for lang in &detected_languages_vec {
+                                        let targets_to_add = vec![
+                                            ("name", "person's name", "reporter, player, coach, representative, council member, mr, ms, name, person, first name, full name", "company, corporate, business, team, location, place, animal, object"),
+                                            ("username", "person's username", "id, username, nickname, account, user", "real name, email, password")
+                                        ];
+
+                                        for (b_target, b_desc, b_bias, b_prej) in targets_to_add {
+                                            // 저장용 부모 키. ex) 레알 마드리드_korean_name
+                                            let c_name_target = format!("{}_{}_{}", clean_company, lang, b_target);
+                                            let c_name_desc = format!("{} associated with '{}'", b_desc, clean_company);
+                                            
+                                            // Vector Search
+                                            let bias_emb_vec = model.get_embedding(b_bias.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                                            let prej_emb_vec = model.get_embedding(b_prej.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
+
+                                            let mut passed_lines = Vec::new();
+                                            let mut best_score = -1.0;
+
+                                            for (i, line_emb) in line_embs.iter().enumerate() {
+                                                let b_score = cosine_similarity(line_emb, &bias_emb_vec);
+                                                let p_score = cosine_similarity(line_emb, &prej_emb_vec);
+                                                let score = b_score - (p_score * 0.3);
+                                                if score > best_score { best_score = score; }
+                                                if score >= 0.10 {
+                                                    passed_lines.push(lines[i].clone());
+                                                }
+                                            }
+
+                                            if !passed_lines.is_empty() {
+                                                emit_term(&format!("[EXTRACTION] ✅ Phase 2 Vector matched for {} (최고 점수: {:.4})", c_name_desc, best_score));
+                                                target_matched_lines.insert(c_name_target.clone(), passed_lines.clone());
+                                                
+                                                let bias_keywords: Vec<&str> = b_bias.split(',')
+                                                    .map(|s| s.trim())
+                                                    .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
+                                                    .collect();
+                                                
+                                                for keyword in bias_keywords {
+                                                    let split_target_name = format!("{}_{}", c_name_target, keyword);
+                                                    let split_target_desc = format!("{} associated with '{}'", c_name_desc, keyword);
+
+                                                    target_matched_lines.insert(split_target_name.clone(), passed_lines.clone());
+                                                    
+                                                    // valid_targets에 Phase 2 타겟 append!
+                                                    valid_targets.push((
+                                                        split_target_name,
+                                                        c_name_target.clone(), // 🌟 Phase 2에서는 이것을 덮어씀 (ex: 레알 마드리드_korean_name)
+                                                        split_target_desc,
+                                                        keyword.to_string(),
+                                                        b_prej.to_string(),
+                                                        true // 🌟 Phase 2 플래그!
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 만약 valid_targets.len()을 넘어섰다면 진짜 끝
+                        if p_idx >= valid_targets.len() { break; }
+                        let (target_name, base_target, target_item, target_bias, target_prejudice, is_phase2) = valid_targets[p_idx].clone();
+                        p_idx += 1;
                         
                         // 🌟 [추가] 현재 찾고 있는 타겟과 일치하는 값들만 모아 CoT 프롬프트에 주입할 배열
                         let mut current_target_found: Vec<String> = Vec::new();
@@ -1036,6 +1117,15 @@ async fn process_task(
                         // 🌟 [CRITICAL FIX] 이전 항목(target)에서 추출하여 치환해둔 마커를 이번 컨텍스트에도 강제로 적용합니다. 
                         // 이를 통해 Qwen3가 동일한 값을 중복 추출하거나 혼동하는 현상을 완벽히 차단합니다.
                         for (original_val, marker) in &replacement_history {
+                            // 🌟 [Phase 2 오버랩 방어] Phase 2의 name/username 타겟은 원본 텍스트를 봐야 하므로 
+                            // 이미 치환된 마커(NAME, USERNAME)를 덮어쓰지 않고 건너뜁니다!
+                            if is_phase2 {
+                                if let Some(final_repl) = skip_map.get(marker) {
+                                    if final_repl.contains("NAME:") || final_repl.contains("USERNAME:") {
+                                        continue; 
+                                    }
+                                }
+                            }
                             matched_context = matched_context.replace(original_val, marker);
                         }
 
@@ -1314,6 +1404,10 @@ async fn process_task(
                                         current_target_found.push(p.to_string());
                                         domain_history.push((target_name.to_string(), p.to_string()));
                                         
+                                        if base_target == "company" {
+                                            phase2_companies.push(p.to_string());
+                                        }
+
                                         skip_counter += 1;
                                         
                                         all_matches.push(json!({
@@ -1359,6 +1453,43 @@ async fn process_task(
                             // 🌟 성공적으로 추출했으므로 추출 횟수 카운터를 증가시킵니다. (무한 루프 방지용)
                             item_extract_count += 1; 
 
+                            // 🌟 [Phase 2 오버랩 방어] 앞단에 이미 치환된 마커로 동일하게 덮어쓰기!
+                            if is_phase2 {
+                                let mut found_marker = None;
+                                for (orig, marker) in &replacement_history {
+                                    if orig == &extracted_val {
+                                        found_marker = Some(marker.clone());
+                                        break;
+                                    }
+                                }
+                                
+                                if let Some(marker) = found_marker {
+                                    emit_term(&format!("[EXTRACTION] 🔄 Phase 2 Overlap: '{}' is already masked. Upgrading marker...", extracted_val));
+                                    
+                                    let mnemonic = crate::parsing::generate_mnemonic();
+                                    let upper_key = base_target.to_uppercase(); // ex: "레알 마드리드_KOREAN_NAME"
+                                    let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                                    
+                                    // skip_map 의 최종 치환 문자열을 Phase 2 타겟으로 덮어씁니다!
+                                    skip_map.insert(marker.clone(), final_replacement.clone());
+                                    
+                                    // all_matches 업데이트
+                                    for match_val in all_matches.iter_mut() {
+                                        if let Some(obj) = match_val.as_object_mut() {
+                                            if obj.get("value").and_then(|v| v.as_str()) == Some(extracted_val.as_str()) {
+                                                obj.insert("name".to_string(), json!(upper_key.clone()));
+                                                obj.insert("mnemonic".to_string(), json!(mnemonic.clone()));
+                                            }
+                                        }
+                                    }
+                                    
+                                    current_target_found.push(extracted_val.clone());
+                                    domain_history.push((target_name.to_string(), extracted_val.clone()));
+
+                                    continue; // 🌟 새로운 마커 생성을 건너뛰고 바로 다음 루프로!
+                                }
+                            }
+
                             // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 [___REDACTED_N___] 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
                             let upper_key = base_target.to_uppercase(); 
@@ -1378,6 +1509,10 @@ async fn process_task(
                             // 🌟 [해결책 1 적용] 타겟 전용 이력과 Logit 제어용 전역 이력에 찾은 값을 기록합니다.
                             current_target_found.push(extracted_val.clone());
                             domain_history.push((target_name.to_string(), extracted_val.clone()));
+
+                            if base_target == "company" {
+                                phase2_companies.push(extracted_val.clone());
+                            }
 
                             skip_counter += 1;
 
