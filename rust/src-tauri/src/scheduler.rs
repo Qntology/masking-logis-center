@@ -1038,20 +1038,33 @@ async fn process_task(
                             let exists_in_title = doc_title.contains(&extracted_val);
                             let exists_in_desc = doc_desc.contains(&extracted_val);
 
-                            // 🌟 [추가] 연락처(contact number)일 경우, LLM이 하이픈(-)이나 공백을 마음대로 제거/추가하여 매칭이 안 되는 현상 방어
+                            // 🌟 [전략 A & D 적용] 띄어쓰기 증발/변형에 대한 전역 보정 로직 (Space-Agnostic Validation)
                             if !extracted_val.is_empty() && extracted_val != "..." && extracted_val != "null" && !exists_in_context && !exists_in_body && !exists_in_title && !exists_in_desc {
                                 if target_name == "contact_number" {
-                                    // 순수 숫자만 추출
+                                    // 연락처 특화 정규식 보정 (기존 로직 유지)
                                     let digits_only: String = extracted_val.chars().filter(|c| c.is_digit(10)).collect();
-                                    
-                                    // 전화번호 길이(일반적으로 8자리 이상)일 때만 유연한 정규식 탐색 시도
                                     if digits_only.len() >= 8 {
-                                        // 숫자 사이에 옵셔널 하이픈, 점, 공백 등을 허용하는 정규식 동적 생성 (예: 0[-.\s]*1[-.\s]*0...)
                                         let regex_pattern = digits_only.chars().map(|c| c.to_string()).collect::<Vec<String>>().join(r"[-.\s]*");
-                                        
                                         if let Ok(re) = regex::Regex::new(&regex_pattern) {
                                             if let Some(mat) = re.find(&masked_text) {
-                                                // 정규식으로 실제 원본 텍스트에 존재하는 형태를 찾아 extracted_val을 덮어씌움
+                                                extracted_val = mat.as_str().to_string();
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // 🌟 [일반 텍스트 보정] 공백을 완전히 무시한 정규식을 동적 생성하여 원본 텍스트에 존재하는 형태(띄어쓰기 포함)를 복원합니다.
+                                    let no_space_val: String = extracted_val.chars().filter(|c| !c.is_whitespace()).collect();
+                                    
+                                    // 정규식 엔진의 부하를 막기 위해 글자 수가 2글자 이상 100글자 이하일 때만 수행
+                                    if no_space_val.len() >= 2 && no_space_val.len() <= 100 {
+                                        // 정규식 특수문자 이스케이프 후 띄어쓰기 허용 패턴 조립 (예: 조\s*세\s*무\s*리\s*뉴)
+                                        let escaped_chars: Vec<String> = no_space_val.chars().map(|c| regex::escape(&c.to_string())).collect();
+                                        let regex_pattern = escaped_chars.join(r"\s*");
+                                        
+                                        if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                            // 본문, 제목, 압축 문맥 순으로 탐색하여 원래 형태 복원 시도
+                                            if let Some(mat) = re.find(&masked_text).or_else(|| re.find(&matched_context)).or_else(|| re.find(&doc_title)) {
+                                                emit_term(&format!("[DEBUG] 띄어쓰기 보정 성공: '{}' -> '{}'", extracted_val, mat.as_str()));
                                                 extracted_val = mat.as_str().to_string();
                                             }
                                         }
@@ -1084,6 +1097,9 @@ async fn process_task(
                                 if miss_counter > 3 {
                                     break; 
                                 }
+                                // 🌟 [전략 D 적용] 무작정 ignore_list에 넣기 전에 로깅하여 어떤 값이 날아갔는지 파악합니다.
+                                emit_term(&format!("[DEBUG] 환각/오탐지 감지 (재시도 {}/3): '{}'", miss_counter, extracted_val));
+                                
                                 // 🌟 [CRITICAL FIX] Tokenizer 꼼수를 부리지 못하도록 공백을 포함한 변형도 함께 억제 리스트에 넣습니다.
                                 ignore_list.push(extracted_val.clone());
                                 ignore_list.push(format!(" {}", extracted_val));
