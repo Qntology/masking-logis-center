@@ -829,12 +829,209 @@ async fn process_task(
                     }
 
                     emit_term("[EXTRACTION] 🧠 [포그라운드] Embedding 모델 로드 및 벡터 유사도 사전 검증 시작...");
-
-                    // 🌟 포그라운드: 임베딩 모델 명시적 로드
                     model.ensure_embedding().await?;
-                    
+
+                    // 🌟 전역 상태 변수들 최상단으로 호이스팅 (1차, 2차 패스 공유)
+                    let mut all_matches = Vec::new();
+                    masked_text = target_text.clone(); 
+                    let mut skip_counter = 0; 
+                    let mut skip_map = std::collections::HashMap::new(); 
+                    let mut replacement_history: Vec<(String, String)> = Vec::new(); 
+                    let mut domain_history: Vec<(String, String)> = Vec::new(); 
+
+                    // 🌟 [사전 정규식 추출] email 먼저 마스킹 (1차 패스 전)
+                    if let Ok(email_re) = regex::Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}") {
+                        let mut found_emails = std::collections::HashSet::new();
+                        for mat in email_re.find_iter(&masked_text) { found_emails.insert(mat.as_str().to_string()); }
+                        for email_val in found_emails {
+                            let mnemonic = crate::parsing::generate_mnemonic();
+                            let upper_key = "EMAIL".to_string();
+                            let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+                            masked_text = masked_text.replace(&email_val, &skip_marker);
+                            doc_title = doc_title.replace(&email_val, &skip_marker);
+                            doc_desc = doc_desc.replace(&email_val, &skip_marker);
+                            skip_map.insert(skip_marker.clone(), final_replacement);
+                            replacement_history.push((email_val.clone(), skip_marker.clone()));
+                            domain_history.push(("email".to_string(), email_val.clone()));
+                            skip_counter += 1;
+                            all_matches.push(json!({ "name": upper_key, "value": email_val, "mnemonic": mnemonic }));
+                            emit_term(&format!("[EXTRACTION] 📧 이메일 정규식 사전 추출 성공: {} -> 강제 마스킹 완료", email_val));
+                        }
+                    }
+
+                    // 🌟 1차 패스용 라인 분할 (masked_text 기반)
                     let structural_tags = ["html", "body", "div", "p", "span", "thead", "tbody", "tr", "td", "th", "table"];
-                    let lines: Vec<String> = target_text.lines()
+                    let mut lines: Vec<String> = masked_text.lines()
+                        .map(|s| s.trim().trim_start_matches('|').trim().to_string())
+                        .filter(|s| {
+                            let s_lower = s.to_lowercase();
+                            s.len() > 2 && !structural_tags.contains(&s_lower.as_str())
+                        })
+                        .collect();
+
+                    // =====================================================================
+                    // 🌟 [PASS 1: Company Anchoring] 조직/팀 최우선 1줄 통째 매칭 및 마스킹
+                    // =====================================================================
+                    emit_term(&format!("[EXTRACTION] 🏢 [PASS 1] 'company' 항목 1줄(Line) 단위 통째 매칭 시작..."));
+                    
+                    // 🌟 LLM 무조건 1차 대기 (Inference를 위해)
+                    emit_term("[EXTRACTION] 🧠 LLM 로딩 동기화 대기 중...");
+                    let _ = llm_load_handle.await;
+                    model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await?;
+                    
+                    let mut company_biases_embs = Vec::new();
+                    let mut company_prejs_embs = Vec::new();
+                    let mut company_targets_info = Vec::new();
+
+                    for (c_name, base_target, c_desc) in &dynamic_target_items {
+                        if base_target == "company" {
+                            let mut b_val = "".to_string();
+                            let mut p_val = "".to_string();
+                            if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
+                                b_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                p_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            }
+                            if p_val.trim().is_empty() { p_val = "random unrelated noise".to_string(); }
+
+                            let b_emb = model.get_embedding(b_val.clone()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                            let p_emb = model.get_embedding(p_val.clone()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                            company_biases_embs.push(b_emb);
+                            company_prejs_embs.push(p_emb);
+                            company_targets_info.push((c_name.clone(), base_target.clone(), c_desc.clone(), b_val, p_val));
+                        }
+                    }
+
+                    let mut p1_target_matched_lines: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                    let mut p1_valid_targets = Vec::new();
+
+                    // 각 라인 통째로 Company 벡터와 유사도 대결
+                    for (i, line_text) in lines.iter().enumerate() {
+                        let line_emb = model.get_embedding(line_text.clone()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                        
+                        for (idx, (c_name, _, _, _, _)) in company_targets_info.iter().enumerate() {
+                            let b_score = cosine_similarity(&line_emb, &company_biases_embs[idx]);
+                            let p_score = cosine_similarity(&line_emb, &company_prejs_embs[idx]);
+                            let score = b_score - (p_score * 0.3); // Line-level은 패널티 적게
+
+                            // 🌟 1차 패스는 임계값을 0.25로 높여서 확실한 경우만 잡음
+                            if score >= 0.25 {
+                                p1_target_matched_lines.entry(c_name.clone()).or_default().push(line_text.clone());
+                            }
+                        }
+                    }
+
+                    for (c_name, base_target, c_desc, b_val, p_val) in company_targets_info {
+                        let lines_to_insert = if let Some(passed_lines) = p1_target_matched_lines.get_mut(&c_name) {
+                            passed_lines.sort();
+                            passed_lines.dedup();
+                            Some(passed_lines.clone())
+                        } else {
+                            None
+                        };
+
+                        if let Some(passed_lines) = lines_to_insert {
+                            let bias_keywords: Vec<&str> = b_val.split(',')
+                                .map(|s| s.trim())
+                                .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
+                                .collect();
+
+                            for keyword in bias_keywords {
+                                let lang_prefix = c_name.split('_').next().unwrap_or("english");
+                                let split_target_name = format!("{}_{}", lang_prefix, keyword);
+                                let split_target_desc = format!("{} associated with '{}'", c_desc, keyword);
+
+                                p1_target_matched_lines.insert(split_target_name.clone(), passed_lines.clone());
+                                p1_valid_targets.push((split_target_name, base_target.clone(), split_target_desc, keyword.to_string(), p_val.clone(), false));
+                            }
+                        }
+                    }
+
+                    if !p1_valid_targets.is_empty() {
+                        for (target_name, base_target, target_item, target_bias, target_prejudice, _) in p1_valid_targets {
+                            if cancellation_token.load(Ordering::Relaxed) { break; }
+                            let matched_lines = p1_target_matched_lines.get(&target_name).cloned().unwrap_or_default();
+                            let mut matched_context = matched_lines.join("\n");
+                            
+                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, "", "");
+                            
+                            // 🌟 Compact Inference
+                            let res_mask = if is_large_context {
+                                let gen_arc = model.generator.clone();
+                                let mut gen_guard = gen_arc.lock().await;
+                                if let Some(gen) = gen_guard.as_mut() {
+                                    let params = crate::openai_types::ChatCompletionParameters {
+                                        messages: vec![
+                                            crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: system_prompt, name: None }),
+                                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(user_prompt), name: None })
+                                        ],
+                                        model: "qwen".to_string(), max_tokens: Some(512), temperature: Some(0.0), top_p: Some(0.1), ..Default::default()
+                                    };
+                                    let _ = gen.clear_kv_cache();
+                                    let res = gen.generate(params, Some(cancellation_token.clone()), None, None, None).await.unwrap_or_default();
+                                    let _ = gen.clear_kv_cache();
+                                    res
+                                } else { String::new() }
+                            } else {
+                                let gen_arc = model.qwen3_generator.clone();
+                                let system_clone = system_prompt.clone();
+                                let user_clone = user_prompt.clone();
+                                let cancel_clone = cancellation_token.clone();
+                                tokio::task::spawn_blocking(move || -> String {
+                                    let mut gen_guard = gen_arc.blocking_lock();
+                                    if let Some(gen) = gen_guard.as_mut() {
+                                        let params = crate::openai_types::ChatCompletionParameters {
+                                            messages: vec![
+                                                crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: system_clone, name: None }),
+                                                crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(user_clone), name: None })
+                                            ],
+                                            model: "qwen3".to_string(), max_tokens: Some(512), temperature: Some(0.0), top_p: Some(0.1), ..Default::default()
+                                        };
+                                        gen.clear_kv_cache();
+                                        let res = gen.generate(params, Some(cancel_clone), None, None).unwrap_or_default();
+                                        gen.clear_kv_cache();
+                                        res
+                                    } else { String::new() }
+                                }).await.unwrap_or_default()
+                            };
+
+                            let parsed = crate::parsing::parse_json_from_llm(&res_mask);
+                            let extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                            
+                            // 임시 마커 환각 필터링 추가
+                            if extracted_val.contains("___REDACTED_") || extracted_val.contains("REDACTED") {
+                                continue;
+                            }
+
+                            if !extracted_val.is_empty() && extracted_val != "..." && extracted_val != "null" && matched_context.contains(&extracted_val) {
+                                emit_term(&format!("[EXTRACTION] 🏢 [PASS 1] Company 찾음: '{}' -> 완전 블라인드 마스킹 처리 중...", extracted_val));
+                                let mnemonic = crate::parsing::generate_mnemonic();
+                                let upper_key = base_target.to_uppercase(); 
+                                let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                                let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+                                
+                                masked_text = masked_text.replace(&extracted_val, &skip_marker);
+                                doc_title = doc_title.replace(&extracted_val, &skip_marker);
+                                doc_desc = doc_desc.replace(&extracted_val, &skip_marker);
+                                
+                                skip_map.insert(skip_marker.clone(), final_replacement);
+                                replacement_history.push((extracted_val.clone(), skip_marker.clone()));
+                                domain_history.push((target_name.clone(), extracted_val.clone()));
+                                skip_counter += 1;
+                                all_matches.push(json!({ "name": upper_key, "value": extracted_val, "mnemonic": mnemonic }));
+                            }
+                        }
+                    } else {
+                        emit_term("[EXTRACTION] 🏢 [PASS 1] 매칭된 Company가 없습니다. 다음 패스로 넘어갑니다.");
+                    }
+
+                    // =====================================================================
+                    // 🌟 [PASS 2: NMS 기반 전체 추출] 마스킹된 텍스트로 NMS 다시 시작
+                    // =====================================================================
+                    emit_term("[EXTRACTION] ⚔️ [PASS 2] 마스킹된 텍스트로 NMS 배틀 및 전체 항목 추출 시작...");
+                    
+                    // lines 재분할 (마스킹 적용된 masked_text 기준)
+                    lines = masked_text.lines()
                         .map(|s| s.trim().trim_start_matches('|').trim().to_string())
                         .filter(|s| {
                             let s_lower = s.to_lowercase();
@@ -908,8 +1105,8 @@ async fn process_task(
                                     }
                                 }
 
-                                // 커트라인 0.05를 넘은 기초 유망 후보군만 등록
-                                if best_score > 0.05 {
+                                // 🌟 2차 패스 커트라인 상향 (노이즈 방어)
+                                if best_score > 0.25 {
                                     let final_score = best_score * length_weight;
                                     raw_spans.push(ChunkSpan {
                                         line_idx, start, end, text: chunk_text, best_target_idx, score: final_score
@@ -1020,59 +1217,10 @@ async fn process_task(
                         }
                     }
 
-                    emit_term("[EXTRACTION] 🧠 벡터 유사도 검증 완료. LLM 로딩 동기화 대기 중...");
+                    emit_term("[EXTRACTION] 🧠 2차 패스 벡터 유사도 검증 완료. 추론 준비...");
                     
-                    // 🌟 Qwen3 로드가 안 끝났다면 여기서 완료될 때까지 대기
-                    let _ = llm_load_handle.await;
-                    
-                    // 🌟 혹시라도 bg 락 충돌이나 기타 이유로 실패했을 경우를 대비한 안전망 
-                    // (이미 로드되어 있으면 secure_vram_relay는 내부적으로 purge 없이 0ms만에 패스합니다)
-                    model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await?;
-                    emit_term("[EXTRACTION] ✅ LLM 로딩 완료. 추론 루프 시작.");
-
-                    let mut all_matches = Vec::new();
-                    masked_text = target_text.clone(); // 반복 마스킹을 위해 루프 진입 전 초기화
-                    let mut skip_counter = 0; // 🌟 추가: SKIP N 카운터
-                    let mut skip_map = std::collections::HashMap::new(); // 🌟 추가: SKIP N -> Mnemonic 매핑
-                    let mut replacement_history: Vec<(String, String)> = Vec::new(); // 🌟 [CRITICAL FIX] 이전 타겟에서 추출된 원본->마커 치환 내역 보존
-                    
-                    // 🌟 [추가] 다른 도메인(타겟)에서 찾은 값들을 기록하여 Logit 제어에 사용하기 위한 전역 맵
-                    let mut domain_history: Vec<(String, String)> = Vec::new(); 
-
-                    // 🌟 [사전 정규식 추출] email 항목은 LLM 부하를 줄이기 위해 정규식으로 즉시 추출하고 먼저 마스킹해버립니다.
-                    if let Ok(email_re) = regex::Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}") {
-                        // 중복 추출을 방지하기 위해 HashSet을 사용합니다.
-                        let mut found_emails = std::collections::HashSet::new();
-                        for mat in email_re.find_iter(&masked_text) {
-                            found_emails.insert(mat.as_str().to_string());
-                        }
-
-                        for email_val in found_emails {
-                            let mnemonic = crate::parsing::generate_mnemonic();
-                            let upper_key = "EMAIL".to_string();
-                            let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
-
-                            // 본문, 제목, 설명에서 이메일을 찾아 임시 마커로 강제 치환합니다.
-                            masked_text = masked_text.replace(&email_val, &skip_marker);
-                            doc_title = doc_title.replace(&email_val, &skip_marker);
-                            doc_desc = doc_desc.replace(&email_val, &skip_marker);
-
-                            skip_map.insert(skip_marker.clone(), final_replacement);
-                            replacement_history.push((email_val.clone(), skip_marker.clone()));
-                            domain_history.push(("email".to_string(), email_val.clone()));
-
-                            skip_counter += 1;
-
-                            all_matches.push(json!({
-                                "name": upper_key,
-                                "value": email_val,
-                                "mnemonic": mnemonic
-                            }));
-                            
-                            emit_term(&format!("[EXTRACTION] 📧 이메일 정규식 사전 추출 성공: {} -> 강제 마스킹 완료", email_val));
-                        }
-                    }
+                    // 🌟 1차 패스에서 이미 LLM 로딩 및 동기화가 완료되었으므로 바로 루프 시작
+                    emit_term("[EXTRACTION] ✅ LLM 2차 추론 루프 시작.");
 
                     let total_valid = valid_targets.len();
 
