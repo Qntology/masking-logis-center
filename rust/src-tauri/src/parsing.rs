@@ -751,17 +751,29 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
         Node::Text(text) => {
             if *mode == PugMode::FullContent || *mode == PugMode::DetailMode || *mode == PugMode::TheadMode || *mode == PugMode::ListMode || *mode == PugMode::NoAttributesMode || *mode == PugMode::YamlMode {
                 
-                // 🌟 원본 텍스트의 띄어쓰기를 최대한 보존하면서 인라인 텍스트들을 묶습니다.
-                let t = text.replace('\n', " ").replace('\r', "");
-                let t = regex::Regex::new(r"\s+").unwrap().replace_all(&t, " ").to_string();
+                // 🌟 원본 텍스트의 개행(\n)을 유지하여 문단이 통째로 뭉개지는 현상을 방지합니다.
+                let text_clean = text.replace('\r', "");
+                let lines: Vec<&str> = text_clean.split('\n').collect();
                 
-                if !t.is_empty() {
-                    if let Some(c) = ctx.as_mut() {
-                        // 만약 버퍼가 비어있다면, 현재 텍스트의 뎁스가 이 줄의 기본 뎁스가 됩니다.
-                        if c.inline_buffer.is_empty() {
-                            c.inline_indent = indent_level;
+                for (i, line) in lines.iter().enumerate() {
+                    let t = regex::Regex::new(r"\s+").unwrap().replace_all(line, " ").to_string();
+                    let t_trim = t.trim();
+                    
+                    if !t_trim.is_empty() {
+                        if let Some(c) = ctx.as_mut() {
+                            // 만약 버퍼가 비어있다면, 현재 텍스트의 뎁스가 이 줄의 기본 뎁스가 됩니다.
+                            if c.inline_buffer.is_empty() {
+                                c.inline_indent = indent_level;
+                            } else if !c.inline_buffer.ends_with(' ') {
+                                c.inline_buffer.push(' ');
+                            }
+                            c.inline_buffer.push_str(t_trim);
                         }
-                        c.inline_buffer.push_str(&t);
+                    }
+                    
+                    // 원본 텍스트에 물리적인 줄바꿈이 있었다면 버퍼를 방출하여 독립된 벡터 라인으로 보존합니다.
+                    if i < lines.len() - 1 {
+                        flush_inline_buffer(output, mode, ctx);
                     }
                 }
             }
@@ -913,36 +925,38 @@ pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, t
 
     // 🌟 [CRITICAL FIX] 각 컬럼의 semantic, bias, prejudice 기준에 맞춰 LLM이 3단계로 검증하는 구체적인 CoT 사고 과정을 동적 생성합니다.
     let column_specific_cot = match target_name {
-        "email" => "Step 1 (Semantic): Verify if the text represents an 'electronic mail address'. Step 2 (Bias): Check for the presence of elements like '@', '.com', '.net', '.co.kr', '.org', 'email', 'e-mail', 'mailto', or 'mail'. Step 3 (Prejudice): Strictly reject if the text is a physical address, postal code, or phone number. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT].",
-        "contact_number" => "Step 1 (Semantic): Verify if the text represents a 'phone number, mobile number, or contact number'. Step 2 (Bias): Check for patterns or keywords like '010', '02', '031', '070', 'phone', 'mobile', 'tel', 'contact', 'number', or '+82'. Step 3 (Prejudice): Strictly reject if the text matches an email, address, age, price, or amount. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT].",
-        "name" => "Step 1 (Semantic): Verify if the text represents a 'person's name'. Step 2 (Bias): Check for associated clues like 'reporter', 'player', 'coach', 'representative', 'council member', 'mr', 'ms', 'name', 'person', 'first name', or 'full name'. Step 3 (Prejudice): Strictly reject if the text is a company, corporate, business, team, location, place, animal, or object. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT].",
-        "username" => "Step 1 (Semantic): Verify if the text represents a 'user ID, account name, or nickname'. Step 2 (Bias): Check for contextual clues like 'id', 'username', 'nickname', 'account', or 'user'. Step 3 (Prejudice): Strictly reject if the text is a real human name, email, or password. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT].",
-        "address" => "Step 1 (Semantic): Verify if the text represents a 'physical street address or location'. Step 2 (Bias): Look for geographic indicators like 'city', 'province', 'district', 'neighborhood', 'town', 'village', 'road', 'street', 'house number', 'apartment', 'building', 'address', or 'location'. Step 3 (Prejudice): Strictly reject if the text is an email, ip address, URL, web link, date (e.g., '25-01-07'), time (e.g., '16:24'), or order number. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT].",
-        "company" => "Step 1 (Semantic): Verify if the text represents a 'company name, organization, institution, or corporate entity'. Step 2 (Bias): Look for business indicators like 'company', 'inc', 'corp', 'ltd', 'organization', 'institution', 'corporation', 'firm', 'agency', 'enterprise', or 'business'. Step 3 (Prejudice): Strictly reject if the text refers to a person, individual, man, woman, human, name, player, or reporter. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT].",
-        _ => "Step 1 (Semantic): Identify the semantic meaning of the text. Step 2 (Bias): Compare the visible text against the Context clues (Bias). Step 3 (Prejudice): Strictly reject any text matching the (Prejudice) criteria. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT]."
+        "email" => "Step 1 (Semantic): Verify if the text represents an 'electronic mail address'. Step 2 (Bias): Check for the presence of elements like '@', '.com', '.net', '.co.kr', '.org', 'email', 'e-mail', 'mailto', or 'mail'. Step 3 (Prejudice): Strictly reject if the text is a physical address, postal code, or phone number. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation.",
+        "contact_number" => "Step 1 (Semantic): Verify if the text represents a 'phone number, mobile number, or contact number'. Step 2 (Bias): Check for patterns or keywords like '010', '02', '031', '070', 'phone', 'mobile', 'tel', 'contact', 'number', or '+82'. Step 3 (Prejudice): Strictly reject if the text matches an email, address, age, price, or amount. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation.",
+        "name" => "Step 1 (Semantic): Verify if the text represents a 'person's name'. Step 2 (Bias): Check for associated clues like 'reporter', 'player', 'coach', 'representative', 'council member', 'mr', 'ms', 'name', 'person', 'first name', or 'full name'. Step 3 (Prejudice): Strictly reject if the text is a company, corporate, business, team, location, place, animal, or object. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation.",
+        "username" => "Step 1 (Semantic): Verify if the text represents a 'user ID, account name, or nickname'. Step 2 (Bias): Check for contextual clues like 'id', 'username', 'nickname', 'account', or 'user'. Step 3 (Prejudice): Strictly reject if the text is a real human name, email, or password. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation.",
+        "address" => "Step 1 (Semantic): Verify if the text represents a 'physical street address or location'. Step 2 (Bias): Look for geographic indicators like 'city', 'province', 'district', 'neighborhood', 'town', 'village', 'road', 'street', 'house number', 'apartment', 'building', 'address', or 'location'. Step 3 (Prejudice): Strictly reject if the text is an email, ip address, URL, web link, date (e.g., '25-01-07'), time (e.g., '16:24'), or order number. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation.",
+        "company" => "Step 1 (Semantic): Verify if the text represents a 'company name, organization, institution, or corporate entity'. Step 2 (Bias): Look for business indicators like 'company', 'inc', 'corp', 'ltd', 'organization', 'institution', 'corporation', 'firm', 'agency', 'enterprise', or 'business'. Step 3 (Prejudice): Strictly reject if the text refers to a person, individual, man, woman, human, name, player, or reporter. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation.",
+        _ => "Step 1 (Semantic): Identify the semantic meaning of the text. Step 2 (Bias): Compare the visible text against the Context clues (Bias). Step 3 (Prejudice): Strictly reject any text matching the (Prejudice) criteria. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation."
     };
 
     let user_template = r###"[TASK] Analyze the provided [PUG CONTENT] from top to bottom.
 
 [SCHEMA DEFINITIONS]
+- context: String. [PUG CONTENT] {PUG_CONTENT}.
 - reasoning: String. Step-by-step chain of thought. {COLUMN_SPECIFIC_COT} If the text is a date, ID, or order number but you are looking for an address/name, explain why it should be rejected.
 - {TARGET_NAME}: String. Extract the {TARGET_ITEM} value. If no valid data matches the bias after reasoning, return an empty string "".
-  * Context clues (Bias): {TARGET_BIAS}
-  * DO NOT confuse with (Prejudice): {TARGET_PREJUDICE}
-  * CRITICAL 1: You MUST extract the EXACT original substring exactly as it appears in the [PUG CONTENT].
-  * CRITICAL 2: DO NOT invent, guess, or use dummy examples.
-  * CRITICAL 3: If the exact value is NOT physically present in the [PUG CONTENT], you MUST return an empty string "".
+  * Bias (Acceptance Criteria): {TARGET_BIAS}
+  * Prejudice (Rejection Criteria): {TARGET_PREJUDICE}
+
+[CRITICAL INSTRUCTIONS]
+1. You MUST extract the EXACT original substring exactly as it appears in the [PUG CONTENT]. DO NOT TRANSLATE.
+2. DO NOT invent, guess, or use dummy examples.
+3. If the exact value is NOT physically present in the [PUG CONTENT], you MUST return an empty string "".
+4. NEVER translate the extracted value into English. Maintain the original language perfectly.
 
 [OUTPUT FORMAT]
-{
-    "reasoning": "Explain your evaluation here...",
-    "{TARGET_NAME}": "Extracted string or empty string"
-}
+{...}
 
 [ACTION] RETURN JSON ONLY."###;
 
     let system_prompt = system_template.replace("{PUG_CONTENT}", pug_content);
     let user_prompt = user_template
+        .replace("{PUG_CONTENT}", pug_content)
         .replace("{COLUMN_SPECIFIC_COT}", column_specific_cot)
         .replace("{TITLE}", title)
         .replace("{TARGET_NAME}", target_name)

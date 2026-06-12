@@ -133,6 +133,7 @@ pub struct LogisModel {
     pub qwen3_5_generator: Arc<TokioMutex<Option<Qwen3_5GenerateModel>>>,
     
     pub embedding_model: Arc<TokioMutex<Option<EmbeddingModel>>>,
+    pub privacy_manager: Arc<TokioMutex<Option<crate::models::privacy_filter::masking::PrivacyManager>>>,
 
     pub is_cpu_mode: bool, 
     pub is_disk_swap: bool,
@@ -143,6 +144,7 @@ pub struct LogisModel {
     qwen3_model_path: String,     // 🌟 Qwen3 모델 경로 추가
     qwen3_5_model_path: String,
     embedding_path: std::path::PathBuf,
+    privacy_model_path: String,
     pub device_config: utils::DeviceConfig,
     max_tokens_limit: u32,
     _dtype: Option<DType>, 
@@ -207,11 +209,17 @@ impl LogisModel {
             }
         }
         
-        println!("[DIAG-PURGE] Step 2: Clearing Embedding Model...");
+        println!("[DIAG-PURGE] Step 2: Clearing Embedding & Privacy Filter Model...");
         {
             let mut emb = self.embedding_model.lock().await;
             if let Some(e) = emb.take() { 
                 drop(e); 
+            }
+        }
+        {
+            let mut pm = self.privacy_manager.lock().await;
+            if let Some(p) = pm.take() { 
+                drop(p); 
             }
         }
         
@@ -796,6 +804,7 @@ impl LogisModel {
         let qwen3_model_path = normalize_path(base_path.join("Qwen3-0.6B-Instruct-gguf")); 
         let qwen3_5_model_path = normalize_path(base_path.join("Qwen3.5-2B-Instruct-gguf"));
         let embedding_path = base_path.join("granite-embedding-97m-multilingual-r2");
+        let privacy_model_path = normalize_path(base_path.join("privacy-filter-multilingual"));
 
         let max_tokens_limit = 65536; 
 
@@ -805,6 +814,7 @@ impl LogisModel {
             qwen3_generator: Arc::new(TokioMutex::new(None)), // 🌟 추가
             qwen3_5_generator: Arc::new(TokioMutex::new(None)),
             embedding_model: Arc::new(TokioMutex::new(None)),
+            privacy_manager: Arc::new(TokioMutex::new(None)),
             is_cpu_mode: config.is_cpu,
             is_disk_swap,
             dual_mode_enabled: true, 
@@ -812,11 +822,48 @@ impl LogisModel {
             qwen3_model_path,   // 🌟 교체
             qwen3_5_model_path,
             embedding_path,
+            privacy_model_path,
             device_config: config.clone(),
             max_tokens_limit: max_tokens_limit as u32,
             _dtype: None, 
             current_size: Arc::new(TokioMutex::new(None)),
         })
+    }
+
+    pub async fn ensure_privacy_filter(&self) -> anyhow::Result<()> {
+        let mut pm_guard = self.privacy_manager.lock().await;
+        if pm_guard.is_none() {
+            println!("[MODEL] Loading Privacy Filter Model...");
+            let target_device = self.device_config.device.clone();
+            let path_clone = self.privacy_model_path.clone();
+            
+            let pm = tokio::task::spawn_blocking(move || {
+                crate::models::privacy_filter::masking::PrivacyManager::new(&path_clone, &target_device)
+            }).await??;
+            
+            *pm_guard = Some(pm);
+        }
+        Ok(())
+    }
+
+    pub async fn get_bias_map(&self) -> std::collections::HashMap<String, (Vec<f32>, Vec<f32>)> {
+        let mut map = std::collections::HashMap::new();
+        let content = include_str!("bias.json");
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
+            if let Some(privacy) = json.get("privacy").and_then(|p| p.as_object()) {
+                for (cat, data) in privacy {
+                    let mut bias_text = String::new();
+                    if let Some(s) = data.get("semantic").and_then(|s| s.as_str()) { bias_text.push_str(s); }
+                    if let Some(b) = data.get("bias").and_then(|b| b.as_str()) { bias_text.push_str(" "); bias_text.push_str(b); }
+                    let prej_text = data.get("prejudice").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                    
+                    if let (Ok(bias_vec), Ok(prej_vec)) = (self.get_embedding(bias_text.clone()).await, self.get_embedding(prej_text.clone()).await) {
+                        map.insert(cat.clone(), (bias_vec, prej_vec));
+                    }
+                }
+            }
+        }
+        map
     }
 
     pub async fn extract_from_image(

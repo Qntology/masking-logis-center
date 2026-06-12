@@ -788,9 +788,13 @@ async fn process_task(
                     
                     // 🌟 [CRITICAL FIX] 전체 텍스트를 하나의 벡터로 뭉개지 않고, 
                     // 한 줄씩(Line-by-line) 쪼개서 개별 벡터로 만든 뒤 가장 높은 점수를 뽑아냅니다.
+                    let structural_tags = ["html", "body", "div", "p", "span", "thead", "tbody", "tr", "td", "th", "table"];
                     let lines: Vec<String> = target_text.lines()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| s.len() > 2) // 의미 없는 짧은 기호나 공백 줄은 임베딩 제외
+                        .map(|s| s.trim().trim_start_matches('|').trim().to_string())
+                        .filter(|s| {
+                            let s_lower = s.to_lowercase();
+                            s.len() > 2 && !structural_tags.contains(&s_lower.as_str())
+                        })
                         .collect();
                         
                     emit_term(&format!("[EXTRACTION] 본문을 {}개의 라인으로 분할하여 순차 임베딩 진행 중...", lines.len()));
