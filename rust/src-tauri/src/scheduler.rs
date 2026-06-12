@@ -753,7 +753,7 @@ async fn process_task(
                         // ("given_name", "person's given name"),
                         // ("middle_name", "person's middle name"),
                         // ("family_name", "person's family name or surname"),
-                        ("email", "email"),
+                        // 🌟 [수정] email은 정규식으로 사전 처리되므로 LLM 추론 목록에서 제외합니다.
                         ("contact_number", "contact number"),
                         ("name", "person's name"),
                         ("username", "person's username"),
@@ -772,6 +772,52 @@ async fn process_task(
                     // 🌟 [추가] bias.json 파일을 로드하여 privacy 객체 파싱 (선행 필터링용)
                     let bias_str = include_str!("bias.json");
                     let bias_json: Value = serde_json::from_str(bias_str).unwrap_or(json!({}));
+
+                    // 🌟 [수정] 다국어 유니코드 감지 로직 (50여 개 언어 코드 확장 적용)
+                    let mut detected_languages = std::collections::HashSet::new();
+                    
+                    for c in target_text.chars() {
+                        let u = c as u32;
+                        
+                        if (u >= 0x0041 && u <= 0x005A) || (u >= 0x0061 && u <= 0x007A) { detected_languages.insert("english"); }
+                        else if (u >= 0xAC00 && u <= 0xD7A3) || (u >= 0x1100 && u <= 0x11FF) || (u >= 0x3130 && u <= 0x318F) { detected_languages.insert("korean"); }
+                        else if (u >= 0x3040 && u <= 0x309F) || (u >= 0x30A0 && u <= 0x30FF) { detected_languages.insert("japanese"); }
+                        else if u >= 0x4E00 && u <= 0x9FFF { detected_languages.insert("chinese"); }
+                        else if u >= 0x0400 && u <= 0x04FF { detected_languages.insert("russian"); }
+                        else if u >= 0x0600 && u <= 0x06FF { detected_languages.insert("arabic"); }
+                        else if u >= 0x0E00 && u <= 0x0E7F { detected_languages.insert("thai"); }
+                        else if u >= 0x0900 && u <= 0x097F { detected_languages.insert("hindi"); }
+                        else if u >= 0x0980 && u <= 0x09FF { detected_languages.insert("bengali"); }
+                        else if u >= 0x0370 && u <= 0x03FF { detected_languages.insert("greek"); }
+                        else if u >= 0x0590 && u <= 0x05FF { detected_languages.insert("hebrew"); }
+                        else if u >= 0x1EA0 && u <= 0x1EF9 { detected_languages.insert("vietnamese"); }
+                        else if u >= 0x00C0 && u <= 0x00FF { 
+                            detected_languages.insert("french");
+                            detected_languages.insert("spanish");
+                            detected_languages.insert("german");
+                        }
+                    }
+                    
+                    let mut detected_languages_vec: Vec<String> = detected_languages.into_iter().map(|s| s.to_string()).collect();
+                    if detected_languages_vec.is_empty() { detected_languages_vec.push("english".to_string()); }
+
+                    emit_term(&format!("[EXTRACTION] 🌐 Detected Languages: {:?}", detected_languages_vec));
+
+                    // 🌟 [추가] 언어 기반 동적 타겟 확장 로직
+                    // bias.json에서는 기존 키를 사용하여 설정값을 가져오고, 컨텍스트(LLM)에만 언어 접두사를 붙여 전달합니다.
+                    let mut dynamic_target_items: Vec<(String, String, String)> = Vec::new();
+                    for (base_target, base_desc) in target_items {
+                        // 🌟 언어 맥락이 결과 품질에 큰 영향을 미치는 고유명사 형태의 타겟들을 지정합니다.
+                        if base_target == "name" || base_target == "company" || base_target == "address" || base_target == "username" || base_target == "contact_number" {
+                            for lang in &detected_languages_vec {
+                                let context_name = format!("{}_{}", lang, base_target);
+                                let context_desc = format!("{} {}", lang, base_desc);
+                                dynamic_target_items.push((context_name, base_target.to_string(), context_desc));
+                            }
+                        } else {
+                            dynamic_target_items.push((base_target.to_string(), base_target.to_string(), base_desc.to_string()));
+                        }
+                    }
 
                     // 🌟 [추가] 코사인 유사도 산출 헬퍼 함수
                     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -808,13 +854,14 @@ async fn process_task(
                     }
 
                     // 벡터 통과한 아이템만 담을 배열 및 매칭된 라인 저장 맵
-                    let mut valid_targets: Vec<(&str, String, String, String)> = Vec::new();
+                    let mut valid_targets: Vec<(String, String, String, String, String)> = Vec::new();
                     let mut target_matched_lines: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
-                    for (target_name, target_item) in target_items {
+                    for (context_name, base_target, context_desc) in dynamic_target_items {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
 
-                        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(target_name)) {
+                        // 🌟 bias.json 조회는 원본(base_target)인 "name"으로 하고, 컨텍스트는 context_name("korean_name")을 사용합니다.
+                        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(&base_target)) {
                             let bias_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("");
                             let prej_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("");
                             
@@ -846,23 +893,51 @@ async fn process_task(
                                     lines[i].clone()
                                 };
                                 
-                                emit_term(&format!("  🔍 [VECTOR] Item: [{}] | Score: {:.4} (Bias: {:.4}, Prej: {:.4}) | Line: '{}'", target_item, score, b_score, p_score, short_line));
+                                emit_term(&format!("  🔍 [VECTOR] Item: [{}] | Score: {:.4} (Bias: {:.4}, Prej: {:.4}) | Line: '{}'", context_desc, score, b_score, p_score, short_line));
 
-                                // 0.25 이상인 유효 라인만 모아두어 노이즈(가비지 텍스트)를 차단합니다.
-                                if score >= 0.25 {
+                                // 🌟 [Direction A 적용] 코사인 유사도 커트라인을 0.25에서 0.10으로 대폭 낮추어 숨겨진 고유명사가 필터링에서 누락되는 것을 방지합니다.
+                                if score >= 0.10 {
                                     passed_lines.push(lines[i].clone());
                                 }
                             }
 
                             if passed_lines.is_empty() {
-                                emit_term(&format!("[EXTRACTION] ⏭️ Skipping {} (최고 점수: {:.4} < 0.10)", target_item, best_score));
+                                emit_term(&format!("[EXTRACTION] ⏭️ Skipping {} (최고 점수: {:.4} < 0.10)", context_desc, best_score));
                             } else {
-                                emit_term(&format!("[EXTRACTION] ✅ Vector matched for {} (최고 점수: {:.4}, 매칭된 줄 수: {})", target_item, best_score, passed_lines.len()));
-                                target_matched_lines.insert(target_name.to_string(), passed_lines);
+                                emit_term(&format!("[EXTRACTION] ✅ Vector matched for {} (최고 점수: {:.4}, 매칭된 줄 수: {})", context_desc, best_score, passed_lines.len()));
+                                target_matched_lines.insert(context_name.clone(), passed_lines.clone());
                                 
                                 // 🌟 [CRITICAL FIX] bias.json의 풍부한 semantic 값을 추출하여 Qwen3에게 프롬프트 문맥으로 전달합니다!
-                                let semantic_item = privacy_node.get("semantic").and_then(|v| v.as_str()).unwrap_or(target_item);
-                                valid_targets.push((target_name, semantic_item.to_string(), bias_val.to_string(), prej_val.to_string()));
+                                // 기존 target_item 대신 context_desc를 씁니다.
+                                let semantic_item = privacy_node.get("semantic").and_then(|v| v.as_str()).unwrap_or(&context_desc);
+                                
+                                // 🌟 [3중 루프 직렬 추론 적용] bias_val을 콤마(,) 기준으로 분할하여 개별 타겟으로 쪼갭니다.
+                                // 🌟 [필터링 추가] 단순히 숫자나 특수문자로만 이루어진 키워드는 루프 폭발을 방지하기 위해 제외합니다.
+                                let bias_keywords: Vec<&str> = bias_val.split(',')
+                                    .map(|s| s.trim())
+                                    .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
+                                    .collect();
+                                
+                                for keyword in bias_keywords {
+                                    // 언어 접두사를 파싱합니다 (예: "korean_name" -> "korean")
+                                    let lang_prefix = context_name.split('_').next().unwrap_or("english");
+                                    
+                                    // 추론을 위한 초구체적인 타겟명 생성 (예: "korean_phone")
+                                    let split_target_name = format!("{}_{}", lang_prefix, keyword);
+                                    let split_target_desc = format!("{} associated with '{}'", context_desc, keyword);
+
+                                    // 쪼개진 타겟명으로도 매칭된 컨텍스트 라인을 읽을 수 있도록 복제하여 삽입
+                                    target_matched_lines.insert(split_target_name.clone(), passed_lines.clone());
+                                    
+                                    // valid_targets에 개별 분할된 키워드를 삽입하여 LLM 추론 시 3중 루프(폭발)를 유도
+                                    valid_targets.push((
+                                        split_target_name,               // target_name: LLM 프롬프트에 주입될 타겟명 ("korean_phone")
+                                        base_target.to_string(),         // base_target: 실제 DB에 저장 및 치환될 부모 필터명 ("contact_number")
+                                        split_target_desc,               // target_item: LLM에게 설명할 타겟 항목
+                                        keyword.to_string(),             // target_bias: 통째가 아닌, 쪼개진 "단일 키워드"만 주입!
+                                        prej_val.to_string()             // target_prejudice: 배제 조건은 기존 유지
+                                    ));
+                                }
                             }
                         }
                     }
@@ -882,31 +957,80 @@ async fn process_task(
                     let mut skip_counter = 0; // 🌟 추가: SKIP N 카운터
                     let mut skip_map = std::collections::HashMap::new(); // 🌟 추가: SKIP N -> Mnemonic 매핑
                     let mut replacement_history: Vec<(String, String)> = Vec::new(); // 🌟 [CRITICAL FIX] 이전 타겟에서 추출된 원본->마커 치환 내역 보존
+                    
+                    // 🌟 [추가] 다른 도메인(타겟)에서 찾은 값들을 기록하여 Logit 제어에 사용하기 위한 전역 맵
+                    let mut domain_history: Vec<(String, String)> = Vec::new(); 
+
+                    // 🌟 [사전 정규식 추출] email 항목은 LLM 부하를 줄이기 위해 정규식으로 즉시 추출하고 먼저 마스킹해버립니다.
+                    if let Ok(email_re) = regex::Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}") {
+                        // 중복 추출을 방지하기 위해 HashSet을 사용합니다.
+                        let mut found_emails = std::collections::HashSet::new();
+                        for mat in email_re.find_iter(&masked_text) {
+                            found_emails.insert(mat.as_str().to_string());
+                        }
+
+                        for email_val in found_emails {
+                            let mnemonic = crate::parsing::generate_mnemonic();
+                            let upper_key = "EMAIL".to_string();
+                            let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+
+                            // 본문, 제목, 설명에서 이메일을 찾아 임시 마커로 강제 치환합니다.
+                            masked_text = masked_text.replace(&email_val, &skip_marker);
+                            doc_title = doc_title.replace(&email_val, &skip_marker);
+                            doc_desc = doc_desc.replace(&email_val, &skip_marker);
+
+                            skip_map.insert(skip_marker.clone(), final_replacement);
+                            replacement_history.push((email_val.clone(), skip_marker.clone()));
+                            domain_history.push(("email".to_string(), email_val.clone()));
+
+                            skip_counter += 1;
+
+                            all_matches.push(json!({
+                                "name": upper_key,
+                                "value": email_val,
+                                "mnemonic": mnemonic
+                            }));
+                            
+                            emit_term(&format!("[EXTRACTION] 📧 이메일 정규식 사전 추출 성공: {} -> 강제 마스킹 완료", email_val));
+                        }
+                    }
 
                     let total_valid = valid_targets.len();
 
                     // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
-                    for (p_idx, (target_name, target_item, target_bias, target_prejudice)) in valid_targets.into_iter().enumerate() {
+                    for (p_idx, (target_name, base_target, target_item, target_bias, target_prejudice)) in valid_targets.into_iter().enumerate() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
                         
+                        // 🌟 [추가] 현재 찾고 있는 타겟과 일치하는 값들만 모아 CoT 프롬프트에 주입할 배열
+                        let mut current_target_found: Vec<String> = Vec::new();
                         let mut ignore_list: Vec<String> = Vec::new(); // 🌟 추가: 본문에 존재하지 않는 잘못된 추출값 기록
                         
                         // 🌟 [CRITICAL FIX] LLM이 임시 마커를 엔티티로 착각하고 뱉는 환각을 Logit 단계에서 원천 압살합니다!
-                        ignore_list.push("**SKIP READ".to_string());
-                        ignore_list.push("SKIP READ".to_string());
-                        ignore_list.push("SKIP".to_string());
-                        ignore_list.push("READ".to_string());
-                        ignore_list.push("Skip".to_string());
-                        ignore_list.push("Read".to_string());
-                        ignore_list.push("skip".to_string());
-                        ignore_list.push("read".to_string());
+                        ignore_list.push("[___REDACTED_".to_string());
+                        ignore_list.push("___REDACTED_".to_string());
+                        ignore_list.push("REDACTED".to_string());
+                        ignore_list.push("redacted".to_string());
+                        
+                        // 🌟 [해결책 1 적용] 이전에 찾은 값 중, 현재 타겟과 "다른" 도메인의 값들은 무조건 ignore_list에 넣어 Logit을 차단!
+                        for (history_target, history_val) in &domain_history {
+                            if *history_target != target_name {
+                                ignore_list.push(history_val.clone());
+                                ignore_list.push(format!(" {}", history_val));
+                                ignore_list.push(format!("\"{}", history_val));
+                                ignore_list.push(format!(" \"{}", history_val));
+                            }
+                        }
 
                         let mut miss_counter = 0; // 🌟 추가: 무한 루프 방지 카운터
                         let mut item_extract_count = 0; // 🌟 [추가] 각 항목별 최대 추출 횟수 제한 카운터
+                        let mut current_temperature: f64 = 0.0; // 🌟 [추가] LLM이 환각을 뱉을 때마다 창의성을 높여 빠져나오게 만드는 동적 온도 변수
+                        // let mut empty_count = 0; // 🌟 [추가] 빈 값 반환 횟수 추적
+                        let mut value_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new(); // 🌟 [추가] 동일한 오탐지 값 반복 횟수 추적
                         
                         // 🌟 [CRITICAL FIX] Qwen3에게 전체 문서(masked_text)를 주지 않고, 
                         // 앞서 벡터 유사도로 0.10점을 넘긴(통과한) PUG 라인들만 묶어서 제공합니다!
-                        let matched_lines = target_matched_lines.get(target_name).cloned().unwrap_or_default();
+                        let matched_lines = target_matched_lines.get(&target_name).cloned().unwrap_or_default();
                         let mut matched_context = matched_lines.join("\n");
 
                         // 🌟 [CRITICAL FIX] 이전 항목(target)에서 추출하여 치환해둔 마커를 이번 컨텍스트에도 강제로 적용합니다. 
@@ -926,11 +1050,24 @@ async fn process_task(
 
                             // 🌟 [CRITICAL FIX] Qwen3가 추출할 때는 `masked_text` 전체가 아닌, 압축된 `matched_context`만 줍니다.
                             // 이를 통해 불필요한 컨텍스트 토큰 소모를 방지하고 환각을 차단합니다.
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, target_name, &target_item, &target_bias, &target_prejudice);
                             
-                            // 🌟 CoT(Chain of Thought)를 위해 reasoning 키를 허용하도록 지침 완화
-                            system_prompt.push_str(&format!("\n\nCRITICAL INSTRUCTION:\nOutput ONLY a valid JSON object containing exactly two keys: \"reasoning\" and \"{}\". Do NOT output any other keys.", target_name));
+                            // 🌟 [Direction B 적용] 지금까지 찾은 추출값들을 모아서 프롬프트에 샘플로 전달합니다.
+                            // 🌟 [해결책 1 적용] 전체 history가 아닌 현재 타겟과 "동일한 도메인"에서 찾은 값만 CoT 프롬프트에 제공
+                            let already_found_str = if current_target_found.is_empty() {
+                                "".to_string()
+                            } else {
+                                current_target_found.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
+                            };
 
+                            // 🌟 [신규 추가] 매칭에 실패한 값(환각/오탐지 등)을 not_found 로 전달하여 LLM이 동일 실수를 반복하지 않도록 유도합니다.
+                            let not_found_str = if ignore_list.is_empty() {
+                                "".to_string()
+                            } else {
+                                ignore_list.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
+                            };
+
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str);
+                            
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
                                 "task_id": task.id.clone(),
@@ -962,17 +1099,21 @@ async fn process_task(
                                                 name: None,
                                             })
                                         ],
-                                        model: "qwen3".to_string(),
+                                        model: "qwen".to_string(),
                                         max_tokens: Some(1024),
-                                        temperature: Some(0.0),
-                                        top_p: Some(0.95),
+                                        temperature: Some(current_temperature), // 🌟 [동적 온도 적용]
+                                        top_p: Some(current_temperature),
                                         ..Default::default()
                                     };
+                                    
+                                    // 🌟 [CRITICAL FIX] 대형 문맥(Qwen) 추론 시작 전에 명시적으로 KV 캐시를 비워 환각을 방어합니다.
+                                    // let _ = gen.clear_kv_cache();
+
                                     // 🌟 [CRITICAL FIX] Qwen(대형 문맥) 추론 시 session_id와 kv_name을 주입하여 SSD 오프로딩 및 청크 병렬 처리가 동작하도록 수정합니다.
                                     let res = gen.generate(params, Some(cancel_clone), None, None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
                                     // let res = gen.generate(params, Some(cancel_clone), Some(session_id_clone), Some("masking".to_string()), None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
                                     
-                                    let _ = gen.clear_kv_cache();
+                                    // let _ = gen.clear_kv_cache();
                                     
                                     res
                                 } else {
@@ -1006,11 +1147,14 @@ async fn process_task(
                                             ],
                                             model: "qwen3".to_string(),
                                             max_tokens: Some(1024),
-                                            temperature: Some(0.0),
-                                            top_p: Some(0.95),
+                                            temperature: Some(current_temperature), // 🌟 [동적 온도 적용]
+                                            top_p: Some(current_temperature),
                                             ..Default::default()
                                         };
                                         
+                                        // 🌟 [CRITICAL FIX] Qwen3 추론 시작 전에 명시적으로 KV 캐시를 비워 오작동과 환각을 방어합니다.
+                                        // gen.clear_kv_cache();
+
                                         let res = gen.generate(
                                             params, 
                                             Some(cancel_clone), 
@@ -1018,7 +1162,7 @@ async fn process_task(
                                             None
                                         ).map_err(|e| anyhow::anyhow!("Qwen 3 Inference failed: {}", e));
                                         
-                                        gen.clear_kv_cache();
+                                        // gen.clear_kv_cache();
                                         
                                         res
                                     } else {
@@ -1041,13 +1185,32 @@ async fn process_task(
                             let parsed = crate::parsing::parse_json_from_llm(&res_mask);
                             
                             // 추출된 값이 있는지, 그리고 그 값이 현재 PUG_CONTENT(masked_text)에 실제로 존재하는지 확인
-                            let mut extracted_val = parsed.get(target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                            let mut extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                             
                             // 🌟 [CRITICAL FIX] Qwen3가 압축된 문맥(matched_context)을 읽고 있으므로, 환각 검사도 동일한 문맥에서 수행해야 완벽합니다.
                             let exists_in_context = matched_context.contains(&extracted_val);
                             let exists_in_body = masked_text.contains(&extracted_val);
                             let exists_in_title = doc_title.contains(&extracted_val);
                             let exists_in_desc = doc_desc.contains(&extracted_val);
+
+                            // 🌟 [CRITICAL FIX] 추출된 값이 임시 마커([___REDACTED_)를 포함하고 있다면 무조건 환각으로 간주하고 강제 차단합니다.
+                            if extracted_val.contains("___REDACTED_") || extracted_val.contains("REDACTED") {
+                                miss_counter += 1;
+                                current_temperature += 0.05; // 🌟 온도 상승
+                                
+                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
+                                *count += 1;
+                                
+                                emit_term(&format!("[DEBUG] 임시 마커 추출 시도 감지, 강제 차단 (재시도 {} - 무한): '{}' (현재 온도: {:.2}, 동일값: {}회)", miss_counter, extracted_val, current_temperature, count));
+                                
+                                if current_temperature >= 1.0 || *count >= 3 {
+                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 마커 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
+                                    break;
+                                }
+
+                                ignore_list.push(extracted_val.clone());
+                                continue;
+                            }
 
                             // 🌟 [전략 A & D 적용] 띄어쓰기 증발/변형에 대한 전역 보정 로직 (Space-Agnostic Validation)
                             if !extracted_val.is_empty() && extracted_val != "..." && extracted_val != "null" && !exists_in_context && !exists_in_body && !exists_in_title && !exists_in_desc {
@@ -1086,12 +1249,21 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
                                 miss_counter += 1;
-                                if miss_counter > 3 {
-                                    break; 
+                                current_temperature += 0.12; // 🌟 온도 상승
+                                // empty_count += 1; // 🌟 빈 값 카운트 증가
+
+                                emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
+                                
+                                if current_temperature >= 1.0 {
+                                    emit_term(&format!("[EXTRACTION] 🛑 빈 값 20회 누적 또는 온도 1.0 도달로 강제 종료."));
+                                    break;
                                 }
+
                                 // 빈 값 꼼수 방지 및 재시도 유도
                                 ignore_list.push("".to_string());
                                 ignore_list.push("null".to_string());
+                                ignore_list.push("\"\"".to_string());
+                                ignore_list.push("\"null\"".to_string());
                                 continue;
                             }
 
@@ -1105,30 +1277,94 @@ async fn process_task(
 
                             if !re_check_context && !re_check_body && !re_check_title && !re_check_desc {
                                 miss_counter += 1;
-                                if miss_counter > 3 {
-                                    break; 
+                                current_temperature += 0.05; // 🌟 못 찾았으므로 온도를 높여 다음 턴에 변형을 유도
+                                
+                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
+                                *count += 1;
+
+                                if current_temperature >= 1.0 || *count >= 3 {
+                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값({}회) 누적 또는 온도 {:.2} 도달로 강제 종료.", count, current_temperature));
+                                    break;
                                 }
+                                
+                                // 🌟 [조건부 즉시 치환 (Aggressive Ctrl+F) 적용]
+                                // 완벽한 일치가 아니더라도, 단어 단위로 쪼개서 본문에 물리적으로 존재하는 부분이 있다면 
+                                // 아깝게 버리며 무한루프를 돌지 않고, 그 부분만 즉시 마스킹 처리해버립니다.
+                                let parts: Vec<&str> = extracted_val.split_whitespace().collect();
+                                let mut partial_masked = false;
+                                
+                                for p in &parts {
+                                    // 너무 짧은 조사/어미가 치환되는 것을 막기 위해 2글자 이상만 허용
+                                    if p.len() >= 2 && (matched_context.contains(p) || masked_text.contains(p) || doc_title.contains(p) || doc_desc.contains(p)) {
+                                        emit_term(&format!("[DEBUG] 부분 일치 즉시 치환 (Aggressive Ctrl+F): '{}' 중 '{}' 발견 -> 강제 마스킹", extracted_val, p));
+                                        
+                                        let mnemonic = crate::parsing::generate_mnemonic();
+                                        let upper_key = base_target.to_uppercase(); 
+                                        let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                                        let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+                                        
+                                        masked_text = masked_text.replace(*p, &skip_marker);
+                                        doc_title = doc_title.replace(*p, &skip_marker);
+                                        doc_desc = doc_desc.replace(*p, &skip_marker);
+                                        matched_context = matched_context.replace(*p, &skip_marker);
+                                        
+                                        skip_map.insert(skip_marker.clone(), final_replacement.clone());
+                                        replacement_history.push((p.to_string(), skip_marker.clone()));
+                                        
+                                        current_target_found.push(p.to_string());
+                                        domain_history.push((target_name.to_string(), p.to_string()));
+                                        
+                                        skip_counter += 1;
+                                        
+                                        all_matches.push(json!({
+                                            "name": upper_key,
+                                            "value": p.to_string(),
+                                            "mnemonic": mnemonic
+                                        }));
+                                        partial_masked = true;
+                                    }
+                                }
+
+                                if partial_masked {
+                                    // 🌟 부분이라도 치환에 성공했다면, LLM이 뱉은 원본 환각 문자열 전체("레알 마드리드" 등)는 
+                                    // 확실하게 ignore_list에 넣어서 무한 반복 추출을 원천 차단합니다.
+                                    ignore_list.push(extracted_val.clone());
+                                    ignore_list.push(format!(" {}", extracted_val));
+                                    ignore_list.push(format!("\"{}", extracted_val));
+                                    
+                                    miss_counter = 0;
+                                    current_temperature = 0.0;
+                                    item_extract_count += 1;
+                                    continue; // 성공 처리 후 다음 턴으로 정상 진행
+                                }
+
                                 // 🌟 [전략 D 적용] 무작정 ignore_list에 넣기 전에 로깅하여 어떤 값이 날아갔는지 파악합니다.
-                                emit_term(&format!("[DEBUG] 환각/오탐지 감지 (재시도 {}/3): '{}'", miss_counter, extracted_val));
+                                emit_term(&format!("[DEBUG] 완전 환각/오탐지 감지 (재시도 {} - 무한): '{}' -> 온도 {:.2}로 상승", miss_counter, extracted_val, current_temperature));
                                 
                                 // 🌟 [CRITICAL FIX] Tokenizer 꼼수를 부리지 못하도록 공백을 포함한 변형도 함께 억제 리스트에 넣습니다.
+                                // JSON 생성 환경에서 BPE 토크나이저가 쌍따옴표(")와 결합하여 완전히 다른 단일 토큰으로 
+                                // 파편화시키는 현상(Logit 제어 누수)을 완벽하게 방어합니다.
                                 ignore_list.push(extracted_val.clone());
                                 ignore_list.push(format!(" {}", extracted_val));
+                                ignore_list.push(format!("\"{}", extracted_val));
+                                ignore_list.push(format!(" \"{}", extracted_val));
                                 ignore_list.push(extracted_val.to_lowercase());
+                                ignore_list.push(extracted_val.to_uppercase());
                                 continue;
                             }
 
                             // 정상 추출되었으므로 연속 실패 카운터를 리셋합니다.
                             miss_counter = 0;
+                            current_temperature = 0.0; // 🌟 성공했으므로 온도를 다시 0으로 차갑게 초기화
                             // 🌟 성공적으로 추출했으므로 추출 횟수 카운터를 증가시킵니다. (무한 루프 방지용)
                             item_extract_count += 1; 
 
-                            // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 SKIP READ 마커로 임시 치환
+                            // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 [___REDACTED_N___] 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
-                            let upper_key = target_name.to_uppercase();
+                            let upper_key = base_target.to_uppercase(); 
                             
                             let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                            let skip_marker = format!("**SKIP READ {}**", skip_counter);
+                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                             
                             // 🌟 [CRITICAL FIX] 원본 텍스트(본문+제목) 모두에서 임시 마커로 치환하여 이어지는 LLM 추론에서 혼선을 원천 방지합니다.
                             masked_text = masked_text.replace(&extracted_val, &skip_marker);
@@ -1138,20 +1374,25 @@ async fn process_task(
                             
                             skip_map.insert(skip_marker.clone(), final_replacement);
                             replacement_history.push((extracted_val.clone(), skip_marker.clone())); // 🌟 [CRITICAL FIX] 다음 루프 복구를 위해 치환 이력 기록
+                            
+                            // 🌟 [해결책 1 적용] 타겟 전용 이력과 Logit 제어용 전역 이력에 찾은 값을 기록합니다.
+                            current_target_found.push(extracted_val.clone());
+                            domain_history.push((target_name.to_string(), extracted_val.clone()));
+
                             skip_counter += 1;
 
                             // 최종 저장용 JSON 객체를 all_matches 배열에 기록
                             all_matches.push(json!({
-                                "name": upper_key,
+                                "name": upper_key, // 🌟 저장될 때 정확히 "NAME"으로 저장됨
                                 "value": extracted_val,
                                 "mnemonic": mnemonic
                             }));
                         }
                     }
 
-                    // 🌟 [추가] 모든 추론이 끝난 후 임시 마커(**SKIP READ N**)를 실제 니모닉으로 일괄 변환합니다.
+                    // 🌟 [추가] 모든 추론이 끝난 후 임시 마커([___REDACTED_N___])를 실제 니모닉으로 일괄 변환합니다.
                     for i in 0..skip_counter {
-                        let marker = format!("**SKIP READ {}**", i);
+                        let marker = format!("[___REDACTED_{}___]", i);
                         if let Some(final_repl) = skip_map.get(&marker) {
                             masked_text = masked_text.replace(&marker, final_repl);
                             doc_title = doc_title.replace(&marker, final_repl);

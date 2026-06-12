@@ -919,12 +919,20 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str) -> (String, String) {
+pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str) -> (String, String) {
     let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
 
+    // 🌟 [CRITICAL FIX] target_name에 언어 접두사(korean_ 등)가 붙어 있어도 기본 타겟을 찾을 수 있도록 정규화합니다.
+    let base_target = if target_name.ends_with("_name") { "name" }
+                      else if target_name.ends_with("_company") { "company" }
+                      else if target_name.ends_with("_address") { "address" }
+                      else if target_name.ends_with("_username") { "username" }
+                      else if target_name.ends_with("_contact_number") { "contact_number" }
+                      else { target_name };
+
     // 🌟 [CRITICAL FIX] 각 컬럼의 semantic, bias, prejudice 기준에 맞춰 LLM이 3단계로 검증하는 구체적인 CoT 사고 과정을 동적 생성합니다.
-    let column_specific_cot = match target_name {
+    let column_specific_cot = match base_target {
         "email" => "Step 1 (Semantic): Verify if the text represents an 'electronic mail address'. Step 2 (Bias): Check for the presence of elements like '@', '.com', '.net', '.co.kr', '.org', 'email', 'e-mail', 'mailto', or 'mail'. Step 3 (Prejudice): Strictly reject if the text is a physical address, postal code, or phone number. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation or spacing changes.",
         "contact_number" => "Step 1 (Semantic): Verify if the text represents a 'phone number, mobile number, or contact number'. Step 2 (Bias): Check for patterns or keywords like '010', '02', '031', '070', 'phone', 'mobile', 'tel', 'contact', 'number', or '+82'. Step 3 (Prejudice): Strictly reject if the text matches an email, address, age, price, or amount. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation or spacing changes.",
         "name" => "Step 1 (Semantic): Verify if the text represents a 'person's name'. Step 2 (Bias): Check for associated clues like 'reporter', 'player', 'coach', 'representative', 'council member', 'mr', 'ms', 'name', 'person', 'first name', or 'full name'. Step 3 (Prejudice): Strictly reject if the text is a company, corporate, business, team, location, place, animal, or object. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation or spacing changes.",
@@ -935,26 +943,37 @@ pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, t
     };
 
     // 🌟 [전략 B & C 반영] 언어 맥락 부하를 줄이기 위해 원문을 절대 건드리지 말고(No Translation), 띄어쓰기(Spacing)를 완벽히 유지하라는 지시를 2배로 강화합니다.
-    let user_template = r###"[TASK] Analyze the provided [PUG CONTENT] from top to bottom.
+    let user_template = r###"[TASK]
+Find all the {TARGET_NAME} from the following PUG CONTENT.
+
+[INSTRUCTION]
+- Bias (Acceptance Criteria): {TARGET_BIAS}
+- Prejudice (Rejection Criteria): {TARGET_PREJUDICE}
+{ALREADY_FOUND_BLOCK}
+{NOT_FOUND_BLOCK}
 
 [SCHEMA DEFINITIONS]
-- context: String. [PUG CONTENT] {PUG_CONTENT}.
-- reasoning: String. Step-by-step chain of thought. {COLUMN_SPECIFIC_COT} If the text is a date, ID, or order number but you are looking for an address/name, explain why it should be rejected.
-- {TARGET_NAME}: String. Extract the {TARGET_ITEM} value. If no valid data matches the bias after reasoning, return an empty string "".
-  * Bias (Acceptance Criteria): {TARGET_BIAS}
-  * Prejudice (Rejection Criteria): {TARGET_PREJUDICE}
-
-[CRITICAL INSTRUCTIONS]
-1. You MUST extract the EXACT original substring exactly as it appears in the [PUG CONTENT]. DO NOT TRANSLATE.
-2. DO NOT invent, guess, or use dummy examples.
-3. If the exact value is NOT physically present in the [PUG CONTENT], you MUST return an empty string "".
-4. NEVER translate the extracted value into English. Maintain the original language perfectly.
-5. Spaces must be 100% identical. If the original text is "A B", do not output "AB".
+- {TARGET_NAME}: String. Extract the {TARGET_ITEM} value. return an empty string "".
 
 [OUTPUT FORMAT]
-{...}
+{
+    "{TARGET_NAME}": "..."
+}
 
-[ACTION] RETURN JSON ONLY."###;
+
+[ACTION] RETURN JSON ONLY."###.to_string();
+
+    let already_found_block = if already_found_str.is_empty() {
+        "".to_string()
+    } else {
+        format!("\n[ALREADY EXTRACTED ENTITIES]\n- Skip these values as they are already masked: {}\n", already_found_str)
+    };
+
+    let not_found_block = if not_found_str.is_empty() {
+        "".to_string()
+    } else {
+        format!("\n[DO NOT EXTRACT (HALLUCINATION OR WRONG)]\n- CRITICAL: DO NOT output any of the following values: {}\n", not_found_str)
+    };
 
     let system_prompt = system_template.replace("{PUG_CONTENT}", pug_content);
     let user_prompt = user_template
@@ -964,7 +983,9 @@ pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, t
         .replace("{TARGET_NAME}", target_name)
         .replace("{TARGET_ITEM}", target_item)
         .replace("{TARGET_BIAS}", target_bias)
-        .replace("{TARGET_PREJUDICE}", target_prejudice);
+        .replace("{TARGET_PREJUDICE}", target_prejudice)
+        .replace("{ALREADY_FOUND_BLOCK}", &already_found_block)
+        .replace("{NOT_FOUND_BLOCK}", &not_found_block);
 
     (system_prompt, user_prompt)
 }
