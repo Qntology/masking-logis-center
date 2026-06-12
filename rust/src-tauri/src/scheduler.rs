@@ -750,6 +750,8 @@ async fn process_task(
 
                     // 🌟 16개의 마스킹 타겟 항목에 대해 (JSON_키, 추출_설명) 튜플 형태로 분리합니다.
                     let target_items = vec![
+                        // 🌟 [수정] Phase 2 펌핑을 위해 조직/팀(company)을 가장 먼저 찾도록 맨 위로 끌어올립니다.
+                        ("company", "the name of a company, institution, or group"),
                         // ("given_name", "person's given name"),
                         // ("middle_name", "person's middle name"),
                         // ("family_name", "person's family name or surname"),
@@ -766,7 +768,6 @@ async fn process_task(
                         // ("profession", "person's profession or field of work"),
                         // ("job_position", "person's specific job position or role"),
                         // ("department", "person's specific organizational division or department"),
-                        ("company", "the name of a company, institution, or group"),
                     ];
 
                     // 🌟 [추가] bias.json 파일을 로드하여 privacy 객체 파싱 (선행 필터링용)
@@ -832,8 +833,6 @@ async fn process_task(
                     // 🌟 포그라운드: 임베딩 모델 명시적 로드
                     model.ensure_embedding().await?;
                     
-                    // 🌟 [CRITICAL FIX] 전체 텍스트를 하나의 벡터로 뭉개지 않고, 
-                    // 한 줄씩(Line-by-line) 쪼개서 개별 벡터로 만든 뒤 가장 높은 점수를 뽑아냅니다.
                     let structural_tags = ["html", "body", "div", "p", "span", "thead", "tbody", "tr", "td", "th", "table"];
                     let lines: Vec<String> = target_text.lines()
                         .map(|s| s.trim().trim_start_matches('|').trim().to_string())
@@ -843,103 +842,180 @@ async fn process_task(
                         })
                         .collect();
                         
-                    emit_term(&format!("[EXTRACTION] 본문을 {}개의 라인으로 분할하여 순차 임베딩 진행 중...", lines.len()));
-                    
-                    // 🌟 LogisModel 구조체에는 단일 임베딩 메서드만 존재하므로 순회하며 배열로 수집합니다.
-                    let mut line_embs: Vec<Vec<f32>> = Vec::with_capacity(lines.len());
-                    for line in &lines {
-                        if cancellation_token.load(Ordering::Relaxed) { break; }
-                        let emb = model.get_embedding(line.clone()).await.unwrap_or_else(|_| vec![0.0; 768]);
-                        line_embs.push(emb);
+                    emit_term(&format!("[EXTRACTION] 본문을 {}개의 라인으로 분할하여 순차 임베딩 및 NMS 배틀 진행 중...", lines.len()));
+
+                    // 🌟 1. 모든 타겟(도메인)의 Bias / Prejudice 임베딩 일괄 장전
+                    let mut target_biases_embs = Vec::new();
+                    let mut target_prejs_embs = Vec::new();
+
+                    for (_, base_target, _) in &dynamic_target_items {
+                        let mut b_val = "".to_string();
+                        let mut p_val = "".to_string();
+                        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
+                            b_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            p_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        }
+                        if p_val.trim().is_empty() { p_val = "random unrelated noise".to_string(); }
+
+                        let b_emb = model.get_embedding(b_val).await.unwrap_or_else(|_| vec![0.0; 768]);
+                        let p_emb = model.get_embedding(p_val).await.unwrap_or_else(|_| vec![0.0; 768]);
+                        target_biases_embs.push(b_emb);
+                        target_prejs_embs.push(p_emb);
                     }
 
-                    // 벡터 통과한 아이템만 담을 배열 및 매칭된 라인 저장 맵
-                    // 🌟 [추가] 2-Phase 구조를 위해 boolean(is_phase2) 필드 추가
+                    // 🌟 2. Sliding Window를 통한 단어 단위 청크(Chunk) 생성 및 기초 점수 산출
+                    #[derive(Clone)]
+                    struct ChunkSpan {
+                        line_idx: usize,
+                        start: usize,
+                        end: usize,
+                        text: String,
+                        best_target_idx: usize,
+                        score: f32,
+                    }
+                    let mut raw_spans = Vec::new();
+
+                    for (line_idx, line) in lines.iter().enumerate() {
+                        if cancellation_token.load(Ordering::Relaxed) { break; }
+                        
+                        let words: Vec<&str> = line.split_whitespace().collect();
+                        
+                        for start in 0..words.len() {
+                            let max_end = words.len().min(start + 4); // 1~4 단어 조합
+                            for end in (start + 1)..=max_end {
+                                let chunk_text = words[start..end].join(" ");
+                                // 특수기호만 존재하는 무의미한 텍스트 스킵
+                                if chunk_text.trim().chars().all(|c| !c.is_alphanumeric()) { continue; }
+
+                                let chunk_emb = model.get_embedding(chunk_text.clone()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                                let word_count = end - start;
+                                let length_weight = 1.0 + ((word_count as f32 - 1.0) * 0.15); // 단어 개수 가중치
+
+                                let mut best_score = -1.0;
+                                let mut best_target_idx = 0;
+
+                                // 모든 타겟 도메인과 벡터 유사도를 대결시켜 현재 청크에 가장 적합한 도메인을 찾음
+                                for i in 0..dynamic_target_items.len() {
+                                    let b_score = cosine_similarity(&chunk_emb, &target_biases_embs[i]);
+                                    let p_score = cosine_similarity(&chunk_emb, &target_prejs_embs[i]);
+                                    
+                                    let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
+                                    let score = b_score - (p_score * penalty_weight);
+
+                                    if score > best_score {
+                                        best_score = score;
+                                        best_target_idx = i;
+                                    }
+                                }
+
+                                // 커트라인 0.05를 넘은 기초 유망 후보군만 등록
+                                if best_score > 0.05 {
+                                    let final_score = best_score * length_weight;
+                                    raw_spans.push(ChunkSpan {
+                                        line_idx, start, end, text: chunk_text, best_target_idx, score: final_score
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // 🌟 3. 앞뒤 교차 문장(Context) 점수 합산 (Pass 2)
+                    emit_term("  🔄 [PASS 2: CONTEXT ADJUSTMENT] Merging adjacent scores...");
+                    let mut eval_spans = Vec::new();
+                    for i in 0..raw_spans.len() {
+                        let target = &raw_spans[i];
+                        let mut prev_bonus = 0.0;
+                        let mut next_bonus = 0.0;
+
+                        for j in 0..raw_spans.len() {
+                            if i == j { continue; }
+                            let other = &raw_spans[j];
+                            // 동일 라인 내에서 같은 타겟 도메인일 때만 보너스 교환
+                            if other.line_idx == target.line_idx && other.best_target_idx == target.best_target_idx {
+                                if other.start < target.start && other.end > target.start && other.score > prev_bonus { prev_bonus = other.score; }
+                                if other.end > target.end && other.start < target.end && other.score > next_bonus { next_bonus = other.score; }
+                            }
+                        }
+                        
+                        let final_context_score = target.score + (prev_bonus * 0.5) + (next_bonus * 0.5);
+                        eval_spans.push(ChunkSpan { score: final_context_score, ..target.clone() });
+                    }
+
+                    // 🌟 4. NMS BATTLE (Pass 3) - 오버랩 충돌 해결 (승자 독식)
+                    emit_term("  ⚔️ [PASS 3: NMS BATTLE] Resolving Overlaps across all targets...");
+                    eval_spans.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                    let mut final_spans: Vec<ChunkSpan> = Vec::new();
+
+                    for span in eval_spans {
+                        let mut is_overlapped = false;
+                        for selected in &final_spans {
+                            if span.line_idx == selected.line_idx {
+                                if span.start < selected.end && span.end > selected.start {
+                                    is_overlapped = true;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if !is_overlapped {
+                            let (_, base_target, _) = &dynamic_target_items[span.best_target_idx];
+                            emit_term(&format!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", span.text, base_target, span.score));
+                            final_spans.push(span);
+                        } else {
+                            let (_, base_target, _) = &dynamic_target_items[span.best_target_idx];
+                            emit_term(&format!("    💀 [DEFEAT] '{}' -> {} (Absorbed: {:.4})", span.text, base_target, span.score));
+                        }
+                    }
+
+                    // 🌟 5. NMS 승자들을 바탕으로 매칭된 라인 및 valid_targets 재조립
                     let mut valid_targets: Vec<(String, String, String, String, String, bool)> = Vec::new();
                     let mut target_matched_lines: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                    let mut active_target_indices = std::collections::HashSet::new();
 
-                    for (context_name, base_target, context_desc) in dynamic_target_items {
-                        if cancellation_token.load(Ordering::Relaxed) { break; }
+                    for span in &final_spans {
+                        // 최종 LLM 투입 커트라인 0.10
+                        if span.score >= 0.10 {
+                            active_target_indices.insert(span.best_target_idx);
+                            let (context_name, _, _) = &dynamic_target_items[span.best_target_idx];
+                            target_matched_lines.entry(context_name.clone()).or_default().push(lines[span.line_idx].clone());
+                        }
+                    }
 
-                        // 🌟 bias.json 조회는 원본(base_target)인 "name"으로 하고, 컨텍스트는 context_name("korean_name")을 사용합니다.
-                        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(&base_target)) {
+                    // 중복된 라인 제거
+                    for lines_vec in target_matched_lines.values_mut() {
+                        lines_vec.sort();
+                        lines_vec.dedup();
+                    }
+
+                    // 🌟 승리한 타겟 도메인들에 대해서만 기존의 3중 루프(단일 키워드 주입) 로직 수행
+                    for idx in active_target_indices {
+                        let (context_name, base_target, context_desc) = &dynamic_target_items[idx];
+                        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
                             let bias_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("");
                             let prej_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("");
                             
-                            // 🌟 [추가] bias와 prejudice 문자열을 임베딩 벡터로 변환합니다.
-                            let bias_emb_vec = model.get_embedding(bias_val.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
-                            let prej_emb_vec = model.get_embedding(prej_val.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                            let bias_keywords: Vec<&str> = bias_val.split(',')
+                                .map(|s| s.trim())
+                                .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
+                                .collect();
+                            
+                            let passed_lines = target_matched_lines.get(context_name).cloned().unwrap_or_default();
 
-                            let mut passed_lines = Vec::new();
-                            let mut best_score = -1.0;
+                            for keyword in bias_keywords {
+                                let lang_prefix = context_name.split('_').next().unwrap_or("english");
+                                let split_target_name = format!("{}_{}", lang_prefix, keyword);
+                                let split_target_desc = format!("{} associated with '{}'", context_desc, keyword);
 
-                            // 🌟 각 라인별로 코사인 유사도를 모두 비교하고 터미널에 상세 로그를 출력합니다!
-                            for (i, line_emb) in line_embs.iter().enumerate() {
-                                let b_score = cosine_similarity(line_emb, &bias_emb_vec);
-                                let p_score = cosine_similarity(line_emb, &prej_emb_vec);
+                                target_matched_lines.insert(split_target_name.clone(), passed_lines.clone());
                                 
-                                // 🌟 [개선] 사람 이름과 회사 이름이 한 문장에 공존할 때 서로 점수를 갉아먹는 현상 방지
-                                // prejudice 점수의 페널티 비중을 100%에서 30%(0.3)로 줄여서, 완전한 오탐지만 살짝 눌러주는 역할로 변경합니다.
-                                // 만약 아예 prejudice를 무시하고 싶다면 `let score = b_score;` 로 테스트해 볼 수 있습니다.
-                                let penalty_weight = 0.3;
-                                let score = b_score - (p_score * penalty_weight);
-                                
-                                if score > best_score { best_score = score; }
-
-                                // 🌟 [CRITICAL FIX] 한글 바이트 깨짐(Panic) 방지: 
-                                // 단순히 바이트 길이(len)로 자르지 않고, chars()를 이용해 유니코드 글자 수 기준으로 안전하게 50글자만 잘라냅니다.
-                                let short_line = if lines[i].chars().count() > 50 {
-                                    format!("{}...", lines[i].chars().take(50).collect::<String>())
-                                } else {
-                                    lines[i].clone()
-                                };
-                                
-                                emit_term(&format!("  🔍 [VECTOR] Item: [{}] | Score: {:.4} (Bias: {:.4}, Prej: {:.4}) | Line: '{}'", context_desc, score, b_score, p_score, short_line));
-
-                                // 🌟 [Direction A 적용] 코사인 유사도 커트라인을 0.25에서 0.10으로 대폭 낮추어 숨겨진 고유명사가 필터링에서 누락되는 것을 방지합니다.
-                                if score >= 0.10 {
-                                    passed_lines.push(lines[i].clone());
-                                }
-                            }
-
-                            if passed_lines.is_empty() {
-                                emit_term(&format!("[EXTRACTION] ⏭️ Skipping {} (최고 점수: {:.4} < 0.10)", context_desc, best_score));
-                            } else {
-                                emit_term(&format!("[EXTRACTION] ✅ Vector matched for {} (최고 점수: {:.4}, 매칭된 줄 수: {})", context_desc, best_score, passed_lines.len()));
-                                target_matched_lines.insert(context_name.clone(), passed_lines.clone());
-                                
-                                // 🌟 [CRITICAL FIX] bias.json의 풍부한 semantic 값을 추출하여 Qwen3에게 프롬프트 문맥으로 전달합니다!
-                                // 기존 target_item 대신 context_desc를 씁니다.
-                                let semantic_item = privacy_node.get("semantic").and_then(|v| v.as_str()).unwrap_or(&context_desc);
-                                
-                                // 🌟 [3중 루프 직렬 추론 적용] bias_val을 콤마(,) 기준으로 분할하여 개별 타겟으로 쪼갭니다.
-                                // 🌟 [필터링 추가] 단순히 숫자나 특수문자로만 이루어진 키워드는 루프 폭발을 방지하기 위해 제외합니다.
-                                let bias_keywords: Vec<&str> = bias_val.split(',')
-                                    .map(|s| s.trim())
-                                    .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
-                                    .collect();
-                                
-                                for keyword in bias_keywords {
-                                    // 언어 접두사를 파싱합니다 (예: "korean_name" -> "korean")
-                                    let lang_prefix = context_name.split('_').next().unwrap_or("english");
-                                    
-                                    // 추론을 위한 초구체적인 타겟명 생성 (예: "korean_phone")
-                                    let split_target_name = format!("{}_{}", lang_prefix, keyword);
-                                    let split_target_desc = format!("{} associated with '{}'", context_desc, keyword);
-
-                                    // 쪼개진 타겟명으로도 매칭된 컨텍스트 라인을 읽을 수 있도록 복제하여 삽입
-                                    target_matched_lines.insert(split_target_name.clone(), passed_lines.clone());
-                                    
-                                    // valid_targets에 개별 분할된 키워드를 삽입하여 LLM 추론 시 3중 루프(폭발)를 유도
-                                    valid_targets.push((
-                                        split_target_name,               // target_name: LLM 프롬프트에 주입될 타겟명 ("korean_phone")
-                                        base_target.to_string(),         // base_target: 실제 DB에 저장 및 치환될 부모 필터명 ("contact_number")
-                                        split_target_desc,               // target_item: LLM에게 설명할 타겟 항목
-                                        keyword.to_string(),             // target_bias: 통째가 아닌, 쪼개진 "단일 키워드"만 주입!
-                                        prej_val.to_string(),            // target_prejudice: 배제 조건은 기존 유지
-                                        false                            // 🌟 Phase 1 플래그!
-                                    ));
-                                }
+                                valid_targets.push((
+                                    split_target_name,
+                                    base_target.to_string(),
+                                    split_target_desc,
+                                    keyword.to_string(),
+                                    prej_val.to_string(),
+                                    false
+                                ));
                             }
                         }
                     }
@@ -1033,12 +1109,13 @@ async fn process_task(
                                             let bias_emb_vec = model.get_embedding(b_bias.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
                                             let prej_emb_vec = model.get_embedding(b_prej.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
 
-                                            let mut passed_lines = Vec::new();
+                                            let mut passed_lines: Vec<String> = Vec::new();
                                             let mut best_score = -1.0;
 
-                                            for (i, line_emb) in line_embs.iter().enumerate() {
-                                                let b_score = cosine_similarity(line_emb, &bias_emb_vec);
-                                                let p_score = cosine_similarity(line_emb, &prej_emb_vec);
+                                            for (i, line_text) in lines.iter().enumerate() {
+                                                let line_emb = model.get_embedding(line_text.clone()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                                                let b_score = cosine_similarity(&line_emb, &bias_emb_vec);
+                                                let p_score = cosine_similarity(&line_emb, &prej_emb_vec);
                                                 let score = b_score - (p_score * 0.3);
                                                 if score > best_score { best_score = score; }
                                                 if score >= 0.10 {
@@ -1197,13 +1274,13 @@ async fn process_task(
                                     };
                                     
                                     // 🌟 [CRITICAL FIX] 대형 문맥(Qwen) 추론 시작 전에 명시적으로 KV 캐시를 비워 환각을 방어합니다.
-                                    // let _ = gen.clear_kv_cache();
+                                    let _ = gen.clear_kv_cache();
 
                                     // 🌟 [CRITICAL FIX] Qwen(대형 문맥) 추론 시 session_id와 kv_name을 주입하여 SSD 오프로딩 및 청크 병렬 처리가 동작하도록 수정합니다.
                                     let res = gen.generate(params, Some(cancel_clone), None, None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
                                     // let res = gen.generate(params, Some(cancel_clone), Some(session_id_clone), Some("masking".to_string()), None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
                                     
-                                    // let _ = gen.clear_kv_cache();
+                                    let _ = gen.clear_kv_cache();
                                     
                                     res
                                 } else {
@@ -1243,7 +1320,7 @@ async fn process_task(
                                         };
                                         
                                         // 🌟 [CRITICAL FIX] Qwen3 추론 시작 전에 명시적으로 KV 캐시를 비워 오작동과 환각을 방어합니다.
-                                        // gen.clear_kv_cache();
+                                        gen.clear_kv_cache();
 
                                         let res = gen.generate(
                                             params, 
@@ -1252,7 +1329,7 @@ async fn process_task(
                                             None
                                         ).map_err(|e| anyhow::anyhow!("Qwen 3 Inference failed: {}", e));
                                         
-                                        // gen.clear_kv_cache();
+                                        gen.clear_kv_cache();
                                         
                                         res
                                     } else {
