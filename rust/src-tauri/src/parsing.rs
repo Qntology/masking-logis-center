@@ -919,9 +919,16 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str) -> (String, String) {
+pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str, language: &str, verb_expression_hint: &str) -> (String, String) {
     let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
+
+    let base_target = if target_name.ends_with("_name") { "name" }
+                 else if target_name.ends_with("_company") { "company" }
+                 else if target_name.ends_with("_address") { "address" }
+                 else if target_name.ends_with("_username") { "username" }
+                 else if target_name.ends_with("_contact_number") { "contact_number" }
+                 else { target_name };
 
     // 🌟 [전략 B & C 반영] 언어 맥락 부하를 줄이기 위해 원문을 절대 건드리지 말고(No Translation), 띄어쓰기(Spacing)를 완벽히 유지하라는 지시를 2배로 강화합니다.
     let user_template = r###"[TASK]
@@ -935,11 +942,15 @@ Find all the {TARGET_NAME} from the following PUG CONTENT.
 {NOT_FOUND_BLOCK}
 
 [SCHEMA DEFINITIONS]
-- {TARGET_NAME}: String. Extract the {TARGET_ITEM} value. return an empty string "".
+- {TARGET_BASE}: String. Default '{TARGET_ITEM}'.
+- {TARGET_NAME}: String. Extract the {TARGET_NAME} - '{TARGET_ITEM}' value. return an empty string "".
+- is_verb_expression: Boolean. If the extracted value you are about to extract is merely a {LANGUAGE} verb, predicate, idiom, phrase, or a meaningless context without specific entities (Examples: {VERB_EXPRESSION_HINT}).
 
 [OUTPUT FORMAT]
 {
-    "{TARGET_NAME}": "..."
+    "{TARGET_BASE}": String,
+    "{TARGET_NAME}": String,
+    "is_verb_expression": Boolean
 }
 
 
@@ -970,10 +981,13 @@ Find all the {TARGET_NAME} from the following PUG CONTENT.
         .replace("{TARGET_NAME}", target_name)
         .replace("{TARGET_ITEM}", target_item)
         .replace("{TARGET_BIAS}", target_bias)
+        .replace("{TARGET_BASE}", &base_target.to_uppercase())
         .replace("{TARGET_PREJUDICE}", target_prejudice)
         .replace("{VECTOR_HINT_BLOCK}", &vector_hint_block)
         .replace("{ALREADY_FOUND_BLOCK}", &already_found_block)
-        .replace("{NOT_FOUND_BLOCK}", &not_found_block);
+        .replace("{NOT_FOUND_BLOCK}", &not_found_block)
+        .replace("{LANGUAGE}", language)
+        .replace("{VERB_EXPRESSION_HINT}", verb_expression_hint);
 
     (system_prompt, user_prompt)
 }

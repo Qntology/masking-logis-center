@@ -1345,7 +1345,7 @@ async fn process_task(
                                 unique_cands.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
                             };
 
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str);
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, primary_lang, &verb_b_val);
                             
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -1465,7 +1465,29 @@ async fn process_task(
                             
                             // 추출된 값이 있는지, 그리고 그 값이 현재 PUG_CONTENT(masked_text)에 실제로 존재하는지 확인
                             let mut extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                            let is_verb_expression = parsed.get("is_verb_expression").and_then(|v| v.as_bool()).unwrap_or(false);
                             
+                            // 🌟 [CRITICAL FIX] 서술어/어구로 판별된 경우 무고한 단어 훼손 방지를 위해 즉시 환각으로 간주하고 강제 차단합니다.
+                            if is_verb_expression {
+                                miss_counter += 1;
+                                current_temperature += 0.05; // 🌟 환각이므로 온도를 올려 변형 유도
+                                
+                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
+                                *count += 1;
+                                
+                                emit_term(&format!("[DEBUG] 서술어/어구(verb_expression) 감지됨. 환각으로 간주하여 강제 기각 (재시도 {}): '{}'", miss_counter, extracted_val));
+                                
+                                if current_temperature >= 1.0 || *count >= 3 {
+                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 서술어 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
+                                    break;
+                                }
+
+                                if !extracted_val.is_empty() {
+                                    ignore_list.push(extracted_val.clone());
+                                }
+                                continue;
+                            }
+
                             // 🌟 [CRITICAL FIX] Qwen3가 압축된 문맥(matched_context)을 읽고 있으므로, 환각 검사도 동일한 문맥에서 수행해야 완벽합니다.
                             let exists_in_context = matched_context.contains(&extracted_val);
                             let exists_in_body = masked_text.contains(&extracted_val);
@@ -1561,7 +1583,8 @@ async fn process_task(
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
 
-                                if current_temperature > 1.0 || *count >= 3 {
+                                // if current_temperature > 1.0 || *count >= 3 {
+                                if current_temperature > 1.0 {
                                     emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값({}회) 누적 또는 온도 {:.2} 도달로 강제 종료.", count, current_temperature));
                                     break;
                                 }

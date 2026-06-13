@@ -63,7 +63,7 @@ impl Default for Qwen3GenerationConfig {
             pad_token_id: 151643,
             do_sample: false,
             eos_token_id: vec![151643, 151645], 
-            top_p: 0.95,
+            top_p: 1.0,
             top_k: 80,
             temperature: 0.0,
             repetition_penalty: 1.2,
