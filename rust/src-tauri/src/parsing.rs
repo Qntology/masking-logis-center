@@ -923,25 +923,6 @@ pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, t
     let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
 
-    // 🌟 [CRITICAL FIX] target_name에 언어 접두사(korean_ 등)가 붙어 있어도 기본 타겟을 찾을 수 있도록 정규화합니다.
-    let base_target = if target_name.ends_with("_name") { "name" }
-                      else if target_name.ends_with("_company") { "company" }
-                      else if target_name.ends_with("_address") { "address" }
-                      else if target_name.ends_with("_username") { "username" }
-                      else if target_name.ends_with("_contact_number") { "contact_number" }
-                      else { target_name };
-
-    // 🌟 [CRITICAL FIX] 각 컬럼의 semantic, bias, prejudice 기준에 맞춰 LLM이 3단계로 검증하는 구체적인 CoT 사고 과정을 동적 생성합니다.
-    let column_specific_cot = match base_target {
-        "email" => "Step 1 (Semantic): Verify if the text represents an 'electronic mail address'. Step 2 (Bias): Check for the presence of elements like '@', '.com', '.net', '.co.kr', '.org', 'email', 'e-mail', 'mailto', or 'mail'. Step 3 (Prejudice): Strictly reject if the text is a physical address, postal code, or phone number. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation or spacing changes.",
-        "contact_number" => "Step 1 (Semantic): Verify if the text represents a 'phone number, mobile number, or contact number'. Step 2 (Bias): Check for patterns or keywords like '010', '02', '031', '070', 'phone', 'mobile', 'tel', 'contact', 'number', or '+82'. Step 3 (Prejudice): Strictly reject if the text matches an email, address, age, price, or amount. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation or spacing changes.",
-        "name" => "Step 1 (Semantic): Verify if the text represents a 'person's name'. Step 2 (Bias): Check for associated clues like 'reporter', 'player', 'coach', 'representative', 'council member', 'mr', 'ms', 'name', 'person', 'first name', or 'full name'. Step 3 (Prejudice): Strictly reject if the text is a company, corporate, business, team, location, place, animal, or object. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation or spacing changes.",
-        "username" => "Step 1 (Semantic): Verify if the text represents a 'user ID, account name, or nickname'. Step 2 (Bias): Check for contextual clues like 'id', 'username', 'nickname', 'account', or 'user'. Step 3 (Prejudice): Strictly reject if the text is a real human name, email, or password. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation or spacing changes.",
-        "address" => "Step 1 (Semantic): Verify if the text represents a 'physical street address or location'. Step 2 (Bias): Look for geographic indicators like 'city', 'province', 'district', 'neighborhood', 'town', 'village', 'road', 'street', 'house number', 'apartment', 'building', 'address', or 'location'. Step 3 (Prejudice): Strictly reject if the text is an email, ip address, URL, web link, date (e.g., '25-01-07'), time (e.g., '16:24'), or order number. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation or spacing changes.",
-        "company" => "Step 1 (Semantic): Verify if the text represents a 'company name, organization, institution, or corporate entity'. Step 2 (Bias): Look for business indicators like 'company', 'inc', 'corp', 'ltd', 'organization', 'institution', 'corporation', 'firm', 'agency', 'enterprise', or 'business'. Step 3 (Prejudice): Strictly reject if the text refers to a person, individual, man, woman, human, name, player, or reporter. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation or spacing changes.",
-        _ => "Step 1 (Semantic): Identify the semantic meaning of the text. Step 2 (Bias): Compare the visible text against the Context clues (Bias). Step 3 (Prejudice): Strictly reject any text matching the (Prejudice) criteria. Step 4 (Verification): MUST verify the string physically exists in [PUG CONTENT] without any translation or spacing changes."
-    };
-
     // 🌟 [전략 B & C 반영] 언어 맥락 부하를 줄이기 위해 원문을 절대 건드리지 말고(No Translation), 띄어쓰기(Spacing)를 완벽히 유지하라는 지시를 2배로 강화합니다.
     let user_template = r###"[TASK]
 Find all the {TARGET_NAME} from the following PUG CONTENT.
@@ -985,7 +966,6 @@ Find all the {TARGET_NAME} from the following PUG CONTENT.
     let system_prompt = system_template.replace("{PUG_CONTENT}", pug_content);
     let user_prompt = user_template
         .replace("{PUG_CONTENT}", pug_content)
-        .replace("{COLUMN_SPECIFIC_COT}", column_specific_cot)
         .replace("{TITLE}", title)
         .replace("{TARGET_NAME}", target_name)
         .replace("{TARGET_ITEM}", target_item)

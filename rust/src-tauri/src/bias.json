@@ -46,6 +46,11 @@
     "bias": "analyze, analysis, urgent, ASAP, quickly, immediately, hurry, reason, cause, why, show me, display, separate them, list out, report, statistics, investigate, figure out, find out, please, tell me, summarize, explain, insight, overview, details on why, what happened, drill down, break down",
     "prejudice": "id, link, status, price, quantity, address, date, code, name, product, order, shipping, carrier, tracking number, refund, exchange, dimensions, weight, currency"
   },
+  "verb_expression": {
+    "semantic": "verbs, predicates, idiomatic expressions, meaningless context without entities",
+    "bias": "verb, predicate, idiom, phrase, meaningless context, doing, did, occurred, experienced, action, state, expression, happens, consists, derived",
+    "prejudice": "noun, proper noun, entity, person name, company name, physical address, contact number, location, actual object"
+  },
   "metrics": {
     "date": {
       "semantic": "calendar date, day, month, year, season",
