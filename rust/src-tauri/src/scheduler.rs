@@ -953,7 +953,7 @@ async fn process_task(
                             let matched_lines = p1_target_matched_lines.get(&target_name).cloned().unwrap_or_default();
                             let mut matched_context = matched_lines.join("\n");
                             
-                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, "", "");
+                            let (system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, "", "", "");
                             
                             // 🌟 Compact Inference
                             let res_mask = if is_large_context {
@@ -965,11 +965,15 @@ async fn process_task(
                                             crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: system_prompt, name: None }),
                                             crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(user_prompt), name: None })
                                         ],
-                                        model: "qwen".to_string(), max_tokens: Some(512), temperature: Some(0.0), top_p: Some(0.1), ..Default::default()
+                                        model: "qwen".to_string(), max_tokens: Some(512), temperature: Some(0.0), top_p: Some(1.0), ..Default::default()
                                     };
+
                                     let _ = gen.clear_kv_cache();
+
                                     let res = gen.generate(params, Some(cancellation_token.clone()), None, None, None).await.unwrap_or_default();
+
                                     let _ = gen.clear_kv_cache();
+                                    
                                     res
                                 } else { String::new() }
                             } else {
@@ -985,11 +989,15 @@ async fn process_task(
                                                 crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: system_clone, name: None }),
                                                 crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(user_clone), name: None })
                                             ],
-                                            model: "qwen3".to_string(), max_tokens: Some(512), temperature: Some(0.0), top_p: Some(0.1), ..Default::default()
+                                            model: "qwen3".to_string(), max_tokens: Some(512), temperature: Some(0.0), top_p: Some(1.0), ..Default::default()
                                         };
+
                                         gen.clear_kv_cache();
+
                                         let res = gen.generate(params, Some(cancel_clone), None, None).unwrap_or_default();
+
                                         gen.clear_kv_cache();
+
                                         res
                                     } else { String::new() }
                                 }).await.unwrap_or_default()
@@ -1067,7 +1075,7 @@ async fn process_task(
                         start: usize,
                         end: usize,
                         text: String,
-                        best_target_idx: usize,
+                        target_indices: Vec<usize>, // 🌟 [수정] 0.05점 편차 이내의 공동 우승자들을 모두 저장
                         score: f32,
                     }
                     let mut raw_spans = Vec::new();
@@ -1088,10 +1096,9 @@ async fn process_task(
                                 let word_count = end - start;
                                 let length_weight = 1.0 + ((word_count as f32 - 1.0) * 0.15); // 단어 개수 가중치
 
-                                let mut best_score = -1.0;
-                                let mut best_target_idx = 0;
+                                let mut top_targets: Vec<(usize, f32)> = Vec::new();
 
-                                // 모든 타겟 도메인과 벡터 유사도를 대결시켜 현재 청크에 가장 적합한 도메인을 찾음
+                                // 모든 타겟 도메인과 벡터 유사도를 대결시켜 현재 청크에 적합한 도메인들을 찾음
                                 for i in 0..dynamic_target_items.len() {
                                     let b_score = cosine_similarity(&chunk_emb, &target_biases_embs[i]);
                                     let p_score = cosine_similarity(&chunk_emb, &target_prejs_embs[i]);
@@ -1099,17 +1106,28 @@ async fn process_task(
                                     let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
                                     let score = b_score - (p_score * penalty_weight);
 
-                                    if score > best_score {
-                                        best_score = score;
-                                        best_target_idx = i;
-                                    }
+                                    top_targets.push((i, score));
                                 }
 
-                                // 🌟 2차 패스 커트라인 상향 (노이즈 방어)
+                                // 점수 순으로 내림차순 정렬
+                                top_targets.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                                let best_score = top_targets[0].1;
+
+                                // 🌟 2차 패스 커트라인 상향 및 0.05 편차(Margin) 공동 우승 허용 로직 적용
                                 if best_score > 0.25 {
                                     let final_score = best_score * length_weight;
+                                    let mut selected_indices = Vec::new();
+                                    
+                                    for (idx, score) in top_targets {
+                                        if best_score - score <= 0.05 && score > 0.25 {
+                                            selected_indices.push(idx);
+                                        } else {
+                                            break;
+                                        }
+                                    }
+
                                     raw_spans.push(ChunkSpan {
-                                        line_idx, start, end, text: chunk_text, best_target_idx, score: final_score
+                                        line_idx, start, end, text: chunk_text, target_indices: selected_indices, score: final_score
                                     });
                                 }
                             }
@@ -1127,8 +1145,9 @@ async fn process_task(
                         for j in 0..raw_spans.len() {
                             if i == j { continue; }
                             let other = &raw_spans[j];
-                            // 동일 라인 내에서 같은 타겟 도메인일 때만 보너스 교환
-                            if other.line_idx == target.line_idx && other.best_target_idx == target.best_target_idx {
+                            // 동일 라인 내에서 타겟 도메인 교집합이 있을 때만 보너스 교환
+                            let has_common_target = other.target_indices.iter().any(|idx| target.target_indices.contains(idx));
+                            if other.line_idx == target.line_idx && has_common_target {
                                 if other.start < target.start && other.end > target.start && other.score > prev_bonus { prev_bonus = other.score; }
                                 if other.end > target.end && other.start < target.end && other.score > next_bonus { next_bonus = other.score; }
                             }
@@ -1155,26 +1174,34 @@ async fn process_task(
                         }
                         
                         if !is_overlapped {
-                            let (_, base_target, _) = &dynamic_target_items[span.best_target_idx];
-                            emit_term(&format!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", span.text, base_target, span.score));
+                            for &t_idx in &span.target_indices {
+                                let (_, base_target, _) = &dynamic_target_items[t_idx];
+                                emit_term(&format!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", span.text, base_target, span.score));
+                            }
                             final_spans.push(span);
                         } else {
-                            let (_, base_target, _) = &dynamic_target_items[span.best_target_idx];
-                            emit_term(&format!("    💀 [DEFEAT] '{}' -> {} (Absorbed: {:.4})", span.text, base_target, span.score));
+                            for &t_idx in &span.target_indices {
+                                let (_, base_target, _) = &dynamic_target_items[t_idx];
+                                emit_term(&format!("    💀 [DEFEAT] '{}' -> {} (Absorbed: {:.4})", span.text, base_target, span.score));
+                            }
                         }
                     }
 
                     // 🌟 5. NMS 승자들을 바탕으로 매칭된 라인 및 valid_targets 재조립
-                    let mut valid_targets: Vec<(String, String, String, String, String, bool)> = Vec::new();
+                    let mut valid_targets: Vec<(String, String, String, String, String, bool, Vec<String>)> = Vec::new(); // 🌟 Vector 후보(단서) 배열 추가
                     let mut target_matched_lines: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                    let mut target_candidates: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new(); // 🌟 Vector가 찾은 단어 저장소
                     let mut active_target_indices = std::collections::HashSet::new();
 
                     for span in &final_spans {
                         // 최종 LLM 투입 커트라인 0.10
                         if span.score >= 0.10 {
-                            active_target_indices.insert(span.best_target_idx);
-                            let (context_name, _, _) = &dynamic_target_items[span.best_target_idx];
-                            target_matched_lines.entry(context_name.clone()).or_default().push(lines[span.line_idx].clone());
+                            for &t_idx in &span.target_indices {
+                                active_target_indices.insert(t_idx);
+                                let (context_name, _, _) = &dynamic_target_items[t_idx];
+                                target_matched_lines.entry(context_name.clone()).or_default().push(lines[span.line_idx].clone());
+                                target_candidates.entry(context_name.clone()).or_default().push(span.text.clone());
+                            }
                         }
                     }
 
@@ -1197,6 +1224,7 @@ async fn process_task(
                                 .collect();
                             
                             let passed_lines = target_matched_lines.get(context_name).cloned().unwrap_or_default();
+                            let candidates = target_candidates.get(context_name).cloned().unwrap_or_default(); // 🌟 [추가] 수집된 단서 뭉치
 
                             for keyword in bias_keywords {
                                 let lang_prefix = context_name.split('_').next().unwrap_or("english");
@@ -1211,7 +1239,8 @@ async fn process_task(
                                     split_target_desc,
                                     keyword.to_string(),
                                     prej_val.to_string(),
-                                    false
+                                    false,
+                                    candidates.clone() // 🌟 [추가] 단서 전달
                                 ));
                             }
                         }
@@ -1293,7 +1322,8 @@ async fn process_task(
                                                         split_target_desc,
                                                         keyword.to_string(),
                                                         b_prej.to_string(),
-                                                        true // 🌟 Phase 2 플래그!
+                                                        true, // 🌟 Phase 2 플래그!
+                                                        Vec::new() // 🌟 Phase 2는 LLM이 찾도록 빈 단서 전달
                                                     ));
                                                 }
                                             }
@@ -1305,7 +1335,7 @@ async fn process_task(
 
                         // 만약 valid_targets.len()을 넘어섰다면 진짜 끝
                         if p_idx >= valid_targets.len() { break; }
-                        let (target_name, base_target, target_item, target_bias, target_prejudice, is_phase2) = valid_targets[p_idx].clone();
+                        let (target_name, base_target, target_item, target_bias, target_prejudice, is_phase2, vector_candidates) = valid_targets[p_idx].clone();
                         p_idx += 1;
                         
                         // 🌟 [추가] 현재 찾고 있는 타겟과 일치하는 값들만 모아 CoT 프롬프트에 주입할 배열
@@ -1381,7 +1411,17 @@ async fn process_task(
                                 ignore_list.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
                             };
 
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str);
+                            // 🌟 [신규 추가] Vector가 찾아낸 후보 단서들을 콤마로 연결하여 전달
+                            let candidates_str = if vector_candidates.is_empty() {
+                                "".to_string()
+                            } else {
+                                let mut unique_cands = vector_candidates.clone();
+                                unique_cands.sort();
+                                unique_cands.dedup();
+                                unique_cands.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
+                            };
+
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str);
                             
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -1417,7 +1457,7 @@ async fn process_task(
                                         model: "qwen".to_string(),
                                         max_tokens: Some(1024),
                                         temperature: Some(current_temperature), // 🌟 [동적 온도 적용]
-                                        top_p: Some(current_temperature),
+                                        top_p: Some(1.0),
                                         ..Default::default()
                                     };
                                     
@@ -1463,7 +1503,7 @@ async fn process_task(
                                             model: "qwen3".to_string(),
                                             max_tokens: Some(1024),
                                             temperature: Some(current_temperature), // 🌟 [동적 온도 적용]
-                                            top_p: Some(current_temperature),
+                                            top_p: Some(1.0),
                                             ..Default::default()
                                         };
                                         
@@ -1564,7 +1604,7 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
                                 miss_counter += 1;
-                                current_temperature += 0.12; // 🌟 온도 상승
+                                current_temperature += 0.2; // 🌟 온도 상승
                                 // empty_count += 1; // 🌟 빈 값 카운트 증가
 
                                 emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
@@ -1597,7 +1637,7 @@ async fn process_task(
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
 
-                                if current_temperature >= 1.0 || *count >= 3 {
+                                if current_temperature > 1.0 || *count >= 3 {
                                     emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값({}회) 누적 또는 온도 {:.2} 도달로 강제 종료.", count, current_temperature));
                                     break;
                                 }

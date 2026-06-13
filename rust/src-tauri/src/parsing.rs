@@ -919,7 +919,7 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str) -> (String, String) {
+pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str) -> (String, String) {
     let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
 
@@ -949,6 +949,7 @@ Find all the {TARGET_NAME} from the following PUG CONTENT.
 [INSTRUCTION]
 - Bias (Acceptance Criteria): {TARGET_BIAS}
 - Prejudice (Rejection Criteria): {TARGET_PREJUDICE}
+{VECTOR_HINT_BLOCK}
 {ALREADY_FOUND_BLOCK}
 {NOT_FOUND_BLOCK}
 
@@ -962,6 +963,12 @@ Find all the {TARGET_NAME} from the following PUG CONTENT.
 
 
 [ACTION] RETURN JSON ONLY."###.to_string();
+
+    let vector_hint_block = if candidates_str.is_empty() {
+        "".to_string()
+    } else {
+        format!("\n[VECTOR SEARCH HINTS]\n- The Vector DB has highlighted these potential candidates: [{}].\n- Please evaluate if these hints semantically match the target. If they do, extract them cleanly without post-positions.\n", candidates_str)
+    };
 
     let already_found_block = if already_found_str.is_empty() {
         "".to_string()
@@ -984,6 +991,7 @@ Find all the {TARGET_NAME} from the following PUG CONTENT.
         .replace("{TARGET_ITEM}", target_item)
         .replace("{TARGET_BIAS}", target_bias)
         .replace("{TARGET_PREJUDICE}", target_prejudice)
+        .replace("{VECTOR_HINT_BLOCK}", &vector_hint_block)
         .replace("{ALREADY_FOUND_BLOCK}", &already_found_block)
         .replace("{NOT_FOUND_BLOCK}", &not_found_block);
 
