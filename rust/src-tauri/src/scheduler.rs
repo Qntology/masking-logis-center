@@ -1091,11 +1091,17 @@ async fn process_task(
 
                                 // 획득한 타이틀(카테고리)이 100% 정확히 일치할 때만 융합
                                 if last_targets == span_targets {
-                                    emit_term(&format!("    🤝 [MERGED] '{}' + '{}' -> '{}'", last.text, span.text, format!("{} {}", last.text, span.text)));
-                                    last.end = span.end;
-                                    last.text = format!("{} {}", last.text, span.text);
-                                    last.score = last.score.max(span.score);
-                                    merged = true;
+                                    // 🌟 [추가] 두 청크 중 최소 하나는 '단어 1개'로 구성된 경우에만 병합 허용 (2개+2개 이상 결합 방지)
+                                    let last_word_count = last.end - last.start;
+                                    let span_word_count = span.end - span.start;
+                                    
+                                    if last_word_count == 1 || span_word_count == 1 {
+                                        emit_term(&format!("    🤝 [MERGED] '{}' + '{}' -> '{}'", last.text, span.text, format!("{} {}", last.text, span.text)));
+                                        last.end = span.end;
+                                        last.text = format!("{} {}", last.text, span.text);
+                                        last.score = last.score.max(span.score);
+                                        merged = true;
+                                    }
                                 }
                             }
                         }
