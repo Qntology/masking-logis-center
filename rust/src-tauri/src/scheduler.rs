@@ -1555,10 +1555,10 @@ async fn process_task(
                             let verb_score_key = format!("{}_verb_expression_score", current_lang);
                             let verb_expression_score = parsed.get(&verb_score_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
                             
-                            // 🌟 [CRITICAL FIX] 서술어/어구 점수가 70점을 초과하는 경우 무고한 단어 훼손 방지를 위해 즉시 환각으로 간주하고 강제 차단합니다.
-                            if verb_expression_score >= 70.0 {
+                            // 🌟 [CRITICAL FIX] 서술어/어구 점수가 7점을 초과하는 경우(1~10 척도) 무고한 단어 훼손 방지를 위해 즉시 환각으로 간주하고 강제 차단합니다.
+                            if verb_expression_score >= 7.0 {
                                 miss_counter += 1;
-                                current_temperature += 0.3; // 🌟 환각이므로 온도를 올려 변형 유도
+                                current_temperature += 0.2; // 🌟 환각이므로 온도를 올려 변형 유도
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
@@ -1586,7 +1586,7 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 추출된 값이 임시 마커(해시 기반)를 포함하고 있다면 무조건 환각으로 간주하고 강제 차단합니다.
                             if extracted_val.contains(&format!("___{}_", task_marker_hash)) || extracted_val.contains(&task_marker_hash.to_string()) {
                                 miss_counter += 1;
-                                current_temperature += 0.3; // 🌟 온도 상승
+                                current_temperature += 0.2; // 🌟 온도 상승
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
@@ -1634,7 +1634,7 @@ async fn process_task(
 
                             if word_count > max_words || char_count > max_chars {
                                 miss_counter += 1;
-                                current_temperature += 0.3;
+                                current_temperature += 0.2;
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
@@ -1687,7 +1687,7 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
                                 miss_counter += 1;
-                                current_temperature += 0.3; // 🌟 온도 상승
+                                current_temperature += 0.2; // 🌟 온도 상승
                                 // empty_count += 1; // 🌟 빈 값 카운트 증가
 
                                 emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
@@ -1715,7 +1715,7 @@ async fn process_task(
 
                             if !re_check_context && !re_check_body && !re_check_title && !re_check_desc {
                                 miss_counter += 1;
-                                current_temperature += 0.3; // 🌟 못 찾았으므로 온도를 높여 다음 턴에 변형을 유도
+                                current_temperature += 0.2; // 🌟 못 찾았으므로 온도를 높여 다음 턴에 변형을 유도
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;

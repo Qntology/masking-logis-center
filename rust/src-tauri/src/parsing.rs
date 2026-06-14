@@ -941,10 +941,16 @@ Find all the {TARGET_NAME} from the following PUG CONTENT.
 {ALREADY_FOUND_BLOCK}
 {NOT_FOUND_BLOCK}
 
+[SCORING RUBRIC FOR VERB EXPRESSION]
+Evaluate the semantic nature of the extracted string against these {LANGUAGE} concepts: [{VERB_EXPRESSION_HINT}].
+* Score 1 to 3: Pure noun, proper noun, or exact entity matching '{TARGET_ITEM}' (Examples: {TARGET_BIAS}).
+* Score 4 to 6: The target entity with minor {LANGUAGE} post-positions, particles, or grammatical markers attached.
+* Score 7 to 10: A complete sentence, action verb, descriptive phrase, or conversational idiom.
+
 [SCHEMA DEFINITIONS]
 - {TARGET_BASE}: String. Default '{TARGET_ITEM}'.
 - {TARGET_NAME}: String. Extract the {TARGET_NAME} - '{TARGET_ITEM}' value. return an empty string "".
-- {LANGUAGE}_verb_expression_score: Number (0 to 100). Evaluate how much the extracted value resembles a pure {LANGUAGE} verb, predicate, idiom, or meaningless phrase (Examples: {VERB_EXPRESSION_HINT}). A pure noun or exact entity is 0. A complete sentence, verb, or idiom is 100. A noun with post-positions/particles attached is around 30-50.
+- {LANGUAGE}_verb_expression_score: Integer (1 to 10). Assign a score based on the [SCORING RUBRIC FOR VERB EXPRESSION].
 
 [OUTPUT FORMAT]
 {
