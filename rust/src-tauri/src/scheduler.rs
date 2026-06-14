@@ -1186,51 +1186,36 @@ async fn process_task(
                         contiguous_groups.push(current_group);
                     }
                     
-                    // 각 그룹 내에서 길이 2 이상의 모든 연속된 서브 스팬(Sub-span) 경우의 수를 생성
+                    // 각 그룹 내에서 '오직 2개의 연속된 조각(Pair)' 결합 경우의 수만 생성합니다. (제약 완전 철폐)
                     for group in contiguous_groups {
                         let n = group.len();
                         if n >= 2 {
-                            for len in 2..=n {
-                                for start_idx in 0..=(n - len) {
-                                    let sub_group = &group[start_idx..(start_idx + len)];
-                                    
-                                    // 🌟 [CRITICAL FIX] 3개 이상의 다른 타입이 섞이는 잡탕밥(프랑켄슈타인 덩어리) 방어 로직
-                                    // 결합되는 조각들이 가진 고유 카테고리(base_target)의 종류를 계산하여 최대 2개까지만 혼합을 허용합니다.
-                                    let mut distinct_base_targets = std::collections::HashSet::new();
-                                    for s in sub_group {
-                                        for &t_idx in &s.target_indices {
-                                            let (_, base_target, _) = &dynamic_target_items[t_idx];
-                                            distinct_base_targets.insert(base_target.clone());
-                                        }
-                                    }
-                                    
-                                    if distinct_base_targets.len() > 2 {
-                                        continue; // 3개 이상의 속성이 섞인다면 무의미한 덩어리이므로 파생에서 즉각 탈락시킵니다.
-                                    }
-
-                                    let combined_text = sub_group.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
-                                    let max_score = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
-                                    
-                                    // 🌟 파생된 거대 조각은 결합된 모든 조각들의 타겟(카테고리)을 합집합으로 가집니다.
-                                    let mut combined_targets = Vec::new();
-                                    for s in sub_group {
-                                        combined_targets.extend(s.target_indices.clone());
-                                    }
-                                    combined_targets.sort();
-                                    combined_targets.dedup();
-                                    
-                                    let new_span = ChunkSpan {
-                                        line_idx: sub_group[0].line_idx,
-                                        start: sub_group[0].start,
-                                        end: sub_group.last().unwrap().end,
-                                        text: combined_text.clone(),
-                                        target_indices: combined_targets,
-                                        score: max_score,
-                                    };
-                                    
-                                    emit_term(&format!("    🤝 [EXPANDED] {}조각 결합 파생 ({}개 타입 혼합): '{}'", len, distinct_base_targets.len(), combined_text));
-                                    expanded_spans.push(new_span);
+                            let len = 2; // 🌟 [CRITICAL FIX] 무조건 2조각까지만 이어지도록 결합 길이를 2로 고정합니다.
+                            for start_idx in 0..=(n - len) {
+                                let sub_group = &group[start_idx..(start_idx + len)];
+                                
+                                let combined_text = sub_group.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+                                let max_score = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
+                                
+                                // 🌟 파생된 거대 조각은 결합된 모든 조각들의 타겟(카테고리)을 합집합으로 가집니다. (이종 카테고리 제약 완전 철폐)
+                                let mut combined_targets = Vec::new();
+                                for s in sub_group {
+                                    combined_targets.extend(s.target_indices.clone());
                                 }
+                                combined_targets.sort();
+                                combined_targets.dedup();
+                                
+                                let new_span = ChunkSpan {
+                                    line_idx: sub_group[0].line_idx,
+                                    start: sub_group[0].start,
+                                    end: sub_group.last().unwrap().end,
+                                    text: combined_text.clone(),
+                                    target_indices: combined_targets,
+                                    score: max_score,
+                                };
+                                
+                                emit_term(&format!("    🤝 [EXPANDED] 2조각 결합 파생: '{}'", combined_text));
+                                expanded_spans.push(new_span);
                             }
                         }
                     }
