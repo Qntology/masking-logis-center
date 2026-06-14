@@ -1736,6 +1736,23 @@ async fn process_task(
                             current_target_found.push(extracted_val.clone());
                             domain_history.push((target_name.to_string(), extracted_val.clone()));
 
+                            // 🌟 [파생어 자동 마스킹 적용] 띄어쓰기로 이루어진 복합어인 경우, 쪼개진 단어(파생어)들도 모두 동일한 마커로 강제 마스킹합니다.
+                            let parts: Vec<&str> = extracted_val.split_whitespace().collect();
+                            if parts.len() > 1 {
+                                for p in parts {
+                                    if p.chars().count() >= 2 {
+                                        masked_text = masked_text.replace(p, &skip_marker);
+                                        doc_title = doc_title.replace(p, &skip_marker);
+                                        doc_desc = doc_desc.replace(p, &skip_marker);
+                                        matched_context = matched_context.replace(p, &skip_marker);
+                                        
+                                        replacement_history.push((p.to_string(), skip_marker.clone()));
+                                        current_target_found.push(p.to_string());
+                                        domain_history.push((target_name.to_string(), p.to_string()));
+                                    }
+                                }
+                            }
+
                             if base_target == "company" {
                                 phase2_companies.push(extracted_val.clone());
                             }
