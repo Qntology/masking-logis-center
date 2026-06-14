@@ -859,33 +859,6 @@ async fn process_task(
                         }
                     }
 
-                    // 🌟 [CRITICAL FIX] 괄호 특수문자를 해시 마커로 치환하여 외부 장부(Shadow Map)에 격리
-                    // 단어가 접착(Glued)되는 현상을 막기 위해 양옆에 공백을 주입합니다.
-                    let mut bracket_map = std::collections::HashMap::new();
-                    let mut bracket_counter = 0;
-                    if let Ok(bracket_re) = regex::Regex::new(r"([()\[\]{}])") {
-                        masked_text = bracket_re.replace_all(&masked_text, |caps: &regex::Captures| {
-                            let b_marker = format!(" __BRACKET_{}_{}__ ", task_marker_hash, bracket_counter);
-                            bracket_map.insert(b_marker.trim().to_string(), caps[1].to_string());
-                            bracket_counter += 1;
-                            b_marker
-                        }).to_string();
-                        
-                        doc_title = bracket_re.replace_all(&doc_title, |caps: &regex::Captures| {
-                            let b_marker = format!(" __BRACKET_{}_{}__ ", task_marker_hash, bracket_counter);
-                            bracket_map.insert(b_marker.trim().to_string(), caps[1].to_string());
-                            bracket_counter += 1;
-                            b_marker
-                        }).to_string();
-
-                        doc_desc = bracket_re.replace_all(&doc_desc, |caps: &regex::Captures| {
-                            let b_marker = format!(" __BRACKET_{}_{}__ ", task_marker_hash, bracket_counter);
-                            bracket_map.insert(b_marker.trim().to_string(), caps[1].to_string());
-                            bracket_counter += 1;
-                            b_marker
-                        }).to_string();
-                    }
-
                     // 🌟 [CRITICAL FIX] 메타데이터 노이즈(/사진=, /AFPBBNews=뉴스1 등)를 해시 마커로 치환하여 외부 장부(Shadow Map)에 격리
                     let mut noise_map = std::collections::HashMap::new();
                     let mut noise_counter = 0;
@@ -1015,7 +988,6 @@ async fn process_task(
                     }
                     let mut raw_spans = Vec::new();
 
-                    let bracket_marker_prefix = format!("__BRACKET_{}_", task_marker_hash);
                     let noise_marker_prefix = format!("__NOISE_{}_", task_marker_hash);
                     let link_marker_prefix = format!("__LINK_{}_", task_marker_hash);
 
@@ -1027,9 +999,9 @@ async fn process_task(
                         for start in 0..words.len() {
                             let max_end = words.len().min(start + 4); // 1~4 단어 조합
                             for end in (start + 1)..=max_end {
-                                // 🌟 [CRITICAL FIX] 괄호, 노이즈, 링크 해시 마커를 벡터 청크에서 제외하여 순수 텍스트만 임베딩합니다.
+                                // 🌟 [CRITICAL FIX] 노이즈, 링크 해시 마커를 벡터 청크에서 제외하여 순수 텍스트만 임베딩합니다.
                                 let clean_words: Vec<&str> = words[start..end].iter()
-                                    .filter(|&&w| !w.starts_with(&bracket_marker_prefix) && !w.starts_with(&noise_marker_prefix) && !w.starts_with(&link_marker_prefix))
+                                    .filter(|&&w| !w.starts_with(&noise_marker_prefix) && !w.starts_with(&link_marker_prefix))
                                     .copied()
                                     .collect();
                                 
@@ -1282,7 +1254,6 @@ async fn process_task(
 
                     emit_term("[EXTRACTION] 🧠 2차 패스 벡터 유사도 검증 완료. 추론 준비...");
                     
-                    // 🌟 1차 패스에서 이미 LLM 로딩 및 동기화가 완료되었으므로 바로 루프 시작
                     emit_term("[EXTRACTION] ✅ LLM 2차 추론 루프 시작.");
 
                     let total_valid = valid_targets.len();
@@ -1471,9 +1442,9 @@ async fn process_task(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("idiom, phrase");
 
-                            // 🌟 [CRITICAL FIX] LLM에게는 괄호, 링크, 메타데이터 해시 마커를 모두 공백으로 치환한 순도 100%의 깨끗한 문맥만 제공합니다.
+                            // 🌟 [CRITICAL FIX] LLM에게는 링크, 메타데이터 해시 마커를 모두 공백으로 치환한 순도 100%의 깨끗한 문맥만 제공합니다.
                             let mut clean_matched_context = matched_context.clone();
-                            if let Ok(marker_re) = regex::Regex::new(&format!(r"__(BRACKET|LINK|NOISE)_{}_\d+__", task_marker_hash)) {
+                            if let Ok(marker_re) = regex::Regex::new(&format!(r"__(LINK|NOISE)_{}_\d+__", task_marker_hash)) {
                                 clean_matched_context = marker_re.replace_all(&clean_matched_context, " ").to_string();
                             }
 
@@ -2139,14 +2110,8 @@ async fn process_task(
                         }
                     }
 
-                    // 🌟 [CRITICAL FIX] 마스킹이 모두 끝난 후, 외부 장부에 보관했던 괄호, 메타데이터 노이즈, 링크를 정확한 포지션에 복원합니다.
+                    // 🌟 [CRITICAL FIX] 마스킹이 모두 끝난 후, 외부 장부에 보관했던 메타데이터 노이즈, 링크를 정확한 포지션에 복원합니다.
                     // 마커 양옆에 주입했던 공백도 깔끔하게 제거하여 원본의 접착 상태(Glued)를 완벽히 복구합니다.
-                    if let Ok(bracket_re) = regex::Regex::new(&format!(r"\s*(__BRACKET_{}_\d+__)\s*", task_marker_hash)) {
-                        masked_text = bracket_re.replace_all(&masked_text, |caps: &regex::Captures| { bracket_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
-                        doc_title = bracket_re.replace_all(&doc_title, |caps: &regex::Captures| { bracket_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
-                        doc_desc = bracket_re.replace_all(&doc_desc, |caps: &regex::Captures| { bracket_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
-                    }
-
                     if let Ok(noise_re) = regex::Regex::new(&format!(r"\s*(__NOISE_{}_\d+__)\s*", task_marker_hash)) {
                         masked_text = noise_re.replace_all(&masked_text, |caps: &regex::Captures| { noise_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
                         doc_title = noise_re.replace_all(&doc_title, |caps: &regex::Captures| { noise_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
