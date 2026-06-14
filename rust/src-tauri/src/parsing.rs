@@ -919,7 +919,7 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str) -> (String, String) {
+pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str, local_language: &str, foreign_guide_str: &str) -> (String, String) {
     let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
 
@@ -934,12 +934,14 @@ pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str
 Find the exact {TARGET_NAME} from the following PUG CONTENT.
 
 [INSTRUCTION]
+- Local Language Context: {LOCAL_LANGUAGE}
 - Target: {TARGET_ITEM}
 - Bias (Acceptance Criteria): {TARGET_BIAS}
 - Prejudice (Rejection Criteria): {TARGET_PREJUDICE}
 {VECTOR_HINT_BLOCK}
 {ALREADY_FOUND_BLOCK}
 {NOT_FOUND_BLOCK}
+{FOREIGN_GUIDE_BLOCK}
 
 [SCHEMA DEFINITIONS]
 - {TARGET_BASE}: String. Default '{TARGET_ITEM}'.
@@ -971,10 +973,17 @@ Find the exact {TARGET_NAME} from the following PUG CONTENT.
         format!("\n[DO NOT EXTRACT (HALLUCINATION OR WRONG)]\n- CRITICAL: DO NOT output any of the following values: {}\n", not_found_str)
     };
 
+    let foreign_guide_block = if foreign_guide_str.is_empty() {
+        "".to_string()
+    } else {
+        format!("\n[FOREIGN WORD GUIDANCE]\n- {}\n", foreign_guide_str)
+    };
+
     let system_prompt = system_template.replace("{PUG_CONTENT}", pug_content);
     let user_prompt = user_template
         .replace("{PUG_CONTENT}", pug_content)
         .replace("{TITLE}", title)
+        .replace("{LOCAL_LANGUAGE}", local_language)
         .replace("{TARGET_NAME}", target_name)
         .replace("{TARGET_ITEM}", target_item)
         .replace("{TARGET_BIAS}", target_bias)
@@ -982,13 +991,15 @@ Find the exact {TARGET_NAME} from the following PUG CONTENT.
         .replace("{TARGET_PREJUDICE}", target_prejudice)
         .replace("{VECTOR_HINT_BLOCK}", &vector_hint_block)
         .replace("{ALREADY_FOUND_BLOCK}", &already_found_block)
-        .replace("{NOT_FOUND_BLOCK}", &not_found_block);
+        .replace("{NOT_FOUND_BLOCK}", &not_found_block)
+        .replace("{FOREIGN_GUIDE_BLOCK}", &foreign_guide_block);
 
     (system_prompt, user_prompt)
 }
 
 pub fn build_verification_prompt(extracted_val: &str, target_item: &str, language: &str, verb_hint: &str, expr_hint: &str) -> (String, String) {
     let system_prompt = format!("You are a linguistic verification assistant for {}.", language);
+
     let user_template = r###"[TASK]
 Analyze the provided [EXTRACTED WORD] and score its linguistic and structural properties.
 
@@ -1007,11 +1018,19 @@ Analyze the provided [EXTRACTED WORD] and score its linguistic and structural pr
 3. is_target_mismatch (Boolean):
    - Does this word logically completely mismatch the concept of '{TARGET_ITEM}'?
 
+4. is_native (Boolean):
+   - Is this word a pure native word or a formally registered noun in the {LANGUAGE} dictionary?
+
+5. is_foreign (Boolean):
+   - Is this word a transliterated foreign word, a loaned brand name, or a foreign person name written in {LANGUAGE}?
+
 [OUTPUT FORMAT]
 {
+    "is_native": Boolean,
+    "is_foreign": Boolean,
+    "is_target_mismatch": Boolean,
     "{LANGUAGE}_verb_score": Integer,
     "{LANGUAGE}_expression_score": Integer,
-    "is_target_mismatch": Boolean
 }
 
 [ACTION] RETURN JSON ONLY. NO EXPLANATION."###.to_string();

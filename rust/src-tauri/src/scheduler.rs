@@ -772,35 +772,41 @@ async fn process_task(
                     let bias_str = include_str!("bias.json");
                     let bias_json: Value = serde_json::from_str(bias_str).unwrap_or(json!({}));
 
-                    // 🌟 [수정] 다국어 유니코드 감지 로직 (50여 개 언어 코드 확장 적용)
-                    let mut detected_languages = std::collections::HashSet::new();
+                    // 🌟 [수정] 다국어 유니코드 감지 및 빈도수 기반 Local 언어 확정 로직
+                    let mut language_counts = std::collections::HashMap::new();
                     
                     for c in target_text.chars() {
                         let u = c as u32;
-                        
-                        if (u >= 0x0041 && u <= 0x005A) || (u >= 0x0061 && u <= 0x007A) { detected_languages.insert("english"); }
-                        else if (u >= 0xAC00 && u <= 0xD7A3) || (u >= 0x1100 && u <= 0x11FF) || (u >= 0x3130 && u <= 0x318F) { detected_languages.insert("korean"); }
-                        else if (u >= 0x3040 && u <= 0x309F) || (u >= 0x30A0 && u <= 0x30FF) { detected_languages.insert("japanese"); }
-                        else if u >= 0x4E00 && u <= 0x9FFF { detected_languages.insert("chinese"); }
-                        else if u >= 0x0400 && u <= 0x04FF { detected_languages.insert("russian"); }
-                        else if u >= 0x0600 && u <= 0x06FF { detected_languages.insert("arabic"); }
-                        else if u >= 0x0E00 && u <= 0x0E7F { detected_languages.insert("thai"); }
-                        else if u >= 0x0900 && u <= 0x097F { detected_languages.insert("hindi"); }
-                        else if u >= 0x0980 && u <= 0x09FF { detected_languages.insert("bengali"); }
-                        else if u >= 0x0370 && u <= 0x03FF { detected_languages.insert("greek"); }
-                        else if u >= 0x0590 && u <= 0x05FF { detected_languages.insert("hebrew"); }
-                        else if u >= 0x1EA0 && u <= 0x1EF9 { detected_languages.insert("vietnamese"); }
-                        else if u >= 0x00C0 && u <= 0x00FF { 
-                            detected_languages.insert("french");
-                            detected_languages.insert("spanish");
-                            detected_languages.insert("german");
+                        let lang = if (u >= 0x0041 && u <= 0x005A) || (u >= 0x0061 && u <= 0x007A) { "english" }
+                        else if (u >= 0xAC00 && u <= 0xD7A3) || (u >= 0x1100 && u <= 0x11FF) || (u >= 0x3130 && u <= 0x318F) { "korean" }
+                        else if (u >= 0x3040 && u <= 0x309F) || (u >= 0x30A0 && u <= 0x30FF) { "japanese" }
+                        else if u >= 0x4E00 && u <= 0x9FFF { "chinese" }
+                        else if u >= 0x0400 && u <= 0x04FF { "russian" }
+                        else if u >= 0x0600 && u <= 0x06FF { "arabic" }
+                        else if u >= 0x0E00 && u <= 0x0E7F { "thai" }
+                        else if u >= 0x0900 && u <= 0x097F { "hindi" }
+                        else if u >= 0x0980 && u <= 0x09FF { "bengali" }
+                        else if u >= 0x0370 && u <= 0x03FF { "greek" }
+                        else if u >= 0x0590 && u <= 0x05FF { "hebrew" }
+                        else if u >= 0x1EA0 && u <= 0x1EF9 { "vietnamese" }
+                        else if u >= 0x00C0 && u <= 0x00FF { "european" }
+                        else { "" };
+
+                        if !lang.is_empty() {
+                            *language_counts.entry(lang).or_insert(0) += 1;
                         }
                     }
                     
-                    let mut detected_languages_vec: Vec<String> = detected_languages.into_iter().map(|s| s.to_string()).collect();
+                    let mut detected_languages_vec: Vec<String> = language_counts.keys().map(|s| s.to_string()).collect();
                     if detected_languages_vec.is_empty() { detected_languages_vec.push("english".to_string()); }
 
-                    emit_term(&format!("[EXTRACTION] 🌐 Detected Languages: {:?}", detected_languages_vec));
+                    // 가장 많이 사용된 언어를 local_language로 확정
+                    let local_language = language_counts.into_iter()
+                        .max_by_key(|&(_, count)| count)
+                        .map(|(lang, _)| lang.to_string())
+                        .unwrap_or_else(|| "english".to_string());
+
+                    emit_term(&format!("[EXTRACTION] 🌐 Detected Languages: {:?} (Local: {})", detected_languages_vec, local_language));
 
                     // 🌟 [추가] 언어 기반 동적 타겟 확장 로직
                     // bias.json에서는 기존 키를 사용하여 설정값을 가져오고, 컨텍스트(LLM)에만 언어 접두사를 붙여 전달합니다.
@@ -1346,6 +1352,7 @@ async fn process_task(
                         // 🌟 [추가] 현재 찾고 있는 타겟과 일치하는 값들만 모아 CoT 프롬프트에 주입할 배열
                         let mut current_target_found: Vec<String> = Vec::new();
                         let mut ignore_list: Vec<String> = Vec::new(); // 🌟 추가: 본문에 존재하지 않는 잘못된 추출값 기록
+                        let mut foreign_guide_str = String::new(); // 🌟 [추가] 검증 단계에서 실패한 외래어 가이드 축적
                         
                         // 🌟 [CRITICAL FIX] LLM이 임시 마커를 엔티티로 착각하고 뱉는 환각을 Logit 단계에서 원천 압살합니다!
                         ignore_list.push(format!("___{}_", task_marker_hash));
@@ -1449,7 +1456,7 @@ async fn process_task(
                             }
 
                             // 🌟 [STAGE 1] 추출 에이전트 호출
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str);
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, &local_language, &foreign_guide_str);
                             
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -1586,7 +1593,7 @@ async fn process_task(
                                 continue;
                             }
 
-                            // 🌟 [STAGE 2] 검증 에이전트 호출 (추출된 값이 있을 때만)
+                            // 🌟 [STAGE 2] 검증 에이전트 호출 (항상 호출하여 네이티브/외래어 판별)
                             let (v_system, v_user) = crate::parsing::build_verification_prompt(&extracted_val, &target_item, current_lang, current_verb_hint, current_expr_hint);
                             let cancel_clone_v = cancellation_token.clone();
                             
@@ -1651,9 +1658,18 @@ async fn process_task(
                             
                             let verb_key = format!("{}_verb_score", current_lang);
                             let expr_key = format!("{}_expression_score", current_lang);
-                            let verb_score = v_parsed.get(&verb_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let expr_score = v_parsed.get(&expr_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let mut verb_score = v_parsed.get(&verb_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let mut expr_score = v_parsed.get(&expr_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
                             let is_mismatch = v_parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
+                            
+                            // 🌟 [CRITICAL FIX] 2단계 검증 에이전트에서 직접 네이티브/외래어 여부 판독
+                            let is_native = v_parsed.get("is_native").and_then(|v| v.as_bool()).unwrap_or(true);
+                            let mut is_foreign_word = v_parsed.get("is_foreign").and_then(|v| v.as_bool()).unwrap_or(false);
+                            
+                            // 🌟 is_native가 false면 무조건 is_foreign_word를 true로 강제 반영
+                            if !is_native {
+                                is_foreign_word = true;
+                            }
 
                             emit_term(&format!("\n======================================="));
                             emit_term(&format!("[DEBUG-VERIFY] 🎯 검증 에이전트 채점 결과 🎯"));
@@ -1661,12 +1677,29 @@ async fn process_task(
                             emit_term(&format!("- {}: {}", verb_key, verb_score));
                             emit_term(&format!("- {}: {}", expr_key, expr_score));
                             emit_term(&format!("- is_target_mismatch: {}", is_mismatch));
+                            emit_term(&format!("- is_native: {}", is_native));
+                            emit_term(&format!("- is_foreign_word: {}", is_foreign_word));
                             emit_term(&format!("=======================================\n"));
+
+                            // 🌟 [외래어 쉴드] 외래어/고유명사로 판별되었고, 물리적 제한(길이 등)을 통과하면 서술어 점수를 1.0으로 강제 보정 (Bypass Penalty)
+                            let word_count_check = extracted_val.split_whitespace().count();
+                            let has_marker_check = extracted_val.contains(&format!("___{}_", task_marker_hash)) || extracted_val.contains(&task_marker_hash.to_string());
+                            
+                            if is_foreign_word && word_count_check <= 5 && !has_marker_check {
+                                emit_term(&format!("[DEBUG-VERIFY] 🚀 외래어/고유명사 감지됨. 서술어/표현 점수를 1.0으로 강제 보정하여 무사 통과시킵니다."));
+                                verb_score = 1.0;
+                                expr_score = 1.0;
+                            }
 
                             // 🌟 [CRITICAL FIX] 서술어 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.
                             if verb_score >= 7.0 || expr_score >= 7.0 || is_mismatch {
                                 miss_counter += 1;
                                 current_temperature += 0.2; // 🌟 환각이므로 온도를 올려 변형 유도
+                                
+                                // 🌟 [피드백 루프] 외래어지만 다른 이유(mismatch 등)로 기각되었을 경우 1단계 추출 가이드에 누적 반영
+                                if is_foreign_word {
+                                    foreign_guide_str = format!("The word '{}' was identified as a foreign word or brand, but it was rejected. Please reconsider the extraction carefully.", extracted_val);
+                                }
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
