@@ -1317,9 +1317,8 @@ async fn process_task(
                         loop {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
                             
-                            // 🌟 [추가] 최대 추출 횟수 대폭 해제 (3회 -> 20회)
-                            if item_extract_count >= 20 {
-                                emit_term(&format!("[EXTRACTION] 🛑 최대 추출 횟수(20회) 도달. {} 항목 종료.", target_item));
+                            if current_temperature >= 1.0 {
+                                emit_term(&format!("[EXTRACTION] 🛑 온도 1.0 도달. {} 항목 종료.", target_item));
                                 break;
                             }
 
@@ -1487,7 +1486,7 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 서술어/어구로 판별된 경우 무고한 단어 훼손 방지를 위해 즉시 환각으로 간주하고 강제 차단합니다.
                             if is_verb_expression {
                                 miss_counter += 1;
-                                current_temperature += 0.05; // 🌟 환각이므로 온도를 올려 변형 유도
+                                current_temperature += 0.3; // 🌟 환각이므로 온도를 올려 변형 유도
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
@@ -1514,7 +1513,7 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 추출된 값이 임시 마커([___REDACTED_)를 포함하고 있다면 무조건 환각으로 간주하고 강제 차단합니다.
                             if extracted_val.contains("___REDACTED_") || extracted_val.contains("REDACTED") {
                                 miss_counter += 1;
-                                current_temperature += 0.05; // 🌟 온도 상승
+                                current_temperature += 0.3; // 🌟 온도 상승
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
@@ -1567,13 +1566,13 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
                                 miss_counter += 1;
-                                current_temperature += 0.2; // 🌟 온도 상승
+                                current_temperature += 0.3; // 🌟 온도 상승
                                 // empty_count += 1; // 🌟 빈 값 카운트 증가
 
                                 emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
                                 
                                 if current_temperature >= 1.0 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 빈 값 20회 누적 또는 온도 1.0 도달로 강제 종료."));
+                                    emit_term(&format!("[EXTRACTION] 🛑 온도 1.0 도달로 강제 종료."));
                                     break;
                                 }
 
@@ -1595,7 +1594,7 @@ async fn process_task(
 
                             if !re_check_context && !re_check_body && !re_check_title && !re_check_desc {
                                 miss_counter += 1;
-                                current_temperature += 0.05; // 🌟 못 찾았으므로 온도를 높여 다음 턴에 변형을 유도
+                                current_temperature += 0.3; // 🌟 못 찾았으므로 온도를 높여 다음 턴에 변형을 유도
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
