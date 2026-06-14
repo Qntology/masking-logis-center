@@ -948,7 +948,7 @@ Find the exact {TARGET_NAME} from the following PUG CONTENT.
 [OUTPUT FORMAT]
 {
     "{TARGET_BASE}": String,
-    "{TARGET_NAME}": "String"
+    "{TARGET_NAME}": String
 }
 
 [ACTION] RETURN JSON ONLY. NO EXPLANATION."###.to_string();
@@ -1005,7 +1005,7 @@ Analyze the provided [EXTRACTED WORD] and score its linguistic and structural pr
    - 1 = Short single entity/noun. 10 = Long descriptive phrase or full sentence.
 
 3. is_target_mismatch (Boolean):
-   - Does this word logically completely mismatch the concept of '{TARGET_ITEM}'? (e.g., if target is 'Username' but the word is '12 days' or '1500 Euro', return true).
+   - Does this word logically completely mismatch the concept of '{TARGET_ITEM}'?
 
 [OUTPUT FORMAT]
 {

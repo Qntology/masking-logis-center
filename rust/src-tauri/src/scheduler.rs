@@ -1041,7 +1041,7 @@ async fn process_task(
 
                                 let chunk_emb = model.get_embedding(chunk_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                 let word_count = end - start;
-                                let length_weight = 1.0 + ((word_count as f32 - 1.0) * 0.15); // 단어 개수 가중치
+                                let length_weight = 1.0; // 단어 개수 가중치 제거 (길이 무관 동등 점수)
 
                                 // 🌟 서술어(verb_expression) 타이브레이커 계산 (단어 1개 이상 모두 적용)
                                 let v_sim = cosine_similarity(&chunk_emb, &verb_emb);
@@ -1895,7 +1895,7 @@ async fn process_task(
                                             let v_sim = cosine_similarity(&p_emb, &verb_emb);
                                             
                                             let word_count = end - start;
-                                            let length_weight = 1.0 + ((word_count as f32 - 1.0) * 0.15); // 단어 개수 가중치
+                                            let length_weight = 1.0; // 단어 개수 가중치 제거 (길이 무관 동등 점수)
                                             let beta = if word_count <= 2 { 0.05 } else { 0.10 };
                                             let verb_penalty = v_sim * beta;
                                             let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
