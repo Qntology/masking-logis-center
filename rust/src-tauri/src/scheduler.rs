@@ -979,14 +979,21 @@ async fn process_task(
                     let mut prefixed_verb_b_vals = Vec::new();
                     
                     for lang in &detected_languages_vec {
-                        let verb_b_val = bias_json.get("verb_expression")
+                        let verb_val = bias_json.get("verb")
                             .and_then(|v| v.get("bias"))
                             .and_then(|v| v.get(lang))
                             .and_then(|v| v.as_str())
-                            .unwrap_or("verb, predicate, idiom, phrase")
-                            .to_string();
+                            .unwrap_or("verb, predicate");
                             
-                        let prefixed = verb_b_val.split(',')
+                        let expr_val = bias_json.get("expression")
+                            .and_then(|v| v.get("bias"))
+                            .and_then(|v| v.get(lang))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("idiom, phrase");
+                            
+                        let combined_verb_expr = format!("{}, {}", verb_val, expr_val);
+                            
+                        let prefixed = combined_verb_expr.split(',')
                             .map(|s| format!("{} {}", lang, s.trim()))
                             .collect::<Vec<_>>().join(", ");
                             
@@ -1418,11 +1425,18 @@ async fn process_task(
                                 current_lang = detected_languages_vec.first().map(|s| s.as_str()).unwrap_or("english");
                             }
                             
-                            let current_verb_b_val = bias_json.get("verb_expression")
+                            // 🌟 [CRITICAL FIX] 검증 에이전트(Stage 2)에게 전달할 분리된 힌트 문구를 가져옵니다.
+                            let current_verb_hint = bias_json.get("verb")
                                 .and_then(|v| v.get("bias"))
                                 .and_then(|v| v.get(current_lang))
                                 .and_then(|v| v.as_str())
-                                .unwrap_or("verb, predicate, idiom, phrase");
+                                .unwrap_or("verb, predicate");
+                                
+                            let current_expr_hint = bias_json.get("expression")
+                                .and_then(|v| v.get("bias"))
+                                .and_then(|v| v.get(current_lang))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("idiom, phrase");
 
                             // 🌟 [CRITICAL FIX] LLM에게는 괄호, 링크, 메타데이터 해시 마커를 모두 공백으로 치환한 순도 100%의 깨끗한 문맥만 제공합니다.
                             let mut clean_matched_context = matched_context.clone();
@@ -1569,7 +1583,7 @@ async fn process_task(
                             }
 
                             // 🌟 [STAGE 2] 검증 에이전트 호출 (추출된 값이 있을 때만)
-                            let (v_system, v_user) = crate::parsing::build_verification_prompt(&extracted_val, &target_item, current_lang);
+                            let (v_system, v_user) = crate::parsing::build_verification_prompt(&extracted_val, &target_item, current_lang, current_verb_hint, current_expr_hint);
                             let cancel_clone_v = cancellation_token.clone();
                             
                             let res_verify = if is_large_context {
@@ -1637,7 +1651,13 @@ async fn process_task(
                             let expr_score = v_parsed.get(&expr_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
                             let is_mismatch = v_parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
 
-                            emit_term(&format!("[DEBUG-VERIFY] 검증 결과: verb={}, expr={}, mismatch={}", verb_score, expr_score, is_mismatch));
+                            emit_term(&format!("\n======================================="));
+                            emit_term(&format!("[DEBUG-VERIFY] 🎯 검증 에이전트 채점 결과 🎯"));
+                            emit_term(&format!("- 대상 단어: '{}'", extracted_val));
+                            emit_term(&format!("- {}: {}", verb_key, verb_score));
+                            emit_term(&format!("- {}: {}", expr_key, expr_score));
+                            emit_term(&format!("- is_target_mismatch: {}", is_mismatch));
+                            emit_term(&format!("=======================================\n"));
 
                             // 🌟 [CRITICAL FIX] 서술어 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.
                             if verb_score >= 7.0 || expr_score >= 7.0 || is_mismatch {

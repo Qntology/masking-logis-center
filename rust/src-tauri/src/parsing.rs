@@ -987,7 +987,7 @@ Find the exact {TARGET_NAME} from the following PUG CONTENT.
     (system_prompt, user_prompt)
 }
 
-pub fn build_verification_prompt(extracted_val: &str, target_item: &str, language: &str) -> (String, String) {
+pub fn build_verification_prompt(extracted_val: &str, target_item: &str, language: &str, verb_hint: &str, expr_hint: &str) -> (String, String) {
     let system_prompt = format!("You are a linguistic verification assistant for {}.", language);
     let user_template = r###"[TASK]
 Analyze the provided [EXTRACTED WORD] and score its linguistic and structural properties.
@@ -997,11 +997,11 @@ Analyze the provided [EXTRACTED WORD] and score its linguistic and structural pr
 
 [SCORING INSTRUCTION]
 1. {LANGUAGE}_verb_score (1 to 10): 
-   - Is this a verb, action, or predicate? 
+   - Is this a verb, action, or predicate? (Concepts: [{VERB_HINT}])
    - 1 = Pure noun (No action). 10 = Pure verb/action.
    
 2. {LANGUAGE}_expression_score (1 to 10):
-   - Is this a conversational phrase, idiom, or full sentence? 
+   - Is this a conversational phrase, idiom, or full sentence? (Concepts: [{EXPRESSION_HINT}])
    - 1 = Short single entity/noun. 10 = Long descriptive phrase or full sentence.
 
 3. is_target_mismatch (Boolean):
@@ -1019,7 +1019,9 @@ Analyze the provided [EXTRACTED WORD] and score its linguistic and structural pr
     let user_prompt = user_template
         .replace("{EXTRACTED_VALUE}", extracted_val)
         .replace("{LANGUAGE}", language)
-        .replace("{TARGET_ITEM}", target_item);
+        .replace("{TARGET_ITEM}", target_item)
+        .replace("{VERB_HINT}", verb_hint)
+        .replace("{EXPRESSION_HINT}", expr_hint);
 
     (system_prompt, user_prompt)
 }
