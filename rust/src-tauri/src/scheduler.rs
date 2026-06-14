@@ -1152,7 +1152,7 @@ async fn process_task(
                     }
 
                     // 🌟 [추가] 4.5 인접 청크 동적 스팬 확장 (Dynamic Span Expansion)
-                    // 100% 동일한 카테고리를 가진 인접 청크들이 만들 수 있는 모든 결합 경우의 수를 파생시켜 후보군에 추가합니다.
+                    // 물리적으로 인접한 청크들이 만들어낼 수 있는 모든 결합 경우의 수를 파생시켜 후보군에 추가합니다.
                     emit_term("  🔗 [PASS 3.5: GAP BRIDGING] Dynamic Span Expansion for adjacent winner chunks...");
                     final_spans.sort_by(|a, b| a.line_idx.cmp(&b.line_idx).then(a.start.cmp(&b.start)));
                     
@@ -1164,13 +1164,9 @@ async fn process_task(
                     
                     for span in final_spans {
                         if let Some(last) = current_group.last() {
-                            let mut last_targets = last.target_indices.clone();
-                            let mut span_targets = span.target_indices.clone();
-                            last_targets.sort();
-                            span_targets.sort();
-
-                            // 같은 줄에 있고 물리적으로 완벽히 맞닿아 있으며 카테고리가 100% 일치하는지 확인
-                            if last.line_idx == span.line_idx && last.end == span.start && last_targets == span_targets {
+                            // 🌟 [CRITICAL FIX] 카테고리 100% 일치 제약을 완전히 삭제! 
+                            // 승리한 조각들이 같은 줄에 있고 물리적으로 맞닿아 있기만 하다면 무조건 연쇄 결합 그룹에 포함시킵니다.
+                            if last.line_idx == span.line_idx && last.end == span.start {
                                 // 🌟 두 청크 중 최소 하나는 '단어 1개'로 구성된 경우에만 연속성을 인정하여 과잉 그룹화 방지
                                 let last_word_count = last.end - last.start;
                                 let span_word_count = span.end - span.start;
@@ -1197,19 +1193,42 @@ async fn process_task(
                             for len in 2..=n {
                                 for start_idx in 0..=(n - len) {
                                     let sub_group = &group[start_idx..(start_idx + len)];
+                                    
+                                    // 🌟 [CRITICAL FIX] 3개 이상의 다른 타입이 섞이는 잡탕밥(프랑켄슈타인 덩어리) 방어 로직
+                                    // 결합되는 조각들이 가진 고유 카테고리(base_target)의 종류를 계산하여 최대 2개까지만 혼합을 허용합니다.
+                                    let mut distinct_base_targets = std::collections::HashSet::new();
+                                    for s in sub_group {
+                                        for &t_idx in &s.target_indices {
+                                            let (_, base_target, _) = &dynamic_target_items[t_idx];
+                                            distinct_base_targets.insert(base_target.clone());
+                                        }
+                                    }
+                                    
+                                    if distinct_base_targets.len() > 2 {
+                                        continue; // 3개 이상의 속성이 섞인다면 무의미한 덩어리이므로 파생에서 즉각 탈락시킵니다.
+                                    }
+
                                     let combined_text = sub_group.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
                                     let max_score = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
+                                    
+                                    // 🌟 파생된 거대 조각은 결합된 모든 조각들의 타겟(카테고리)을 합집합으로 가집니다.
+                                    let mut combined_targets = Vec::new();
+                                    for s in sub_group {
+                                        combined_targets.extend(s.target_indices.clone());
+                                    }
+                                    combined_targets.sort();
+                                    combined_targets.dedup();
                                     
                                     let new_span = ChunkSpan {
                                         line_idx: sub_group[0].line_idx,
                                         start: sub_group[0].start,
                                         end: sub_group.last().unwrap().end,
                                         text: combined_text.clone(),
-                                        target_indices: sub_group[0].target_indices.clone(),
+                                        target_indices: combined_targets,
                                         score: max_score,
                                     };
                                     
-                                    emit_term(&format!("    🤝 [EXPANDED] {}조각 결합 파생: '{}'", len, combined_text));
+                                    emit_term(&format!("    🤝 [EXPANDED] {}조각 결합 파생 ({}개 타입 혼합): '{}'", len, distinct_base_targets.len(), combined_text));
                                     expanded_spans.push(new_span);
                                 }
                             }
