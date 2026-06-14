@@ -997,18 +997,6 @@ Find the exact {TARGET_NAME} from the following CONTENT.
         format!(", {}", candidates_str)
     };
 
-    let already_found_block = if already_found_str.is_empty() {
-        "".to_string()
-    } else {
-        format!("\n[ALREADY EXTRACTED ENTITIES]\n- Skip these values as they are already masked: {}\n", already_found_str)
-    };
-
-    let not_found_block = if not_found_str.is_empty() {
-        "".to_string()
-    } else {
-        format!("\n[DO NOT EXTRACT (HALLUCINATION OR WRONG)]\n- CRITICAL: DO NOT output any of the following values: {}\n", not_found_str)
-    };
-
     // 검증 에이전트 결과값 JSON 파싱 및 추출
     let v_json: serde_json::Value = serde_json::from_str(verification_hint_str).unwrap_or_else(|_| serde_json::json!({}));
     let is_native_val = v_json.get("is_native").and_then(|v| v.as_bool()).unwrap_or(true).to_string();
@@ -1031,8 +1019,6 @@ Find the exact {TARGET_NAME} from the following CONTENT.
         .replace("{TARGET_BASE}", &base_target.to_uppercase())
         .replace("{TARGET_PREJUDICE}", target_prejudice)
         .replace("{VECTOR_HINT_BLOCK}", &vector_hint_block)
-        .replace("{ALREADY_FOUND_BLOCK}", &already_found_block)
-        .replace("{NOT_FOUND_BLOCK}", &not_found_block)
         .replace("{IS_NATIVE_VAL}", &is_native_val)
         .replace("{IS_LOCALIZED_VAL}", &is_localized_val)
         .replace("{VERB_SCORE_VAL}", &verb_score_val)
