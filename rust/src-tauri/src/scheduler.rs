@@ -699,29 +699,27 @@ async fn process_task(
 
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
                 if !target_text.is_empty() {
-                    // 🌟 [추가] LLM 토큰 절약 및 링크 훼손 방지를 위해 href, src 등 주요 링크 값들을 임시 마커로 치환합니다.
+                    let task_marker_hash = crate::utils::hash::crc32(&task.id); // 🌟 스코프 상단에 해시 생성
+
+                    // 🌟 [CRITICAL FIX] LLM 토큰 절약 및 링크 훼손 방지를 위해 href, src 속성을 해시 마커로 치환하여 장부에 격리
                     let mut link_map = std::collections::HashMap::new();
                     let mut link_counter = 0;
                     
-                    // 쌍따옴표(") 속성 패턴 (대소문자 무시, 공백 허용, data-src 포함)
                     if let Ok(re_double) = regex::Regex::new(r#"(?i)(href|src|data-src)\s*=\s*"([^"]*)""#) {
                         target_text = re_double.replace_all(&target_text, |caps: &regex::Captures| {
-                            let attr_name = &caps[1];
                             let original_full = caps[0].to_string();
-                            let marker = format!("{}=\"**LINK_SKIP_{}**\"", attr_name, link_counter);
-                            link_map.insert(marker.clone(), original_full);
+                            let marker = format!(" __LINK_{}_{}__ ", task_marker_hash, link_counter);
+                            link_map.insert(marker.trim().to_string(), original_full);
                             link_counter += 1;
                             marker
                         }).to_string();
                     }
                     
-                    // 홑따옴표(') 속성 패턴 (대소문자 무시, 공백 허용, data-src 포함)
                     if let Ok(re_single) = regex::Regex::new(r#"(?i)(href|src|data-src)\s*=\s*'([^']*)'"#) {
                         target_text = re_single.replace_all(&target_text, |caps: &regex::Captures| {
-                            let attr_name = &caps[1];
                             let original_full = caps[0].to_string();
-                            let marker = format!("{}='**LINK_SKIP_{}**'", attr_name, link_counter);
-                            link_map.insert(marker.clone(), original_full);
+                            let marker = format!(" __LINK_{}_{}__ ", task_marker_hash, link_counter);
+                            link_map.insert(marker.trim().to_string(), original_full);
                             link_counter += 1;
                             marker
                         }).to_string();
@@ -838,6 +836,7 @@ async fn process_task(
                     let mut skip_map = std::collections::HashMap::new(); 
                     let mut replacement_history: Vec<(String, String)> = Vec::new(); 
                     let mut domain_history: Vec<(String, String)> = Vec::new(); 
+                    let task_marker_hash = crate::utils::hash::crc32(&task.id); // 🌟 [CRITICAL FIX] CRC32 해싱 기반 고유 마커 뼈대 생성
 
                     // 🌟 [사전 정규식 추출] email 먼저 마스킹 (1차 패스 전)
                     if let Ok(email_re) = regex::Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}") {
@@ -847,7 +846,7 @@ async fn process_task(
                             let mnemonic = crate::parsing::generate_mnemonic();
                             let upper_key = "EMAIL".to_string();
                             let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+                            let skip_marker = format!("___{}_{}___", task_marker_hash, skip_counter);
                             masked_text = masked_text.replace(&email_val, &skip_marker);
                             doc_title = doc_title.replace(&email_val, &skip_marker);
                             doc_desc = doc_desc.replace(&email_val, &skip_marker);
@@ -858,6 +857,59 @@ async fn process_task(
                             all_matches.push(json!({ "name": upper_key, "value": email_val, "mnemonic": mnemonic }));
                             emit_term(&format!("[EXTRACTION] 📧 이메일 정규식 사전 추출 성공: {} -> 강제 마스킹 완료", email_val));
                         }
+                    }
+
+                    // 🌟 [CRITICAL FIX] 괄호 특수문자를 해시 마커로 치환하여 외부 장부(Shadow Map)에 격리
+                    // 단어가 접착(Glued)되는 현상을 막기 위해 양옆에 공백을 주입합니다.
+                    let mut bracket_map = std::collections::HashMap::new();
+                    let mut bracket_counter = 0;
+                    if let Ok(bracket_re) = regex::Regex::new(r"([()\[\]{}])") {
+                        masked_text = bracket_re.replace_all(&masked_text, |caps: &regex::Captures| {
+                            let b_marker = format!(" __BRACKET_{}_{}__ ", task_marker_hash, bracket_counter);
+                            bracket_map.insert(b_marker.trim().to_string(), caps[1].to_string());
+                            bracket_counter += 1;
+                            b_marker
+                        }).to_string();
+                        
+                        doc_title = bracket_re.replace_all(&doc_title, |caps: &regex::Captures| {
+                            let b_marker = format!(" __BRACKET_{}_{}__ ", task_marker_hash, bracket_counter);
+                            bracket_map.insert(b_marker.trim().to_string(), caps[1].to_string());
+                            bracket_counter += 1;
+                            b_marker
+                        }).to_string();
+
+                        doc_desc = bracket_re.replace_all(&doc_desc, |caps: &regex::Captures| {
+                            let b_marker = format!(" __BRACKET_{}_{}__ ", task_marker_hash, bracket_counter);
+                            bracket_map.insert(b_marker.trim().to_string(), caps[1].to_string());
+                            bracket_counter += 1;
+                            b_marker
+                        }).to_string();
+                    }
+
+                    // 🌟 [CRITICAL FIX] 메타데이터 노이즈(/사진=, /AFPBBNews=뉴스1 등)를 해시 마커로 치환하여 외부 장부(Shadow Map)에 격리
+                    let mut noise_map = std::collections::HashMap::new();
+                    let mut noise_counter = 0;
+                    if let Ok(noise_re) = regex::Regex::new(r"(?i)(/(?:사진|AFPBBNews|뉴스1|기자|특파원|Copyright|ⓒ|©)[^\n]*)") {
+                        masked_text = noise_re.replace_all(&masked_text, |caps: &regex::Captures| {
+                            let n_marker = format!(" __NOISE_{}_{}__ ", task_marker_hash, noise_counter);
+                            noise_map.insert(n_marker.trim().to_string(), caps[1].to_string());
+                            noise_counter += 1;
+                            n_marker
+                        }).to_string();
+                        
+                        doc_title = noise_re.replace_all(&doc_title, |caps: &regex::Captures| {
+                            let n_marker = format!(" __NOISE_{}_{}__ ", task_marker_hash, noise_counter);
+                            noise_map.insert(n_marker.trim().to_string(), caps[1].to_string());
+                            noise_counter += 1;
+                            n_marker
+                        }).to_string();
+
+                        doc_desc = noise_re.replace_all(&doc_desc, |caps: &regex::Captures| {
+                            let n_marker = format!(" __NOISE_{}_{}__ ", task_marker_hash, noise_counter);
+                            noise_map.insert(n_marker.trim().to_string(), caps[1].to_string());
+                            noise_counter += 1;
+                            n_marker
+                        }).to_string();
                     }
 
                     // 🌟 1차 패스용 라인 분할 (masked_text 기반)
@@ -956,6 +1008,10 @@ async fn process_task(
                     }
                     let mut raw_spans = Vec::new();
 
+                    let bracket_marker_prefix = format!("__BRACKET_{}_", task_marker_hash);
+                    let noise_marker_prefix = format!("__NOISE_{}_", task_marker_hash);
+                    let link_marker_prefix = format!("__LINK_{}_", task_marker_hash);
+
                     for (line_idx, line) in lines.iter().enumerate() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
                         
@@ -964,7 +1020,15 @@ async fn process_task(
                         for start in 0..words.len() {
                             let max_end = words.len().min(start + 4); // 1~4 단어 조합
                             for end in (start + 1)..=max_end {
-                                let chunk_text = words[start..end].join(" ");
+                                // 🌟 [CRITICAL FIX] 괄호, 노이즈, 링크 해시 마커를 벡터 청크에서 제외하여 순수 텍스트만 임베딩합니다.
+                                let clean_words: Vec<&str> = words[start..end].iter()
+                                    .filter(|&&w| !w.starts_with(&bracket_marker_prefix) && !w.starts_with(&noise_marker_prefix) && !w.starts_with(&link_marker_prefix))
+                                    .copied()
+                                    .collect();
+                                
+                                if clean_words.is_empty() { continue; }
+                                let chunk_text = clean_words.join(" ");
+
                                 // 특수기호만 존재하는 무의미한 텍스트 스킵
                                 if chunk_text.trim().chars().all(|c| !c.is_alphanumeric()) { continue; }
 
@@ -1273,10 +1337,9 @@ async fn process_task(
                         let mut ignore_list: Vec<String> = Vec::new(); // 🌟 추가: 본문에 존재하지 않는 잘못된 추출값 기록
                         
                         // 🌟 [CRITICAL FIX] LLM이 임시 마커를 엔티티로 착각하고 뱉는 환각을 Logit 단계에서 원천 압살합니다!
-                        ignore_list.push("[___REDACTED_".to_string());
-                        ignore_list.push("___REDACTED_".to_string());
-                        ignore_list.push("REDACTED".to_string());
-                        ignore_list.push("redacted".to_string());
+                        ignore_list.push(format!("___{}_", task_marker_hash));
+                        ignore_list.push(format!("_{}_", task_marker_hash));
+                        ignore_list.push(task_marker_hash.to_string());
                         
                         // 🌟 [해결책 1 적용] 이전에 찾은 값 중, 현재 타겟과 "다른" 도메인의 값들은 무조건 ignore_list에 넣어 Logit을 차단!
                         for (history_target, history_val) in &domain_history {
@@ -1361,7 +1424,13 @@ async fn process_task(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("verb, predicate, idiom, phrase");
 
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, current_lang, current_verb_b_val);
+                            // 🌟 [CRITICAL FIX] LLM에게는 괄호, 링크, 메타데이터 해시 마커를 모두 공백으로 치환한 순도 100%의 깨끗한 문맥만 제공합니다.
+                            let mut clean_matched_context = matched_context.clone();
+                            if let Ok(marker_re) = regex::Regex::new(&format!(r"__(BRACKET|LINK|NOISE)_{}_\d+__", task_marker_hash)) {
+                                clean_matched_context = marker_re.replace_all(&clean_matched_context, " ").to_string();
+                            }
+
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, current_lang, current_verb_b_val);
                             
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -1510,8 +1579,8 @@ async fn process_task(
                             let exists_in_title = doc_title.contains(&extracted_val);
                             let exists_in_desc = doc_desc.contains(&extracted_val);
 
-                            // 🌟 [CRITICAL FIX] 추출된 값이 임시 마커([___REDACTED_)를 포함하고 있다면 무조건 환각으로 간주하고 강제 차단합니다.
-                            if extracted_val.contains("___REDACTED_") || extracted_val.contains("REDACTED") {
+                            // 🌟 [CRITICAL FIX] 추출된 값이 임시 마커(해시 기반)를 포함하고 있다면 무조건 환각으로 간주하고 강제 차단합니다.
+                            if extracted_val.contains(&format!("___{}_", task_marker_hash)) || extracted_val.contains(&task_marker_hash.to_string()) {
                                 miss_counter += 1;
                                 current_temperature += 0.3; // 🌟 온도 상승
                                 
@@ -1664,45 +1733,72 @@ async fn process_task(
                                     break;
                                 }
                                 
-                                // 🌟 [조건부 즉시 치환 (Aggressive Ctrl+F) 적용]
-                                // 완벽한 일치가 아니더라도, 단어 단위로 쪼개서 본문에 물리적으로 존재하는 부분이 있다면 
-                                // 아깝게 버리며 무한루프를 돌지 않고, 그 부분만 즉시 마스킹 처리해버립니다.
+                                // 🌟 [조건부 부분 치환 (Vector Bouncer) 적용 - Pass 2 로직 재활용]
+                                // 완벽한 일치가 아니더라도 단어 단위로 쪼개서 본문에 존재하는지 확인하되, 
+                                // 무조건 치환하지 않고 NMS 배틀(Pass 2)과 완벽히 동일한 스코어링 공식으로 검증하여 통과한 단어만 마스킹합니다.
                                 let parts: Vec<&str> = extracted_val.split_whitespace().collect();
                                 let mut partial_masked = false;
+
+                                // 🌟 [CRITICAL FIX] 쪼개진 단어를 검증하기 위해 현재 타겟의 Bias/Prejudice 벡터를 준비합니다.
+                                let lang_prefix = target_name.split('_').next().unwrap_or("english");
+                                let prefixed_b_val = target_bias.split(',').map(|s| format!("{} {}", lang_prefix, s.trim())).collect::<Vec<_>>().join(", ");
+                                let prefixed_p_val = target_prejudice.split(',').map(|s| format!("{} {}", lang_prefix, s.trim())).collect::<Vec<_>>().join(", ");
+                                
+                                let bias_emb = model.get_embedding(prefixed_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                let prej_emb = model.get_embedding(prefixed_p_val).await.unwrap_or_else(|_| vec![0.0; 384]);
                                 
                                 for p in &parts {
-                                    // 너무 짧은 조사/어미가 치환되는 것을 막기 위해 2글자 이상만 허용 (바이트 단위가 아닌 실제 글자 수 단위로 체크)
+                                    // 너무 짧은 조사/어미가 치환되는 것을 막기 위해 2글자 이상만 허용
                                     if p.chars().count() >= 2 && (matched_context.contains(p) || masked_text.contains(p) || doc_title.contains(p) || doc_desc.contains(p)) {
-                                        emit_term(&format!("[DEBUG] 부분 일치 즉시 치환 (Aggressive Ctrl+F): '{}' 중 '{}' 발견 -> 강제 마스킹", extracted_val, p));
                                         
-                                        let mnemonic = crate::parsing::generate_mnemonic();
-                                        let upper_key = base_target.to_uppercase(); 
-                                        let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                                        let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+                                        // 🌟 부분 단어의 임베딩을 추출하고 Pass 2와 동일한 공식으로 심사합니다.
+                                        let p_emb = model.get_embedding(p.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                         
-                                        masked_text = masked_text.replace(*p, &skip_marker);
-                                        doc_title = doc_title.replace(*p, &skip_marker);
-                                        doc_desc = doc_desc.replace(*p, &skip_marker);
-                                        matched_context = matched_context.replace(*p, &skip_marker);
+                                        let b_score = cosine_similarity(&p_emb, &bias_emb);
+                                        let p_score = cosine_similarity(&p_emb, &prej_emb);
+                                        let v_sim = cosine_similarity(&p_emb, &verb_emb);
                                         
-                                        skip_map.insert(skip_marker.clone(), final_replacement.clone());
-                                        replacement_history.push((p.to_string(), skip_marker.clone()));
+                                        // 쪼개진 단어는 1개이므로 짧은 단어 페널티 기준(beta 0.05, weight 0.3) 적용
+                                        let verb_penalty = v_sim * 0.05; 
+                                        let penalty_weight = 0.3;
                                         
-                                        current_target_found.push(p.to_string());
-                                        domain_history.push((target_name.to_string(), p.to_string()));
-                                        
-                                        if base_target == "company" {
-                                            phase2_companies.push(p.to_string());
-                                        }
+                                        let final_score = b_score - (p_score * penalty_weight) - verb_penalty;
 
-                                        skip_counter += 1;
-                                        
-                                        all_matches.push(json!({
-                                            "name": upper_key,
-                                            "value": p.to_string(),
-                                            "mnemonic": mnemonic
-                                        }));
-                                        partial_masked = true;
+                                        // Pass 2와 동일한 커트라인(0.25) 검증
+                                        if final_score > 0.25 {
+                                            emit_term(&format!("    👑 [WINNER] 부분 일치 검증 통과: '{}' 중 '{}' (Score: {:.4}) -> 강제 마스킹", extracted_val, p, final_score));
+                                            
+                                            let mnemonic = crate::parsing::generate_mnemonic();
+                                            let upper_key = base_target.to_uppercase(); 
+                                            let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                                            let skip_marker = format!("___{}_{}___", task_marker_hash, skip_counter);
+                                            
+                                            masked_text = masked_text.replace(*p, &skip_marker);
+                                            doc_title = doc_title.replace(*p, &skip_marker);
+                                            doc_desc = doc_desc.replace(*p, &skip_marker);
+                                            matched_context = matched_context.replace(*p, &skip_marker);
+                                            
+                                            skip_map.insert(skip_marker.clone(), final_replacement.clone());
+                                            replacement_history.push((p.to_string(), skip_marker.clone()));
+                                            
+                                            current_target_found.push(p.to_string());
+                                            domain_history.push((target_name.to_string(), p.to_string()));
+                                            
+                                            if base_target == "company" {
+                                                phase2_companies.push(p.to_string());
+                                            }
+
+                                            skip_counter += 1;
+                                            
+                                            all_matches.push(json!({
+                                                "name": upper_key,
+                                                "value": p.to_string(),
+                                                "mnemonic": mnemonic
+                                            }));
+                                            partial_masked = true;
+                                        } else {
+                                            emit_term(&format!("    💀 [DEFEAT] 부분 일치 검증 탈락: '{}' 중 '{}' (Score: {:.4} / VerbPenalty: {:.4}) -> 기각", extracted_val, p, final_score, verb_penalty));
+                                        }
                                     }
                                 }
 
@@ -1775,12 +1871,12 @@ async fn process_task(
                                 }
                             }
 
-                            // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 [___REDACTED_N___] 마커로 임시 치환
+                            // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 해시 기반 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
                             let upper_key = base_target.to_uppercase(); 
                             
                             let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+                            let skip_marker = format!("___{}_{}___", task_marker_hash, skip_counter);
                             
                             // 🌟 [CRITICAL FIX] 원본 텍스트(본문+제목) 모두에서 임시 마커로 치환하여 이어지는 LLM 추론에서 혼선을 원천 방지합니다.
                             masked_text = masked_text.replace(&extracted_val, &skip_marker);
@@ -1827,9 +1923,9 @@ async fn process_task(
                         }
                     }
 
-                    // 🌟 [추가] 모든 추론이 끝난 후 임시 마커([___REDACTED_N___])를 실제 니모닉으로 일괄 변환합니다.
+                    // 🌟 [추가] 모든 추론이 끝난 후 임시 해시 마커를 실제 니모닉으로 일괄 변환합니다.
                     for i in 0..skip_counter {
-                        let marker = format!("[___REDACTED_{}___]", i);
+                        let marker = format!("___{}_{}___", task_marker_hash, i);
                         if let Some(final_repl) = skip_map.get(&marker) {
                             masked_text = masked_text.replace(&marker, final_repl);
                             doc_title = doc_title.replace(&marker, final_repl);
@@ -1837,9 +1933,24 @@ async fn process_task(
                         }
                     }
 
-                    // 🌟 [추가] 마스킹이 끝난 후 임시로 빼두었던 원본 링크(href, src)들을 다시 복원합니다.
-                    for (marker, original_link) in link_map {
-                        masked_text = masked_text.replace(&marker, &original_link);
+                    // 🌟 [CRITICAL FIX] 마스킹이 모두 끝난 후, 외부 장부에 보관했던 괄호, 메타데이터 노이즈, 링크를 정확한 포지션에 복원합니다.
+                    // 마커 양옆에 주입했던 공백도 깔끔하게 제거하여 원본의 접착 상태(Glued)를 완벽히 복구합니다.
+                    if let Ok(bracket_re) = regex::Regex::new(&format!(r"\s*(__BRACKET_{}_\d+__)\s*", task_marker_hash)) {
+                        masked_text = bracket_re.replace_all(&masked_text, |caps: &regex::Captures| { bracket_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
+                        doc_title = bracket_re.replace_all(&doc_title, |caps: &regex::Captures| { bracket_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
+                        doc_desc = bracket_re.replace_all(&doc_desc, |caps: &regex::Captures| { bracket_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
+                    }
+
+                    if let Ok(noise_re) = regex::Regex::new(&format!(r"\s*(__NOISE_{}_\d+__)\s*", task_marker_hash)) {
+                        masked_text = noise_re.replace_all(&masked_text, |caps: &regex::Captures| { noise_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
+                        doc_title = noise_re.replace_all(&doc_title, |caps: &regex::Captures| { noise_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
+                        doc_desc = noise_re.replace_all(&doc_desc, |caps: &regex::Captures| { noise_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
+                    }
+
+                    if let Ok(link_re) = regex::Regex::new(&format!(r"\s*(__LINK_{}_\d+__)\s*", task_marker_hash)) {
+                        masked_text = link_re.replace_all(&masked_text, |caps: &regex::Captures| { link_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
+                        doc_title = link_re.replace_all(&doc_title, |caps: &regex::Captures| { link_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
+                        doc_desc = link_re.replace_all(&doc_desc, |caps: &regex::Captures| { link_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
                     }
 
                     if !all_matches.is_empty() {
