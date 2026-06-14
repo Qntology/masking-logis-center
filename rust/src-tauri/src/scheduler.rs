@@ -1352,7 +1352,7 @@ async fn process_task(
                         // 🌟 [추가] 현재 찾고 있는 타겟과 일치하는 값들만 모아 CoT 프롬프트에 주입할 배열
                         let mut current_target_found: Vec<String> = Vec::new();
                         let mut ignore_list: Vec<String> = Vec::new(); // 🌟 추가: 본문에 존재하지 않는 잘못된 추출값 기록
-                        let mut foreign_guide_str = String::new(); // 🌟 [추가] 검증 단계에서 실패한 외래어 가이드 축적
+                        let mut localized_guide_str = String::new(); // 🌟 [추가] 검증 단계에서 실패한 외래어 가이드 축적
                         
                         // 🌟 [CRITICAL FIX] LLM이 임시 마커를 엔티티로 착각하고 뱉는 환각을 Logit 단계에서 원천 압살합니다!
                         ignore_list.push(format!("___{}_", task_marker_hash));
@@ -1525,7 +1525,7 @@ async fn process_task(
                             emit_term(&format!("=======================================\n"));
 
                             // 🌟 [STAGE 2] 추출 에이전트 호출 (사전 검증 힌트 주입)
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, &local_language, &foreign_guide_str, &verification_hint_str);
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, &local_language, &localized_guide_str, &verification_hint_str);
                             
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -1670,11 +1670,11 @@ async fn process_task(
                             let is_mismatch = parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
                             
                             let is_native = parsed.get("is_native").and_then(|v| v.as_bool()).unwrap_or(true);
-                            let mut is_foreign_word = parsed.get("is_foreign").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let mut is_localized_word = parsed.get("is_localized").and_then(|v| v.as_bool()).unwrap_or(false);
                             
-                            // 🌟 is_native가 false면 무조건 is_foreign_word를 true로 강제 반영
+                            // 🌟 is_native가 false면 무조건 is_localized_word를 true로 강제 반영
                             if !is_native {
-                                is_foreign_word = true;
+                                is_localized_word = true;
                             }
 
                             emit_term(&format!("\n======================================="));
@@ -1684,14 +1684,14 @@ async fn process_task(
                             emit_term(&format!("- {}: {}", expr_key, expr_score));
                             emit_term(&format!("- is_target_mismatch: {}", is_mismatch));
                             emit_term(&format!("- is_native: {}", is_native));
-                            emit_term(&format!("- is_foreign_word: {}", is_foreign_word));
+                            emit_term(&format!("- is_localized_word: {}", is_localized_word));
                             emit_term(&format!("=======================================\n"));
 
                             // 🌟 [외래어 쉴드] 외래어/고유명사로 판별되었고, 물리적 제한(길이 등)을 통과하면 서술어 점수를 1.0으로 강제 보정 (Bypass Penalty)
                             let word_count_check = extracted_val.split_whitespace().count();
                             let has_marker_check = extracted_val.contains(&format!("___{}_", task_marker_hash)) || extracted_val.contains(&task_marker_hash.to_string());
                             
-                            if is_foreign_word && word_count_check <= 5 && !has_marker_check {
+                            if is_localized_word && word_count_check <= 5 && !has_marker_check {
                                 emit_term(&format!("[DEBUG-EXTRACTION-CoT] 🚀 외래어/고유명사 감지됨. 서술어/표현 점수를 1.0으로 강제 보정하여 무사 통과시킵니다."));
                                 verb_score = 1.0;
                                 expr_score = 1.0;
@@ -1703,8 +1703,8 @@ async fn process_task(
                                 current_temperature += 0.2; // 🌟 환각이므로 온도를 올려 변형 유도
                                 
                                 // 🌟 [피드백 루프] 외래어지만 다른 이유(mismatch 등)로 기각되었을 경우 다음 재시도(continue) 시 가이드에 누적 반영
-                                if is_foreign_word {
-                                    foreign_guide_str = format!("The word '{}' was identified as a foreign word or brand, but it was rejected. Please reconsider the extraction carefully.", extracted_val);
+                                if is_localized_word {
+                                    localized_guide_str = format!("The word '{}' was identified as a localized word. Please reconsider the extraction carefully.", extracted_val);
                                 }
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
