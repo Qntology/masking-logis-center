@@ -944,13 +944,13 @@ Find all the {TARGET_NAME} from the following PUG CONTENT.
 [SCHEMA DEFINITIONS]
 - {TARGET_BASE}: String. Default '{TARGET_ITEM}'.
 - {TARGET_NAME}: String. Extract the {TARGET_NAME} - '{TARGET_ITEM}' value. return an empty string "".
-- is_verb_expression: Boolean. If the extracted value you are about to extract is merely a {LANGUAGE} verb, predicate, idiom, phrase, or a meaningless context without specific entities (Examples: {VERB_EXPRESSION_HINT}).
+- {LANGUAGE}_verb_expression_score: Number (0 to 100). Evaluate how much the extracted value resembles a pure {LANGUAGE} verb, predicate, idiom, or meaningless phrase (Examples: {VERB_EXPRESSION_HINT}). A pure noun or exact entity is 0. A complete sentence, verb, or idiom is 100. A noun with post-positions/particles attached is around 30-50.
 
 [OUTPUT FORMAT]
 {
     "{TARGET_BASE}": String,
     "{TARGET_NAME}": String,
-    "is_verb_expression": Boolean
+    "{LANGUAGE}_verb_expression_score": Number
 }
 
 

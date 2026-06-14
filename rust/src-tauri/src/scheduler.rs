@@ -1550,17 +1550,20 @@ async fn process_task(
                             
                             // 추출된 값이 있는지, 그리고 그 값이 현재 PUG_CONTENT(masked_text)에 실제로 존재하는지 확인
                             let mut extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-                            let is_verb_expression = parsed.get("is_verb_expression").and_then(|v| v.as_bool()).unwrap_or(false);
                             
-                            // 🌟 [CRITICAL FIX] 서술어/어구로 판별된 경우 무고한 단어 훼손 방지를 위해 즉시 환각으로 간주하고 강제 차단합니다.
-                            if is_verb_expression {
+                            // 🌟 [CRITICAL FIX] 다국어 환경에 맞춰 {LANGUAGE}_verb_expression_score 키값을 동적으로 파싱합니다.
+                            let verb_score_key = format!("{}_verb_expression_score", current_lang);
+                            let verb_expression_score = parsed.get(&verb_score_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            
+                            // 🌟 [CRITICAL FIX] 서술어/어구 점수가 70점을 초과하는 경우 무고한 단어 훼손 방지를 위해 즉시 환각으로 간주하고 강제 차단합니다.
+                            if verb_expression_score >= 70.0 {
                                 miss_counter += 1;
                                 current_temperature += 0.3; // 🌟 환각이므로 온도를 올려 변형 유도
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
                                 
-                                emit_term(&format!("[DEBUG] 서술어/어구(verb_expression) 감지됨. 환각으로 간주하여 강제 기각 (재시도 {}): '{}'", miss_counter, extracted_val));
+                                emit_term(&format!("[DEBUG] 서술어/어구 점수 초과 ({}점) 감지됨. 환각으로 간주하여 강제 기각 (재시도 {}): '{}'", verb_expression_score, miss_counter, extracted_val));
                                 
                                 if current_temperature >= 1.0 || *count >= 3 {
                                     emit_term(&format!("[EXTRACTION] 🛑 동일한 서술어 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
@@ -1574,8 +1577,9 @@ async fn process_task(
                             }
 
                             // 🌟 [CRITICAL FIX] Qwen3가 압축된 문맥(matched_context)을 읽고 있으므로, 환각 검사도 동일한 문맥에서 수행해야 완벽합니다.
+                            // 🌟 [Subsumption 1단계] 검증 기준을 훼손된 masked_text가 아닌, 순수 원본(target_text)으로 변경하여 거대 덩어리 누락을 방지합니다.
                             let exists_in_context = matched_context.contains(&extracted_val);
-                            let exists_in_body = masked_text.contains(&extracted_val);
+                            let exists_in_body = target_text.contains(&extracted_val); // 🌟 masked_text -> target_text 교체
                             let exists_in_title = doc_title.contains(&extracted_val);
                             let exists_in_desc = doc_desc.contains(&extracted_val);
 
@@ -1612,21 +1616,10 @@ async fn process_task(
 
                             // Phase 2에서는 마커 업그레이드를 위해 의도적으로 중복 추출을 시도하므로 필터링에서 제외합니다.
                             if is_derivative && !is_phase2 {
-                                miss_counter += 1;
-                                current_temperature += 0.3;
-                                
-                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
-                                *count += 1;
-
-                                emit_term(&format!("[DEBUG] 기 마스킹 단어의 파생어 반복 추출 감지, 강제 차단 (재시도 {}): '{}'", miss_counter, extracted_val));
-                                
-                                if current_temperature >= 1.0 || *count >= 3 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 파생어 추출 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
-                                    break;
-                                }
-
-                                ignore_list.push(extracted_val.clone());
-                                continue;
+                                // 🌟 [CRITICAL FIX] 기 마스킹 단어의 파생어가 반복 추출된다는 것은 해당 트랙이 포화 상태라는 의미입니다.
+                                // 무의미하게 온도를 올리며 continue 하지 않고, 즉시 break하여 루프를 조기 종료(Early Exit)합니다.
+                                emit_term(&format!("[DEBUG] 기 마스킹 단어의 파생어 반복 추출 감지. 트랙 포화로 판단하여 조기 종료(Early Break): '{}'", extracted_val));
+                                break;
                             }
 
                             // 🌟 [과잉 추출 방지: 길이 및 어절 제한] 
@@ -1733,7 +1726,7 @@ async fn process_task(
                                     break;
                                 }
                                 
-                                // 🌟 [조건부 부분 치환 (Vector Bouncer) 적용 - Pass 2 로직 재활용]
+                                // 🌟 [조건부 부분 치환 (Vector Bouncer) 적용 - 양방향 점진적 수축 로테이션]
                                 // 완벽한 일치가 아니더라도 단어 단위로 쪼개서 본문에 존재하는지 확인하되, 
                                 // 무조건 치환하지 않고 NMS 배틀(Pass 2)과 완벽히 동일한 스코어링 공식으로 검증하여 통과한 단어만 마스킹합니다.
                                 let parts: Vec<&str> = extracted_val.split_whitespace().collect();
@@ -1747,59 +1740,93 @@ async fn process_task(
                                 let bias_emb = model.get_embedding(prefixed_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
                                 let prej_emb = model.get_embedding(prefixed_p_val).await.unwrap_or_else(|_| vec![0.0; 384]);
                                 
-                                for p in &parts {
-                                    // 너무 짧은 조사/어미가 치환되는 것을 막기 위해 2글자 이상만 허용
-                                    if p.chars().count() >= 2 && (matched_context.contains(p) || masked_text.contains(p) || doc_title.contains(p) || doc_desc.contains(p)) {
-                                        
-                                        // 🌟 부분 단어의 임베딩을 추출하고 Pass 2와 동일한 공식으로 심사합니다.
-                                        let p_emb = model.get_embedding(p.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
-                                        
-                                        let b_score = cosine_similarity(&p_emb, &bias_emb);
-                                        let p_score = cosine_similarity(&p_emb, &prej_emb);
-                                        let v_sim = cosine_similarity(&p_emb, &verb_emb);
-                                        
-                                        // 쪼개진 단어는 1개이므로 짧은 단어 페널티 기준(beta 0.05, weight 0.3) 적용
-                                        let verb_penalty = v_sim * 0.05; 
-                                        let penalty_weight = 0.3;
-                                        
-                                        let final_score = b_score - (p_score * penalty_weight) - verb_penalty;
+                                // 🌟 [양방향 점진적 수축 로테이션] 모든 가능한 어절 조합을 생성하고 각각의 점수를 매깁니다.
+                                // 튜플 구조: (start_idx, end_idx, chunk_text, final_score, verb_penalty)
+                                let mut sub_chunks: Vec<(usize, usize, String, f32, f32)> = Vec::new();
 
-                                        // Pass 2와 동일한 커트라인(0.25) 검증
-                                        if final_score > 0.25 {
-                                            emit_term(&format!("    👑 [WINNER] 부분 일치 검증 통과: '{}' 중 '{}' (Score: {:.4}) -> 강제 마스킹", extracted_val, p, final_score));
+                                for start in 0..parts.len() {
+                                    for end in (start + 1)..=parts.len() {
+                                        let chunk_text = parts[start..end].join(" ");
+                                        // 너무 짧은 조사/어미가 치환되는 것을 막기 위해 2글자 이상만 허용
+                                        if chunk_text.chars().count() >= 2 && (matched_context.contains(&chunk_text) || masked_text.contains(&chunk_text) || doc_title.contains(&chunk_text) || doc_desc.contains(&chunk_text)) {
                                             
-                                            let mnemonic = crate::parsing::generate_mnemonic();
-                                            let upper_key = base_target.to_uppercase(); 
-                                            let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                                            let skip_marker = format!("___{}_{}___", task_marker_hash, skip_counter);
+                                            // 🌟 부분 단어의 임베딩을 추출하고 Pass 2와 동일한 공식으로 심사합니다.
+                                            let p_emb = model.get_embedding(chunk_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                             
-                                            masked_text = masked_text.replace(*p, &skip_marker);
-                                            doc_title = doc_title.replace(*p, &skip_marker);
-                                            doc_desc = doc_desc.replace(*p, &skip_marker);
-                                            matched_context = matched_context.replace(*p, &skip_marker);
+                                            let b_score = cosine_similarity(&p_emb, &bias_emb);
+                                            let p_score = cosine_similarity(&p_emb, &prej_emb);
+                                            let v_sim = cosine_similarity(&p_emb, &verb_emb);
                                             
-                                            skip_map.insert(skip_marker.clone(), final_replacement.clone());
-                                            replacement_history.push((p.to_string(), skip_marker.clone()));
+                                            let word_count = end - start;
+                                            let length_weight = 1.0 + ((word_count as f32 - 1.0) * 0.15); // 단어 개수 가중치
+                                            let beta = if word_count <= 2 { 0.05 } else { 0.10 };
+                                            let verb_penalty = v_sim * beta;
+                                            let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
                                             
-                                            current_target_found.push(p.to_string());
-                                            domain_history.push((target_name.to_string(), p.to_string()));
+                                            let base_score = b_score - (p_score * penalty_weight) - verb_penalty;
                                             
-                                            if base_target == "company" {
-                                                phase2_companies.push(p.to_string());
+                                            // Pass 2와 동일한 커트라인(0.25) 검증
+                                            if base_score > 0.25 {
+                                                sub_chunks.push((start, end, chunk_text, base_score * length_weight, verb_penalty));
+                                            } else {
+                                                emit_term(&format!("    💀 [DEFEAT] 수축 로테이션 탈락: '{}' (Score: {:.4} / VerbPenalty: {:.4})", chunk_text, base_score, verb_penalty));
                                             }
-
-                                            skip_counter += 1;
-                                            
-                                            all_matches.push(json!({
-                                                "name": upper_key,
-                                                "value": p.to_string(),
-                                                "mnemonic": mnemonic
-                                            }));
-                                            partial_masked = true;
-                                        } else {
-                                            emit_term(&format!("    💀 [DEFEAT] 부분 일치 검증 탈락: '{}' 중 '{}' (Score: {:.4} / VerbPenalty: {:.4}) -> 기각", extracted_val, p, final_score, verb_penalty));
                                         }
                                     }
+                                }
+
+                                // 🌟 [NMS BATTLE] 추출된 서브 청크 중 점수가 가장 높은 것을 살리고 겹치는 하위 조각들을 흡수(기각)합니다.
+                                sub_chunks.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+                                let mut final_sub_chunks: Vec<(usize, usize, String, f32, f32)> = Vec::new();
+
+                                for cand in sub_chunks {
+                                    let mut is_overlapped = false;
+                                    for selected in &final_sub_chunks {
+                                        // start < selected.end && end > selected.start
+                                        if cand.0 < selected.1 && cand.1 > selected.0 {
+                                            is_overlapped = true;
+                                            break;
+                                        }
+                                    }
+                                    if !is_overlapped {
+                                        final_sub_chunks.push(cand);
+                                    } else {
+                                        emit_term(&format!("    💀 [DEFEAT] NMS 오버랩 흡수: '{}' (Score: {:.4})", cand.2, cand.3));
+                                    }
+                                }
+
+                                // 🌟 [WINNER 마스킹 반영] 살아남은 조각들을 최종 마스킹 처리합니다.
+                                for (_, _, text_val, score, _) in final_sub_chunks {
+                                    emit_term(&format!("    👑 [WINNER] 부분 일치(수축 로테이션) 통과: '{}' 중 '{}' (Score: {:.4}) -> 강제 마스킹", extracted_val, text_val, score));
+                                    
+                                    let mnemonic = crate::parsing::generate_mnemonic();
+                                    let upper_key = base_target.to_uppercase(); 
+                                    let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                                    let skip_marker = format!("___{}_{}___", task_marker_hash, skip_counter);
+                                    
+                                    masked_text = masked_text.replace(&text_val, &skip_marker);
+                                    doc_title = doc_title.replace(&text_val, &skip_marker);
+                                    doc_desc = doc_desc.replace(&text_val, &skip_marker);
+                                    matched_context = matched_context.replace(&text_val, &skip_marker);
+                                    
+                                    skip_map.insert(skip_marker.clone(), final_replacement.clone());
+                                    replacement_history.push((text_val.clone(), skip_marker.clone()));
+                                    
+                                    current_target_found.push(text_val.clone());
+                                    domain_history.push((target_name.to_string(), text_val.clone()));
+                                    
+                                    if base_target == "company" {
+                                        phase2_companies.push(text_val.clone());
+                                    }
+
+                                    skip_counter += 1;
+                                    
+                                    all_matches.push(json!({
+                                        "name": upper_key,
+                                        "value": text_val,
+                                        "mnemonic": mnemonic
+                                    }));
+                                    partial_masked = true;
                                 }
 
                                 if partial_masked {
@@ -1810,7 +1837,10 @@ async fn process_task(
                                     miss_counter = 0;
                                     current_temperature = 0.0;
                                     item_extract_count += 1;
-                                    continue; // 성공 처리 후 다음 턴으로 정상 진행
+                                    
+                                    // 🌟 [CRITICAL FIX] 마스킹 성공 시 무한 루프를 방지하고 다음 트랙으로 넘어가기 위해 break를 호출합니다.
+                                    emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (부분 치환). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
+                                    break;
                                 }
 
                                 // 🌟 [전략 D 적용] 무작정 ignore_list에 넣기 전에 로깅하여 어떤 값이 날아갔는지 파악합니다.
@@ -1867,7 +1897,9 @@ async fn process_task(
                                     current_target_found.push(extracted_val.clone());
                                     domain_history.push((target_name.to_string(), extracted_val.clone()));
 
-                                    continue; // 🌟 새로운 마커 생성을 건너뛰고 바로 다음 루프로!
+                                    // 🌟 [CRITICAL FIX] 성공적으로 덮어썼으므로 루프를 종료하고 다음 트랙으로 넘어갑니다.
+                                    emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (Phase 2 병합). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
+                                    break;
                                 }
                             }
 
@@ -1878,16 +1910,43 @@ async fn process_task(
                             let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
                             let skip_marker = format!("___{}_{}___", task_marker_hash, skip_counter);
                             
+                            // 🌟 [Subsumption 2단계] 추출된 거대 덩어리 내부에 이미 치환된 소형 마커가 존재하는지 확인하고, 
+                            // 현재 masked_text에 반영된 형태(Hybrid)를 역산하여 덮어쓸 준비를 합니다.
+                            let mut hybrid_val = extracted_val.clone();
+                            let mut subsumed_markers = std::collections::HashSet::new();
+                            for (orig, marker) in &replacement_history {
+                                if extracted_val.contains(orig) && orig.chars().count() >= 2 {
+                                    hybrid_val = hybrid_val.replace(orig, marker);
+                                    subsumed_markers.insert(marker.clone());
+                                }
+                            }
+
+                            // 🌟 [Subsumption 3단계] 흡수된 구형 소형 마커들을 장부(all_matches)에서 제거하여 새로운 범주(예: NAME)로 완벽히 세대교체합니다.
+                            if !subsumed_markers.is_empty() {
+                                emit_term(&format!("    🔄 [SUBSUMPTION] 거대 덩어리 발견! 기존 마커 {}개를 '{}' ({}) 속성으로 흡수 병합합니다.", subsumed_markers.len(), extracted_val, upper_key));
+                                all_matches.retain(|match_val| {
+                                    if let Some(obj) = match_val.as_object() {
+                                        if let Some(m_val) = obj.get("value").and_then(|v| v.as_str()) {
+                                            // 만약 all_matches에 들어있는 원본 값이 현재 거대 덩어리 안에 포함된다면 파기
+                                            if extracted_val.contains(m_val) && m_val != extracted_val && m_val.chars().count() >= 2 {
+                                                return false;
+                                            }
+                                        }
+                                    }
+                                    true
+                                });
+                            }
+                            
                             // 🌟 [CRITICAL FIX] 원본 텍스트(본문+제목) 모두에서 임시 마커로 치환하여 이어지는 LLM 추론에서 혼선을 원천 방지합니다.
-                            masked_text = masked_text.replace(&extracted_val, &skip_marker);
-                            doc_title = doc_title.replace(&extracted_val, &skip_marker);
-                            doc_desc = doc_desc.replace(&extracted_val, &skip_marker);
-                            matched_context = matched_context.replace(&extracted_val, &skip_marker); // 🌟 [추가] Qwen3가 읽고 있는 컨텍스트도 동기화 치환!
+                            // 역산된 hybrid_val을 사용하여 조각난 마커들까지 통째로 하나의 거대 마커로 덮어씌웁니다.
+                            masked_text = masked_text.replace(&hybrid_val, &skip_marker);
+                            doc_title = doc_title.replace(&hybrid_val, &skip_marker);
+                            doc_desc = doc_desc.replace(&hybrid_val, &skip_marker);
+                            matched_context = matched_context.replace(&hybrid_val, &skip_marker); 
                             
                             skip_map.insert(skip_marker.clone(), final_replacement);
-                            replacement_history.push((extracted_val.clone(), skip_marker.clone())); // 🌟 [CRITICAL FIX] 다음 루프 복구를 위해 치환 이력 기록
+                            replacement_history.push((extracted_val.clone(), skip_marker.clone())); 
                             
-                            // 🌟 [해결책 1 적용] 타겟 전용 이력과 Logit 제어용 전역 이력에 찾은 값을 기록합니다.
                             current_target_found.push(extracted_val.clone());
                             domain_history.push((target_name.to_string(), extracted_val.clone()));
 
@@ -1896,10 +1955,16 @@ async fn process_task(
                             if parts.len() > 1 {
                                 for p in parts {
                                     if p.chars().count() >= 2 {
-                                        masked_text = masked_text.replace(p, &skip_marker);
-                                        doc_title = doc_title.replace(p, &skip_marker);
-                                        doc_desc = doc_desc.replace(p, &skip_marker);
-                                        matched_context = matched_context.replace(p, &skip_marker);
+                                        let mut hybrid_val_p = p.to_string();
+                                        for (orig, marker) in &replacement_history {
+                                            if p.contains(orig) && orig.chars().count() >= 2 {
+                                                hybrid_val_p = hybrid_val_p.replace(orig, marker);
+                                            }
+                                        }
+                                        masked_text = masked_text.replace(&hybrid_val_p, &skip_marker);
+                                        doc_title = doc_title.replace(&hybrid_val_p, &skip_marker);
+                                        doc_desc = doc_desc.replace(&hybrid_val_p, &skip_marker);
+                                        matched_context = matched_context.replace(&hybrid_val_p, &skip_marker);
                                         
                                         replacement_history.push((p.to_string(), skip_marker.clone()));
                                         current_target_found.push(p.to_string());
@@ -1916,10 +1981,14 @@ async fn process_task(
 
                             // 최종 저장용 JSON 객체를 all_matches 배열에 기록
                             all_matches.push(json!({
-                                "name": upper_key, // 🌟 저장될 때 정확히 "NAME"으로 저장됨
+                                "name": upper_key, 
                                 "value": extracted_val,
                                 "mnemonic": mnemonic
                             }));
+                            
+                            // 🌟 [CRITICAL FIX] 정상적으로 마스킹을 성공했으므로 무한 루프(continue)를 돌지 않고 즉시 탈출(break)하여 다음 트랙으로 이동합니다.
+                            emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (전체 치환). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
+                            break;
                         }
                     }
 
