@@ -1529,6 +1529,65 @@ async fn process_task(
                                 continue;
                             }
 
+                            // 🌟 [기 마스킹 단어 및 파생어 필터링] 이미 찾은 단어와 겹치거나 파생어인 경우 즉시 기각
+                            let mut is_derivative = false;
+                            for (orig, _) in &replacement_history {
+                                // 길이가 2글자 이상인 경우에 한해서 부분 일치 검사 (너무 짧은 단어 오작동 방지)
+                                if orig.chars().count() >= 2 && extracted_val.chars().count() >= 2 {
+                                    if extracted_val.contains(orig) || orig.contains(&extracted_val) {
+                                        is_derivative = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Phase 2에서는 마커 업그레이드를 위해 의도적으로 중복 추출을 시도하므로 필터링에서 제외합니다.
+                            if is_derivative && !is_phase2 {
+                                miss_counter += 1;
+                                current_temperature += 0.3;
+                                
+                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
+                                *count += 1;
+
+                                emit_term(&format!("[DEBUG] 기 마스킹 단어의 파생어 반복 추출 감지, 강제 차단 (재시도 {}): '{}'", miss_counter, extracted_val));
+                                
+                                if current_temperature >= 1.0 || *count >= 3 {
+                                    emit_term(&format!("[EXTRACTION] 🛑 파생어 추출 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
+                                    break;
+                                }
+
+                                ignore_list.push(extracted_val.clone());
+                                continue;
+                            }
+
+                            // 🌟 [과잉 추출 방지: 길이 및 어절 제한] 
+                            // 개체명이 문장 통째로 나오는 것을 방어하기 위해 어절 수 및 글자 수 하드 리미트 적용
+                            let word_count = extracted_val.split_whitespace().count();
+                            let char_count = extracted_val.chars().count();
+                            
+                            // 주소(address)는 예외적으로 길 수 있으므로 기준을 다르게 적용
+                            let is_address = target_name.contains("address") || target_name.contains("location");
+                            let max_words = if is_address { 15 } else { 6 };
+                            let max_chars = if is_address { 100 } else { 30 };
+
+                            if word_count > max_words || char_count > max_chars {
+                                miss_counter += 1;
+                                current_temperature += 0.3;
+                                
+                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
+                                *count += 1;
+                                
+                                emit_term(&format!("[DEBUG] 과잉 추출 감지 (어절: {}, 글자수: {}), 강제 차단: '{}'", word_count, char_count, extracted_val));
+                                
+                                if current_temperature >= 1.0 || *count >= 3 {
+                                    emit_term(&format!("[EXTRACTION] 🛑 과잉 추출 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
+                                    break;
+                                }
+
+                                ignore_list.push(extracted_val.clone());
+                                continue;
+                            }
+
                             // 🌟 [전략 A & D 적용] 띄어쓰기 증발/변형에 대한 전역 보정 로직 (Space-Agnostic Validation)
                             if !extracted_val.is_empty() && extracted_val != "..." && extracted_val != "null" && !exists_in_context && !exists_in_body && !exists_in_title && !exists_in_desc {
                                 if target_name == "contact_number" {
