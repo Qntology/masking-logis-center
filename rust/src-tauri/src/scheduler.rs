@@ -917,26 +917,32 @@ async fn process_task(
                             .map(|s| format!("{} {}", lang_prefix, s.trim()))
                             .collect::<Vec<_>>().join(", ");
 
-                        let b_emb = model.get_embedding(prefixed_b_val).await.unwrap_or_else(|_| vec![0.0; 768]);
-                        let p_emb = model.get_embedding(prefixed_p_val).await.unwrap_or_else(|_| vec![0.0; 768]);
+                        let b_emb = model.get_embedding(prefixed_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
+                        let p_emb = model.get_embedding(prefixed_p_val).await.unwrap_or_else(|_| vec![0.0; 384]);
                         target_biases_embs.push(b_emb);
                         target_prejs_embs.push(p_emb);
                     }
 
-                    // 🌟 1-1. 서술어구(verb_expression) 타이브레이커 가이드 벡터 생성
-                    let primary_lang = detected_languages_vec.first().map(|s| s.as_str()).unwrap_or("english");
-                    let verb_b_val = bias_json.get("verb_expression")
-                        .and_then(|v| v.get("bias"))
-                        .and_then(|v| v.get(primary_lang))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("verb, predicate, idiom, phrase")
-                        .to_string();
+                    // 🌟 1-1. 서술어구(verb_expression) 타이브레이커 가이드 벡터 생성 (감지된 모든 다국어 반영)
+                    let mut prefixed_verb_b_vals = Vec::new();
                     
-                    let prefixed_verb_b_val = verb_b_val.split(',')
-                        .map(|s| format!("{} {}", primary_lang, s.trim()))
-                        .collect::<Vec<_>>().join(", ");
+                    for lang in &detected_languages_vec {
+                        let verb_b_val = bias_json.get("verb_expression")
+                            .and_then(|v| v.get("bias"))
+                            .and_then(|v| v.get(lang))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("verb, predicate, idiom, phrase")
+                            .to_string();
+                            
+                        let prefixed = verb_b_val.split(',')
+                            .map(|s| format!("{} {}", lang, s.trim()))
+                            .collect::<Vec<_>>().join(", ");
+                            
+                        prefixed_verb_b_vals.push(prefixed);
+                    }
                     
-                    let verb_emb = model.get_embedding(prefixed_verb_b_val).await.unwrap_or_else(|_| vec![0.0; 768]);
+                    let combined_verb_b_val = prefixed_verb_b_vals.join(", ");
+                    let verb_emb = model.get_embedding(combined_verb_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
 
                     // 🌟 2. Sliding Window를 통한 단어 단위 청크(Chunk) 생성 및 기초 점수 산출
                     #[derive(Clone)]
@@ -962,7 +968,7 @@ async fn process_task(
                                 // 특수기호만 존재하는 무의미한 텍스트 스킵
                                 if chunk_text.trim().chars().all(|c| !c.is_alphanumeric()) { continue; }
 
-                                let chunk_emb = model.get_embedding(chunk_text.clone()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                                let chunk_emb = model.get_embedding(chunk_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                 let word_count = end - start;
                                 let length_weight = 1.0 + ((word_count as f32 - 1.0) * 0.15); // 단어 개수 가중치
 
@@ -1207,14 +1213,14 @@ async fn process_task(
                                             let c_name_desc = format!("{} associated with '{}'", b_desc, clean_company);
                                             
                                             // Vector Search
-                                            let bias_emb_vec = model.get_embedding(b_bias.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
-                                            let prej_emb_vec = model.get_embedding(b_prej.to_string()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                                            let bias_emb_vec = model.get_embedding(b_bias.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                            let prej_emb_vec = model.get_embedding(b_prej.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
 
                                             let mut passed_lines: Vec<String> = Vec::new();
                                             let mut best_score = -1.0;
 
                                             for (i, line_text) in lines.iter().enumerate() {
-                                                let line_emb = model.get_embedding(line_text.clone()).await.unwrap_or_else(|_| vec![0.0; 768]);
+                                                let line_emb = model.get_embedding(line_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                                 let b_score = cosine_similarity(&line_emb, &bias_emb_vec);
                                                 let p_score = cosine_similarity(&line_emb, &prej_emb_vec);
                                                 let score = b_score - (p_score * 0.3);
@@ -1345,7 +1351,18 @@ async fn process_task(
                                 unique_cands.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
                             };
 
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, primary_lang, &verb_b_val);
+                            let mut current_lang = target_name.split('_').next().unwrap_or("english");
+                            if !detected_languages_vec.contains(&current_lang.to_string()) {
+                                current_lang = detected_languages_vec.first().map(|s| s.as_str()).unwrap_or("english");
+                            }
+                            
+                            let current_verb_b_val = bias_json.get("verb_expression")
+                                .and_then(|v| v.get("bias"))
+                                .and_then(|v| v.get(current_lang))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("verb, predicate, idiom, phrase");
+
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, current_lang, current_verb_b_val);
                             
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -1596,8 +1613,8 @@ async fn process_task(
                                 let mut partial_masked = false;
                                 
                                 for p in &parts {
-                                    // 너무 짧은 조사/어미가 치환되는 것을 막기 위해 2글자 이상만 허용
-                                    if p.len() >= 2 && (matched_context.contains(p) || masked_text.contains(p) || doc_title.contains(p) || doc_desc.contains(p)) {
+                                    // 너무 짧은 조사/어미가 치환되는 것을 막기 위해 2글자 이상만 허용 (바이트 단위가 아닌 실제 글자 수 단위로 체크)
+                                    if p.chars().count() >= 2 && (matched_context.contains(p) || masked_text.contains(p) || doc_title.contains(p) || doc_desc.contains(p)) {
                                         emit_term(&format!("[DEBUG] 부분 일치 즉시 치환 (Aggressive Ctrl+F): '{}' 중 '{}' 발견 -> 강제 마스킹", extracted_val, p));
                                         
                                         let mnemonic = crate::parsing::generate_mnemonic();
@@ -2195,7 +2212,7 @@ async fn update_team_base_metrics(
         Ok(Some(doc)) => (doc.json_data, doc.vector, doc.from, doc.to, doc.cc, doc.bcc, doc.r#ref, doc.digest),
         _ => (
             json!({ "base": { "pages": {} } }).to_string(),
-            vec![0.0; 768],
+            vec![0.0; 384],
             "".to_string(), "".to_string(), "".to_string(), "".to_string(), "".to_string(), "".to_string()
         )
     };

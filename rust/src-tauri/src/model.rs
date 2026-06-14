@@ -1525,7 +1525,7 @@ impl LogisModel {
                 model.embed(&text).map_err(|e| anyhow::anyhow!("Embedding error: {}", e))
             } else {
                 // Fallback to zeros if model failed to load
-                Ok(vec![0.0; 768])
+                Ok(vec![0.0; 384])
             }
         }).await?
     }
