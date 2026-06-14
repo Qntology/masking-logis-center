@@ -1455,8 +1455,77 @@ async fn process_task(
                                 clean_matched_context = marker_re.replace_all(&clean_matched_context, " ").to_string();
                             }
 
-                            // 🌟 [STAGE 1] 추출 에이전트 호출
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, &local_language, &foreign_guide_str);
+                            // 🌟 [STAGE 1] 사전 검증 에이전트 호출 (문서 프로파일링)
+                            let (v_system, v_user) = crate::parsing::build_verification_prompt(&clean_matched_context, &target_item, current_lang, current_verb_hint, current_expr_hint);
+                            let cancel_clone_v = cancellation_token.clone();
+                            
+                            let res_verify = if is_large_context {
+                                let gen_arc = model.generator.clone();
+                                let mut gen_guard = gen_arc.lock().await;
+                                if let Some(gen) = gen_guard.as_mut() {
+                                    let params = crate::openai_types::ChatCompletionParameters {
+                                        messages: vec![
+                                            crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
+                                                content: v_system,
+                                                name: None,
+                                            }),
+                                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
+                                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user),
+                                                name: None,
+                                            })
+                                        ],
+                                        model: "qwen".to_string(), max_tokens: Some(256), temperature: Some(0.1), top_p: Some(0.1),
+                                        ..Default::default()
+                                    };
+                                    gen.clear_kv_cache();
+                                    let res = gen.generate(params, Some(cancel_clone_v), None, None, None).await.unwrap_or("{}".to_string());
+                                    gen.clear_kv_cache();
+                                    res
+                                } else { "{}".to_string() }
+                            } else {
+                                let gen_arc = model.qwen3_generator.clone();
+                                tokio::task::spawn_blocking(move || -> String {
+                                    let mut gen_guard = gen_arc.blocking_lock();
+                                    if let Some(gen) = gen_guard.as_mut() {
+                                        let params = crate::openai_types::ChatCompletionParameters {
+                                            messages: vec![
+                                                crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
+                                                    content: v_system,
+                                                    name: None,
+                                                }),
+                                                crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
+                                                    content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user),
+                                                    name: None,
+                                                })
+                                            ],
+                                            model: "qwen3".to_string(), max_tokens: Some(256), temperature: Some(0.1), top_p: Some(0.1),
+                                            ..Default::default()
+                                        };
+                                        gen.clear_kv_cache();
+                                        let res = gen.generate(params, Some(cancel_clone_v), None, None).unwrap_or("{}".to_string());
+                                        gen.clear_kv_cache();
+                                        res
+                                    } else { "{}".to_string() }
+                                }).await.unwrap_or("{}".to_string())
+                            };
+                            
+                            if !model.is_cpu_mode {
+                                let dev = model.device_config.device.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    if dev.is_cuda() { let _ = dev.synchronize(); }
+                                }).await;
+                            }
+
+                            // 검증 결과를 추출 에이전트에게 힌트로 전달하기 위한 문자열 변환
+                            let verification_hint_str = res_verify.trim().to_string();
+                            
+                            emit_term(&format!("\n======================================="));
+                            emit_term(&format!("[DEBUG-VERIFY] 🎯 사전 검증 에이전트 채점 결과 (문서 프로파일링) 🎯"));
+                            emit_term(&format!("- 성향 지표 JSON: {}", verification_hint_str));
+                            emit_term(&format!("=======================================\n"));
+
+                            // 🌟 [STAGE 2] 추출 에이전트 호출 (사전 검증 힌트 주입)
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, &local_language, &foreign_guide_str, &verification_hint_str);
                             
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -1593,78 +1662,15 @@ async fn process_task(
                                 continue;
                             }
 
-                            // 🌟 [STAGE 2] 검증 에이전트 호출 (항상 호출하여 네이티브/외래어 판별)
-                            let (v_system, v_user) = crate::parsing::build_verification_prompt(&extracted_val, &target_item, current_lang, current_verb_hint, current_expr_hint);
-                            let cancel_clone_v = cancellation_token.clone();
-                            
-                            let res_verify = if is_large_context {
-                                let gen_arc = model.generator.clone();
-                                let mut gen_guard = gen_arc.lock().await;
-                                if let Some(gen) = gen_guard.as_mut() {
-                                    let params = crate::openai_types::ChatCompletionParameters {
-                                        messages: vec![
-                                            crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
-                                                content: v_system,
-                                                name: None,
-                                            }),
-                                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user),
-                                                name: None,
-                                            })
-                                        ],
-                                        model: "qwen".to_string(), max_tokens: Some(256), temperature: Some(0.1), top_p: Some(0.1),
-                                        ..Default::default()
-                                    };
-                                    gen.clear_kv_cache();
-                                    let res = gen.generate(params, Some(cancel_clone_v), None, None, None).await.unwrap_or("{}".to_string());
-                                    gen.clear_kv_cache();
-                                    res
-                                } else { "{}".to_string() }
-                            } else {
-                                let gen_arc = model.qwen3_generator.clone();
-                                tokio::task::spawn_blocking(move || -> String {
-                                    let mut gen_guard = gen_arc.blocking_lock();
-                                    if let Some(gen) = gen_guard.as_mut() {
-                                        let params = crate::openai_types::ChatCompletionParameters {
-                                            messages: vec![
-                                                crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
-                                                    content: v_system,
-                                                    name: None,
-                                                }),
-                                                crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                                                    content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user),
-                                                    name: None,
-                                                })
-                                            ],
-                                            model: "qwen3".to_string(), max_tokens: Some(256), temperature: Some(0.1), top_p: Some(0.1),
-                                            ..Default::default()
-                                        };
-                                        gen.clear_kv_cache();
-                                        let res = gen.generate(params, Some(cancel_clone_v), None, None).unwrap_or("{}".to_string());
-                                        gen.clear_kv_cache();
-                                        res
-                                    } else { "{}".to_string() }
-                                }).await.unwrap_or("{}".to_string())
-                            };
-                            
-                            if !model.is_cpu_mode {
-                                let dev = model.device_config.device.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    if dev.is_cuda() { let _ = dev.synchronize(); }
-                                }).await;
-                            }
-
-                            let v_parsed = crate::parsing::parse_json_from_llm(&res_verify);
-                            
+                            // 🌟 [STAGE 3] 추출 에이전트가 CoT로 함께 내뱉은 속성을 파싱하여 환각 여부 즉시 판단 (추가 모델 호출 없음)
                             let verb_key = format!("{}_verb_score", current_lang);
                             let expr_key = format!("{}_expression_score", current_lang);
-                            let mut verb_score = v_parsed.get(&verb_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let mut expr_score = v_parsed.get(&expr_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let is_mismatch = v_parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let mut verb_score = parsed.get(&verb_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let mut expr_score = parsed.get(&expr_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let is_mismatch = parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
                             
-                            // 🌟 [CRITICAL FIX] 2단계 검증 에이전트에서 직접 네이티브/외래어 여부 판독
-                            let is_native = v_parsed.get("is_native").and_then(|v| v.as_bool()).unwrap_or(true);
-                            let mut is_foreign_word = v_parsed.get("is_foreign").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let is_native = parsed.get("is_native").and_then(|v| v.as_bool()).unwrap_or(true);
+                            let mut is_foreign_word = parsed.get("is_foreign").and_then(|v| v.as_bool()).unwrap_or(false);
                             
                             // 🌟 is_native가 false면 무조건 is_foreign_word를 true로 강제 반영
                             if !is_native {
@@ -1672,8 +1678,8 @@ async fn process_task(
                             }
 
                             emit_term(&format!("\n======================================="));
-                            emit_term(&format!("[DEBUG-VERIFY] 🎯 검증 에이전트 채점 결과 🎯"));
-                            emit_term(&format!("- 대상 단어: '{}'", extracted_val));
+                            emit_term(&format!("[DEBUG-EXTRACTION-CoT] 🎯 추출 단어 자가 검증(CoT) 결과 🎯"));
+                            emit_term(&format!("- 추출 단어: '{}'", extracted_val));
                             emit_term(&format!("- {}: {}", verb_key, verb_score));
                             emit_term(&format!("- {}: {}", expr_key, expr_score));
                             emit_term(&format!("- is_target_mismatch: {}", is_mismatch));
@@ -1686,7 +1692,7 @@ async fn process_task(
                             let has_marker_check = extracted_val.contains(&format!("___{}_", task_marker_hash)) || extracted_val.contains(&task_marker_hash.to_string());
                             
                             if is_foreign_word && word_count_check <= 5 && !has_marker_check {
-                                emit_term(&format!("[DEBUG-VERIFY] 🚀 외래어/고유명사 감지됨. 서술어/표현 점수를 1.0으로 강제 보정하여 무사 통과시킵니다."));
+                                emit_term(&format!("[DEBUG-EXTRACTION-CoT] 🚀 외래어/고유명사 감지됨. 서술어/표현 점수를 1.0으로 강제 보정하여 무사 통과시킵니다."));
                                 verb_score = 1.0;
                                 expr_score = 1.0;
                             }
@@ -1696,7 +1702,7 @@ async fn process_task(
                                 miss_counter += 1;
                                 current_temperature += 0.2; // 🌟 환각이므로 온도를 올려 변형 유도
                                 
-                                // 🌟 [피드백 루프] 외래어지만 다른 이유(mismatch 등)로 기각되었을 경우 1단계 추출 가이드에 누적 반영
+                                // 🌟 [피드백 루프] 외래어지만 다른 이유(mismatch 등)로 기각되었을 경우 다음 재시도(continue) 시 가이드에 누적 반영
                                 if is_foreign_word {
                                     foreign_guide_str = format!("The word '{}' was identified as a foreign word or brand, but it was rejected. Please reconsider the extraction carefully.", extracted_val);
                                 }

@@ -919,7 +919,50 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str, local_language: &str, foreign_guide_str: &str) -> (String, String) {
+pub fn build_verification_prompt(input_val: &str, target_item: &str, language: &str, verb_hint: &str, expr_hint: &str) -> (String, String) {
+    let system_prompt = format!("You are a linguistic verification assistant for {}.", language);
+
+    let user_template = r###"[TASK]
+Analyze the provided [INPUT] and score its linguistic and structural properties.
+
+[INPUT]
+"{TARGET_ITEM}"
+
+[SCORING INSTRUCTION]
+1. {LANGUAGE}_verb_score (1 to 10): 
+   - Is this a verb, action, or predicate? (Concepts: [{VERB_HINT}])
+   - 1 = Pure noun (No action). 10 = Pure verb/action.
+   
+2. {LANGUAGE}_expression_score (1 to 10):
+   - Is this a conversational phrase, idiom, or full sentence? (Concepts: [{EXPRESSION_HINT}])
+   - 1 = Short single entity/noun. 10 = Long descriptive phrase or full sentence.
+
+3. is_native (Boolean):
+   - Is this word a pure native word or a formally registered noun in the {LANGUAGE} dictionary?
+
+4. is_foreign (Boolean):
+   - Is this word a transliterated foreign word, a loaned brand name, or a foreign person name written in {LANGUAGE}?
+
+[OUTPUT FORMAT]
+{
+    "is_native": Boolean,
+    "is_foreign": Boolean,
+    "{LANGUAGE}_verb_score": Integer,
+    "{LANGUAGE}_expression_score": Integer,
+}
+
+[ACTION] RETURN JSON ONLY. NO EXPLANATION."###.to_string();
+
+    let user_prompt = user_template
+        .replace("{LANGUAGE}", language)
+        .replace("{TARGET_ITEM}", target_item)
+        .replace("{VERB_HINT}", verb_hint)
+        .replace("{EXPRESSION_HINT}", expr_hint);
+
+    (system_prompt, user_prompt)
+}
+
+pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str, local_language: &str, foreign_guide_str: &str, verification_hint_str: &str) -> (String, String) {
     let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
 
@@ -934,8 +977,8 @@ pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str
 Find the exact {TARGET_NAME} from the following PUG CONTENT.
 
 [INSTRUCTION]
+{VERIFICATION_HINT_BLOCK}
 - Local Language Context: {LOCAL_LANGUAGE}
-- Target: {TARGET_ITEM}
 - Bias (Acceptance Criteria): {TARGET_BIAS}
 - Prejudice (Rejection Criteria): {TARGET_PREJUDICE}
 {VECTOR_HINT_BLOCK}
@@ -944,16 +987,30 @@ Find the exact {TARGET_NAME} from the following PUG CONTENT.
 {FOREIGN_GUIDE_BLOCK}
 
 [SCHEMA DEFINITIONS]
-- {TARGET_BASE}: String. Default '{TARGET_ITEM}'.
 - {TARGET_NAME}: String. Extract the exact value matching the target. Return an empty string "" if not found.
+- is_native: Boolean. Default {IS_NATIVE_VAL}
+- is_foreign: Boolean. Default {IS_FOREIGN_VAL}
+- is_target_mismatch: Boolean. Default {IS_MISMATCH_VAL}
+- {LANGUAGE}_verb_score: Integer. Default {VERB_SCORE_VAL}
+- {LANGUAGE}_expression_score: Integer. Default {EXPR_SCORE_VAL}
 
 [OUTPUT FORMAT]
 {
-    "{TARGET_BASE}": String,
+    "is_native": Boolean,
+    "is_foreign": Boolean,
+    "is_target_mismatch": Boolean,
+    "{LANGUAGE}_verb_score": Integer,
+    "{LANGUAGE}_expression_score": Integer,
     "{TARGET_NAME}": String
 }
 
 [ACTION] RETURN JSON ONLY. NO EXPLANATION."###.to_string();
+
+    let verification_hint_block = if verification_hint_str.is_empty() {
+        "".to_string()
+    } else {
+        format!("[DOCUMENT VERIFICATION HINT]\n- {}\n", verification_hint_str)
+    };
 
     let vector_hint_block = if candidates_str.is_empty() {
         "".to_string()
@@ -979,68 +1036,37 @@ Find the exact {TARGET_NAME} from the following PUG CONTENT.
         format!("\n[FOREIGN WORD GUIDANCE]\n- {}\n", foreign_guide_str)
     };
 
+    // 검증 에이전트 결과값 JSON 파싱 및 추출
+    let v_json: serde_json::Value = serde_json::from_str(verification_hint_str).unwrap_or_else(|_| serde_json::json!({}));
+    let is_native_val = v_json.get("is_native").and_then(|v| v.as_bool()).unwrap_or(true).to_string();
+    let is_foreign_val = v_json.get("is_foreign").and_then(|v| v.as_bool()).unwrap_or(false).to_string();
+    let is_mismatch_val = v_json.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false).to_string();
+    
+    let verb_key = format!("{}_verb_score", local_language);
+    let expr_key = format!("{}_expression_score", local_language);
+    let verb_score_val = v_json.get(&verb_key).and_then(|v| v.as_i64()).unwrap_or(0).to_string();
+    let expr_score_val = v_json.get(&expr_key).and_then(|v| v.as_i64()).unwrap_or(0).to_string();
+
     let system_prompt = system_template.replace("{PUG_CONTENT}", pug_content);
     let user_prompt = user_template
-        .replace("{PUG_CONTENT}", pug_content)
+        .replace("{PUG_CONTENT}", target_item)
         .replace("{TITLE}", title)
         .replace("{LOCAL_LANGUAGE}", local_language)
+        .replace("{LANGUAGE}", local_language)
         .replace("{TARGET_NAME}", target_name)
-        .replace("{TARGET_ITEM}", target_item)
         .replace("{TARGET_BIAS}", target_bias)
         .replace("{TARGET_BASE}", &base_target.to_uppercase())
         .replace("{TARGET_PREJUDICE}", target_prejudice)
+        .replace("{VERIFICATION_HINT_BLOCK}", &verification_hint_block)
         .replace("{VECTOR_HINT_BLOCK}", &vector_hint_block)
         .replace("{ALREADY_FOUND_BLOCK}", &already_found_block)
         .replace("{NOT_FOUND_BLOCK}", &not_found_block)
-        .replace("{FOREIGN_GUIDE_BLOCK}", &foreign_guide_block);
-
-    (system_prompt, user_prompt)
-}
-
-pub fn build_verification_prompt(extracted_val: &str, target_item: &str, language: &str, verb_hint: &str, expr_hint: &str) -> (String, String) {
-    let system_prompt = format!("You are a linguistic verification assistant for {}.", language);
-
-    let user_template = r###"[TASK]
-Analyze the provided [EXTRACTED WORD] and score its linguistic and structural properties.
-
-[EXTRACTED WORD]
-"{EXTRACTED_VALUE}"
-
-[SCORING INSTRUCTION]
-1. {LANGUAGE}_verb_score (1 to 10): 
-   - Is this a verb, action, or predicate? (Concepts: [{VERB_HINT}])
-   - 1 = Pure noun (No action). 10 = Pure verb/action.
-   
-2. {LANGUAGE}_expression_score (1 to 10):
-   - Is this a conversational phrase, idiom, or full sentence? (Concepts: [{EXPRESSION_HINT}])
-   - 1 = Short single entity/noun. 10 = Long descriptive phrase or full sentence.
-
-3. is_target_mismatch (Boolean):
-   - Does this word logically completely mismatch the concept of '{TARGET_ITEM}'?
-
-4. is_native (Boolean):
-   - Is this word a pure native word or a formally registered noun in the {LANGUAGE} dictionary?
-
-5. is_foreign (Boolean):
-   - Is this word a transliterated foreign word, a loaned brand name, or a foreign person name written in {LANGUAGE}?
-
-[OUTPUT FORMAT]
-{
-    "is_native": Boolean,
-    "is_foreign": Boolean,
-    "is_target_mismatch": Boolean,
-    "{LANGUAGE}_verb_score": Integer,
-    "{LANGUAGE}_expression_score": Integer,
-}
-
-[ACTION] RETURN JSON ONLY. NO EXPLANATION."###.to_string();
-
-    let user_prompt = user_template
-        .replace("{EXTRACTED_VALUE}", extracted_val)
-        .replace("{LANGUAGE}", language)
-        .replace("{TARGET_ITEM}", target_item)
-        .replace("{VERB_HINT}", verb_hint)
-        .replace("{EXPRESSION_HINT}", expr_hint);
+        .replace("{FOREIGN_GUIDE_BLOCK}", &foreign_guide_block)
+        .replace("{IS_NATIVE_VAL}", &is_native_val)
+        .replace("{IS_FOREIGN_VAL}", &is_foreign_val)
+        .replace("{IS_MISMATCH_VAL}", &is_mismatch_val)
+        .replace("{VERB_SCORE_VAL}", &verb_score_val)
+        .replace("{EXPR_SCORE_VAL}", &expr_score_val);
 
     (system_prompt, user_prompt)
 }
