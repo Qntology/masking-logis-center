@@ -919,7 +919,7 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str, language: &str, verb_expression_hint: &str) -> (String, String) {
+pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str) -> (String, String) {
     let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
 
@@ -930,37 +930,28 @@ pub fn build_masking_prompt(title: &str, pug_content: &str, target_name: &str, t
                  else if target_name.ends_with("_contact_number") { "contact_number" }
                  else { target_name };
 
-    // 🌟 [전략 B & C 반영] 언어 맥락 부하를 줄이기 위해 원문을 절대 건드리지 말고(No Translation), 띄어쓰기(Spacing)를 완벽히 유지하라는 지시를 2배로 강화합니다.
     let user_template = r###"[TASK]
-Find all the {TARGET_NAME} from the following PUG CONTENT.
+Find the exact {TARGET_NAME} from the following PUG CONTENT.
 
 [INSTRUCTION]
+- Target: {TARGET_ITEM}
 - Bias (Acceptance Criteria): {TARGET_BIAS}
 - Prejudice (Rejection Criteria): {TARGET_PREJUDICE}
 {VECTOR_HINT_BLOCK}
 {ALREADY_FOUND_BLOCK}
 {NOT_FOUND_BLOCK}
 
-[SCORING RUBRIC FOR VERB EXPRESSION]
-Evaluate the semantic nature of the extracted string against these {LANGUAGE} concepts: [{VERB_EXPRESSION_HINT}].
-* Score 1 to 3: Pure noun, proper noun, or exact entity matching '{TARGET_ITEM}' (Examples: {TARGET_BIAS}).
-* Score 4 to 6: The target entity with minor {LANGUAGE} post-positions, particles, or grammatical markers attached.
-* Score 7 to 10: A complete sentence, action verb, descriptive phrase, or conversational idiom.
-
 [SCHEMA DEFINITIONS]
 - {TARGET_BASE}: String. Default '{TARGET_ITEM}'.
-- {TARGET_NAME}: String. Extract the {TARGET_NAME} - '{TARGET_ITEM}' value. return an empty string "".
-- {LANGUAGE}_verb_expression_score: Integer (1 to 10). Assign a score based on the [SCORING RUBRIC FOR VERB EXPRESSION].
+- {TARGET_NAME}: String. Extract the exact value matching the target. Return an empty string "" if not found.
 
 [OUTPUT FORMAT]
 {
     "{TARGET_BASE}": String,
-    "{TARGET_NAME}": String,
-    "{LANGUAGE}_verb_expression_score": Number
+    "{TARGET_NAME}": "String"
 }
 
-
-[ACTION] RETURN JSON ONLY."###.to_string();
+[ACTION] RETURN JSON ONLY. NO EXPLANATION."###.to_string();
 
     let vector_hint_block = if candidates_str.is_empty() {
         "".to_string()
@@ -991,9 +982,44 @@ Evaluate the semantic nature of the extracted string against these {LANGUAGE} co
         .replace("{TARGET_PREJUDICE}", target_prejudice)
         .replace("{VECTOR_HINT_BLOCK}", &vector_hint_block)
         .replace("{ALREADY_FOUND_BLOCK}", &already_found_block)
-        .replace("{NOT_FOUND_BLOCK}", &not_found_block)
+        .replace("{NOT_FOUND_BLOCK}", &not_found_block);
+
+    (system_prompt, user_prompt)
+}
+
+pub fn build_verification_prompt(extracted_val: &str, target_item: &str, language: &str) -> (String, String) {
+    let system_prompt = format!("You are a linguistic verification assistant for {}.", language);
+    let user_template = r###"[TASK]
+Analyze the provided [EXTRACTED WORD] and score its linguistic and structural properties.
+
+[EXTRACTED WORD]
+"{EXTRACTED_VALUE}"
+
+[SCORING INSTRUCTION]
+1. {LANGUAGE}_verb_score (1 to 10): 
+   - Is this a verb, action, or predicate? 
+   - 1 = Pure noun (No action). 10 = Pure verb/action.
+   
+2. {LANGUAGE}_expression_score (1 to 10):
+   - Is this a conversational phrase, idiom, or full sentence? 
+   - 1 = Short single entity/noun. 10 = Long descriptive phrase or full sentence.
+
+3. is_target_mismatch (Boolean):
+   - Does this word logically completely mismatch the concept of '{TARGET_ITEM}'? (e.g., if target is 'Username' but the word is '12 days' or '1500 Euro', return true).
+
+[OUTPUT FORMAT]
+{
+    "{LANGUAGE}_verb_score": Integer,
+    "{LANGUAGE}_expression_score": Integer,
+    "is_target_mismatch": Boolean
+}
+
+[ACTION] RETURN JSON ONLY. NO EXPLANATION."###.to_string();
+
+    let user_prompt = user_template
+        .replace("{EXTRACTED_VALUE}", extracted_val)
         .replace("{LANGUAGE}", language)
-        .replace("{VERB_EXPRESSION_HINT}", verb_expression_hint);
+        .replace("{TARGET_ITEM}", target_item);
 
     (system_prompt, user_prompt)
 }

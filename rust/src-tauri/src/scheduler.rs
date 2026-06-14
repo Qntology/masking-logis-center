@@ -1430,7 +1430,8 @@ async fn process_task(
                                 clean_matched_context = marker_re.replace_all(&clean_matched_context, " ").to_string();
                             }
 
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_masking_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, current_lang, current_verb_b_val);
+                            // 🌟 [STAGE 1] 추출 에이전트 호출
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str);
                             
                             // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
@@ -1473,9 +1474,7 @@ async fn process_task(
                                     // 🌟 [CRITICAL FIX] 대형 문맥(Qwen) 추론 시작 전에 명시적으로 KV 캐시를 비워 환각을 방어합니다.
                                     let _ = gen.clear_kv_cache();
 
-                                    // 🌟 [CRITICAL FIX] Qwen(대형 문맥) 추론 시 session_id와 kv_name을 주입하여 SSD 오프로딩 및 청크 병렬 처리가 동작하도록 수정합니다.
                                     let res = gen.generate(params, Some(cancel_clone), None, None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
-                                    // let res = gen.generate(params, Some(cancel_clone), Some(session_id_clone), Some("masking".to_string()), None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
                                     
                                     let _ = gen.clear_kv_cache();
                                     
@@ -1536,7 +1535,7 @@ async fn process_task(
                             }?;
 
                             // 🌟 [OOM 원인 분석용 로그] 추론 직후 LLM이 뱉어낸 실제 결과값과 길이를 출력합니다.
-                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추론 완료 - 응답 길이: {}, 결과: {}", target_item, res_mask.len(), res_mask));
+                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 - 응답 길이: {}, 결과: {}", target_item, res_mask.len(), res_mask));
                             
                             // 🌟 self 대신 상단에서 가져온 지역 변수 model 사용 (E0424 에러 해결)
                             if !model.is_cpu_mode {
@@ -1547,26 +1546,111 @@ async fn process_task(
                             }
 
                             let parsed = crate::parsing::parse_json_from_llm(&res_mask);
-                            
-                            // 추출된 값이 있는지, 그리고 그 값이 현재 PUG_CONTENT(masked_text)에 실제로 존재하는지 확인
                             let mut extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
+                            // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
+                            if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
+                                miss_counter += 1;
+                                current_temperature += 0.2; // 🌟 온도 상승
+
+                                emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
+                                
+                                if current_temperature >= 1.0 {
+                                    emit_term(&format!("[EXTRACTION] 🛑 온도 1.0 도달로 강제 종료."));
+                                    break;
+                                }
+
+                                // 빈 값 꼼수 방지 및 재시도 유도
+                                ignore_list.push("".to_string());
+                                ignore_list.push("null".to_string());
+                                ignore_list.push("\"\"".to_string());
+                                ignore_list.push("\"null\"".to_string());
+                                continue;
+                            }
+
+                            // 🌟 [STAGE 2] 검증 에이전트 호출 (추출된 값이 있을 때만)
+                            let (v_system, v_user) = crate::parsing::build_verification_prompt(&extracted_val, &target_item, current_lang);
+                            let cancel_clone_v = cancellation_token.clone();
                             
-                            // 🌟 [CRITICAL FIX] 다국어 환경에 맞춰 {LANGUAGE}_verb_expression_score 키값을 동적으로 파싱합니다.
-                            let verb_score_key = format!("{}_verb_expression_score", current_lang);
-                            let verb_expression_score = parsed.get(&verb_score_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let res_verify = if is_large_context {
+                                let gen_arc = model.generator.clone();
+                                let mut gen_guard = gen_arc.lock().await;
+                                if let Some(gen) = gen_guard.as_mut() {
+                                    let params = crate::openai_types::ChatCompletionParameters {
+                                        messages: vec![
+                                            crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
+                                                content: v_system,
+                                                name: None,
+                                            }),
+                                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
+                                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user),
+                                                name: None,
+                                            })
+                                        ],
+                                        model: "qwen".to_string(), max_tokens: Some(256), temperature: Some(0.1), top_p: Some(0.1),
+                                        ..Default::default()
+                                    };
+                                    gen.clear_kv_cache();
+                                    let res = gen.generate(params, Some(cancel_clone_v), None, None, None).await.unwrap_or("{}".to_string());
+                                    gen.clear_kv_cache();
+                                    res
+                                } else { "{}".to_string() }
+                            } else {
+                                let gen_arc = model.qwen3_generator.clone();
+                                tokio::task::spawn_blocking(move || -> String {
+                                    let mut gen_guard = gen_arc.blocking_lock();
+                                    if let Some(gen) = gen_guard.as_mut() {
+                                        let params = crate::openai_types::ChatCompletionParameters {
+                                            messages: vec![
+                                                crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
+                                                    content: v_system,
+                                                    name: None,
+                                                }),
+                                                crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
+                                                    content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user),
+                                                    name: None,
+                                                })
+                                            ],
+                                            model: "qwen3".to_string(), max_tokens: Some(256), temperature: Some(0.1), top_p: Some(0.1),
+                                            ..Default::default()
+                                        };
+                                        gen.clear_kv_cache();
+                                        let res = gen.generate(params, Some(cancel_clone_v), None, None).unwrap_or("{}".to_string());
+                                        gen.clear_kv_cache();
+                                        res
+                                    } else { "{}".to_string() }
+                                }).await.unwrap_or("{}".to_string())
+                            };
                             
-                            // 🌟 [CRITICAL FIX] 서술어/어구 점수가 7점을 초과하는 경우(1~10 척도) 무고한 단어 훼손 방지를 위해 즉시 환각으로 간주하고 강제 차단합니다.
-                            if verb_expression_score >= 7.0 {
+                            if !model.is_cpu_mode {
+                                let dev = model.device_config.device.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    if dev.is_cuda() { let _ = dev.synchronize(); }
+                                }).await;
+                            }
+
+                            let v_parsed = crate::parsing::parse_json_from_llm(&res_verify);
+                            
+                            let verb_key = format!("{}_verb_score", current_lang);
+                            let expr_key = format!("{}_expression_score", current_lang);
+                            let verb_score = v_parsed.get(&verb_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let expr_score = v_parsed.get(&expr_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let is_mismatch = v_parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                            emit_term(&format!("[DEBUG-VERIFY] 검증 결과: verb={}, expr={}, mismatch={}", verb_score, expr_score, is_mismatch));
+
+                            // 🌟 [CRITICAL FIX] 서술어 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.
+                            if verb_score >= 7.0 || expr_score >= 7.0 || is_mismatch {
                                 miss_counter += 1;
                                 current_temperature += 0.2; // 🌟 환각이므로 온도를 올려 변형 유도
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
                                 
-                                emit_term(&format!("[DEBUG] 서술어/어구 점수 초과 ({}점) 감지됨. 환각으로 간주하여 강제 기각 (재시도 {}): '{}'", verb_expression_score, miss_counter, extracted_val));
+                                emit_term(&format!("[DEBUG] 검증 탈락 감지됨. 환각으로 간주하여 강제 기각 (재시도 {}): '{}'", miss_counter, extracted_val));
                                 
                                 if current_temperature >= 1.0 || *count >= 3 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 서술어 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
+                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 검증 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
                                     break;
                                 }
 
