@@ -1151,42 +1151,71 @@ async fn process_task(
                         }
                     }
 
-                    // 🌟 [추가] 4.5 인접 청크 병합 (Gap Bridging) - 100% 동일한 카테고리를 가진 인접 청크 병합
-                    emit_term("  🔗 [PASS 3.5: GAP BRIDGING] Merging adjacent winner chunks with 100% identical categories...");
+                    // 🌟 [추가] 4.5 인접 청크 동적 스팬 확장 (Dynamic Span Expansion)
+                    // 100% 동일한 카테고리를 가진 인접 청크들이 만들 수 있는 모든 결합 경우의 수를 파생시켜 후보군에 추가합니다.
+                    emit_term("  🔗 [PASS 3.5: GAP BRIDGING] Dynamic Span Expansion for adjacent winner chunks...");
                     final_spans.sort_by(|a, b| a.line_idx.cmp(&b.line_idx).then(a.start.cmp(&b.start)));
                     
-                    let mut merged_spans: Vec<ChunkSpan> = Vec::new();
+                    let mut expanded_spans: Vec<ChunkSpan> = final_spans.clone(); // 기존 단일 조각들 보존
+                    
+                    // 연속된 청크들을 그룹화
+                    let mut contiguous_groups: Vec<Vec<ChunkSpan>> = Vec::new();
+                    let mut current_group: Vec<ChunkSpan> = Vec::new();
+                    
                     for span in final_spans {
-                        let mut merged = false;
-                        if let Some(last) = merged_spans.last_mut() {
-                            // 같은 줄에 있고 물리적으로 완벽히 맞닿아 있는지(start == end) 확인
-                            if last.line_idx == span.line_idx && last.end == span.start {
-                                let mut last_targets = last.target_indices.clone();
-                                let mut span_targets = span.target_indices.clone();
-                                last_targets.sort();
-                                span_targets.sort();
+                        if let Some(last) = current_group.last() {
+                            let mut last_targets = last.target_indices.clone();
+                            let mut span_targets = span.target_indices.clone();
+                            last_targets.sort();
+                            span_targets.sort();
 
-                                // 획득한 타이틀(카테고리)이 100% 정확히 일치할 때만 융합
-                                if last_targets == span_targets {
-                                    // 🌟 [추가] 두 청크 중 최소 하나는 '단어 1개'로 구성된 경우에만 병합 허용 (2개+2개 이상 결합 방지)
-                                    let last_word_count = last.end - last.start;
-                                    let span_word_count = span.end - span.start;
-                                    
-                                    if last_word_count == 1 || span_word_count == 1 {
-                                        emit_term(&format!("    🤝 [MERGED] '{}' + '{}' -> '{}'", last.text, span.text, format!("{} {}", last.text, span.text)));
-                                        last.end = span.end;
-                                        last.text = format!("{} {}", last.text, span.text);
-                                        last.score = last.score.max(span.score);
-                                        merged = true;
-                                    }
+                            // 같은 줄에 있고 물리적으로 완벽히 맞닿아 있으며 카테고리가 100% 일치하는지 확인
+                            if last.line_idx == span.line_idx && last.end == span.start && last_targets == span_targets {
+                                // 🌟 두 청크 중 최소 하나는 '단어 1개'로 구성된 경우에만 연속성을 인정하여 과잉 그룹화 방지
+                                let last_word_count = last.end - last.start;
+                                let span_word_count = span.end - span.start;
+                                
+                                if last_word_count == 1 || span_word_count == 1 {
+                                    current_group.push(span);
+                                    continue;
                                 }
                             }
                         }
-                        if !merged {
-                            merged_spans.push(span);
+                        if !current_group.is_empty() {
+                            contiguous_groups.push(current_group.clone());
+                        }
+                        current_group = vec![span];
+                    }
+                    if !current_group.is_empty() {
+                        contiguous_groups.push(current_group);
+                    }
+                    
+                    // 각 그룹 내에서 길이 2 이상의 모든 연속된 서브 스팬(Sub-span) 경우의 수를 생성
+                    for group in contiguous_groups {
+                        let n = group.len();
+                        if n >= 2 {
+                            for len in 2..=n {
+                                for start_idx in 0..=(n - len) {
+                                    let sub_group = &group[start_idx..(start_idx + len)];
+                                    let combined_text = sub_group.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+                                    let max_score = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
+                                    
+                                    let new_span = ChunkSpan {
+                                        line_idx: sub_group[0].line_idx,
+                                        start: sub_group[0].start,
+                                        end: sub_group.last().unwrap().end,
+                                        text: combined_text.clone(),
+                                        target_indices: sub_group[0].target_indices.clone(),
+                                        score: max_score,
+                                    };
+                                    
+                                    emit_term(&format!("    🤝 [EXPANDED] {}조각 결합 파생: '{}'", len, combined_text));
+                                    expanded_spans.push(new_span);
+                                }
+                            }
                         }
                     }
-                    let final_spans = merged_spans;
+                    let final_spans = expanded_spans;
 
                     // 🌟 5. NMS 승자들을 바탕으로 매칭된 라인 및 valid_targets 재조립
                     let mut valid_targets: Vec<(String, String, String, String, String, bool, Vec<String>)> = Vec::new(); // 🌟 Vector 후보(단서) 배열 추가
