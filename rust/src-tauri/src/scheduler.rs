@@ -1253,6 +1253,9 @@ async fn process_task(
                     
                     // 🌟 [추가] 이미 성공적으로 마스킹된 NMS 후보를 기록하여 동의어 트랙에서 건너뛰게 하는 장부
                     let mut fully_masked_candidates = std::collections::HashSet::new();
+                    
+                    // 🌟 [추가] 할루시네이션으로 판명된 단어를 기록하여 이후 스킵하게 하는 장부
+                    let mut hallucinated_candidates = std::collections::HashSet::new();
 
                     // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
                     while p_idx < valid_targets.len() {
@@ -1552,6 +1555,58 @@ async fn process_task(
                                 continue;
                             }
 
+                            // 🌟 [추가] 할루시네이션(환각)으로 이미 판명된 단어라면 즉시 스킵 (동의어 트랙 등에서 재등장 방지)
+                            if hallucinated_candidates.contains(&extracted_val) {
+                                emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 할루시네이션으로 판명된 단어입니다. 스킵합니다: '{}'", extracted_val));
+                                miss_counter += 1;
+                                current_temperature += 0.2;
+                                ignore_list.push(extracted_val.clone());
+                                continue;
+                            }
+
+                            // 🌟 [CRITICAL FIX] 추출단어가 만약에 PUG CONTENT에 있는지 없는지 먼저 체크 (ctrl + f)
+                            let mut early_exists = matched_context.contains(&extracted_val) || target_text.contains(&extracted_val) || doc_title.contains(&extracted_val) || doc_desc.contains(&extracted_val);
+
+                            // 띄어쓰기 변형으로 인한 오탐지를 막기 위해 Space-Agnostic 보정을 선행
+                            if !early_exists && extracted_val.chars().count() >= 2 {
+                                let no_space_val: String = extracted_val.chars().filter(|c| !c.is_whitespace()).collect();
+                                if no_space_val.len() >= 2 && no_space_val.len() <= 100 {
+                                    let escaped_chars: Vec<String> = no_space_val.chars().map(|c| regex::escape(&c.to_string())).collect();
+                                    let regex_pattern = escaped_chars.join(r"\s*");
+                                    if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                        if let Some(mat) = re.find(&target_text).or_else(|| re.find(&matched_context)).or_else(|| re.find(&doc_title)) {
+                                            extracted_val = mat.as_str().to_string();
+                                            early_exists = true;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 못찾으면 환각 장부에 등록하고 즉시 스킵
+                            if !early_exists {
+                                emit_term(&format!("[DEBUG] 추출단어가 PUG CONTENT에 존재하지 않습니다(contains 실패). 할루시네이션으로 즉시 차단: '{}'", extracted_val));
+                                hallucinated_candidates.insert(extracted_val.clone());
+                                
+                                miss_counter += 1;
+                                current_temperature += 0.2;
+                                
+                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
+                                *count += 1;
+                                
+                                if current_temperature >= 1.0 || *count >= 3 {
+                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값 3회 누적 또는 온도 1.0 도달로 강제 종료."));
+                                    break;
+                                }
+
+                                ignore_list.push(extracted_val.clone());
+                                ignore_list.push(format!(" {}", extracted_val));
+                                ignore_list.push(format!("\"{}", extracted_val));
+                                ignore_list.push(format!(" \"{}", extracted_val));
+                                ignore_list.push(extracted_val.to_lowercase());
+                                ignore_list.push(extracted_val.to_uppercase());
+                                continue;
+                            }
+
                             // 🌟 [STAGE 3] 추출 단어 다국어 순차 검증 (Sequential CoT Evaluation with Early Exit)
                             let is_mismatch = parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -1711,6 +1766,8 @@ async fn process_task(
 
                             // 🌟 [CRITICAL FIX] 서술어/표현 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.
                             if is_hallucination {
+                                hallucinated_candidates.insert(extracted_val.clone()); // 🌟 이후 트랙 스킵을 위해 장부에 등록
+                                
                                 miss_counter += 1;
                                 current_temperature += 0.2; // 🌟 환각이므로 온도를 올려 변형 유도
                                 
@@ -1726,6 +1783,8 @@ async fn process_task(
 
                                 if !extracted_val.is_empty() {
                                     ignore_list.push(extracted_val.clone());
+                                    ignore_list.push(format!(" {}", extracted_val));
+                                    ignore_list.push(format!("\"{}", extracted_val));
                                 }
                                 continue;
                             }
