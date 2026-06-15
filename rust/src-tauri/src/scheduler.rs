@@ -1549,7 +1549,7 @@ async fn process_task(
                                 emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
                                 
                                 if current_temperature > 0.6 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 온도 1.0 도달로 강제 종료."));
+                                    emit_term(&format!("[EXTRACTION] 🛑 온도 0.6 도달로 강제 종료."));
                                     break;
                                 }
 
@@ -2000,7 +2000,7 @@ async fn process_task(
                                 emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
                                 
                                 if current_temperature > 0.6 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 온도 1.0 도달로 강제 종료."));
+                                    emit_term(&format!("[EXTRACTION] 🛑 온도 0.6 도달로 강제 종료."));
                                     break;
                                 }
 
