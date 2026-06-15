@@ -1334,6 +1334,12 @@ async fn process_task(
                             emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 마스킹 완료된 타겟입니다. 스킵합니다: '{}'", specific_candidate));
                             continue;
                         }
+
+                        // 🌟 [연쇄 파기(Cascade Cancellation)] 할루시네이션(본문 없음, 동사/서술어 등)으로 등재된 독성 단어라면 파생 트랙 전체를 시작도 안 하고 즉시 폐기합니다.
+                        if !specific_candidate.is_empty() && hallucinated_candidates.contains(&specific_candidate) {
+                            emit_term(&format!("[DEBUG] 독성 단어 명부에 등재된 타겟입니다. 연쇄 파기(Cascade Cancellation)를 적용하여 해당 트랙을 즉시 스킵합니다: '{}'", specific_candidate));
+                            continue;
+                        }
                         
                         let mut current_target_found: Vec<String> = Vec::new();
                         let mut ignore_list: Vec<String> = Vec::new();
@@ -1564,6 +1570,46 @@ async fn process_task(
                                 continue;
                             }
 
+                            // 🌟 [방어 로직 추가] NMS 후보 단어와의 교집합(포함 관계) 및 단일 숫자/기호 강제 기각
+                            let mut nms_valid = true;
+                            if !specific_candidate.is_empty() {
+                                let no_space_input: String = specific_candidate.chars().filter(|c| !c.is_whitespace()).collect();
+                                let no_space_ext: String = extracted_val.chars().filter(|c| !c.is_whitespace()).collect();
+                                
+                                // 1. 단일 문자이면서 알파벳/한글 등 문자가 아닌 단순 숫자나 기호인 경우 즉시 기각
+                                if no_space_ext.chars().count() == 1 && !no_space_ext.chars().next().unwrap().is_alphabetic() {
+                                    nms_valid = false;
+                                    emit_term(&format!("[DEBUG] 단일 숫자/기호 추출 감지. 강제 기각: '{}'", extracted_val));
+                                } 
+                                // 2. 입력 단어(specific_candidate)와 추출 단어 간에 포함 관계가 전혀 없는 경우 기각
+                                else if !no_space_input.contains(&no_space_ext) && !no_space_ext.contains(&no_space_input) {
+                                    nms_valid = false;
+                                    emit_term(&format!("[DEBUG] NMS 후보 단어와 교집합 없음. 강제 기각 (입력: '{}', 추출: '{}')", specific_candidate, extracted_val));
+                                }
+                            }
+
+                            if !nms_valid {
+                                hallucinated_candidates.insert(extracted_val.clone());
+                                if !specific_candidate.is_empty() {
+                                    hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 연쇄 파기 명부 등재
+                                }
+                                miss_counter += 1;
+                                current_temperature += 0.2;
+                                
+                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
+                                *count += 1;
+                                
+                                if current_temperature >= 0.8 || *count >= 3 {
+                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값 3회 누적 또는 온도 1.0 도달로 강제 종료."));
+                                    break;
+                                }
+
+                                ignore_list.push(extracted_val.clone());
+                                ignore_list.push(format!(" {}", extracted_val));
+                                ignore_list.push(format!("\"{}", extracted_val));
+                                continue;
+                            }
+
                             // 🌟 [CRITICAL FIX] 추출단어가 만약에 PUG CONTENT에 있는지 없는지 먼저 체크 (ctrl + f)
                             let mut early_exists = matched_context.contains(&extracted_val) || target_text.contains(&extracted_val) || doc_title.contains(&extracted_val) || doc_desc.contains(&extracted_val);
 
@@ -1586,6 +1632,9 @@ async fn process_task(
                             if !early_exists {
                                 emit_term(&format!("[DEBUG] 추출단어가 PUG CONTENT에 존재하지 않습니다(contains 실패). 할루시네이션으로 즉시 차단: '{}'", extracted_val));
                                 hallucinated_candidates.insert(extracted_val.clone());
+                                if !specific_candidate.is_empty() {
+                                    hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 연쇄 파기 명부 등재
+                                }
                                 
                                 miss_counter += 1;
                                 current_temperature += 0.2;
@@ -1767,6 +1816,9 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 서술어/표현 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.
                             if is_hallucination {
                                 hallucinated_candidates.insert(extracted_val.clone()); // 🌟 이후 트랙 스킵을 위해 장부에 등록
+                                if !specific_candidate.is_empty() {
+                                    hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 동사/오답 판정 시 남은 파생 트랙 일괄 취소(연쇄 파기)를 위해 등록
+                                }
                                 
                                 miss_counter += 1;
                                 current_temperature += 0.2; // 🌟 환각이므로 온도를 올려 변형 유도
