@@ -919,43 +919,35 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_verification_prompt(input_val: &str, target_item: &str, language: &str, verb_hint: &str, expr_hint: &str) -> (String, String) {
-    let system_prompt = format!("You are a linguistic verification assistant for {}.", language);
+pub fn build_single_property_verification_prompt(word: &str, language: &str, property: &str, hint: &str) -> (String, String) {
+    let system_prompt = format!("You are a strict linguistic verification assistant for {}.", language);
+    let user_template = r###"[TASK] Analyze the word '{WORD}' and score its linguistic property.
 
-    let user_template = r###"[TASK]
-Analyze the provided [INPUT] and score its linguistic and structural properties.
-
-[INPUT]
-{TARGET_ITEM}
-
-[SCORING INSTRUCTION]
-- {LANGUAGE}_verb_score: Integer(1 to 10). Is this a verb, action, or predicate? Concepts([{VERB_HINT}]).
-- {LANGUAGE}_expression_score: Integer(1 to 10). Is this a conversational phrase, idiom, or full sentence? Concepts([{EXPRESSION_HINT}]).
-- is_native: Boolean. Is this word a pure native word or a formally registered noun in the {LANGUAGE} dictionary?
-- is_localized: Boolean. Is this word a localized word in {LANGUAGE}?
+[CRITERIA]
+Property: {PROPERTY}
+Hint: {HINT}
 
 [OUTPUT FORMAT]
 {
-    "is_native": Boolean,
-    "is_localized": Boolean,
-    "{LANGUAGE}_verb_score": Integer,
-    "{LANGUAGE}_expression_score": Integer,
+  "score": Integer(1 to 10)
 }
 
-[ACTION] RETURN JSON ONLY. NO EXPLANATION."###.to_string();
+[ACTION] RETURN JSON ONLY. NO EXPLANATION.
+    "###.to_string();
+    
+     let user_prompt = user_template
+        .replace("{WORD}", word)
+        .replace("{PROPERTY}", property)
+        .replace("{HINT}", hint);
 
-    let user_prompt = user_template
-        .replace("{INPUT_VALUE}", input_val)
-        .replace("{LANGUAGE}", language)
-        .replace("{TARGET_ITEM}", target_item)
-        .replace("{VERB_HINT}", verb_hint)
-        .replace("{EXPRESSION_HINT}", expr_hint);
 
     (system_prompt, user_prompt)
 }
 
-pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str, local_language: &str, localized_guide_str: &str, verification_hint_str: &str) -> (String, String) {
-    let system_template = r###"[CONTENT]
+
+
+pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str, local_language: &str, loanword_guide_str: &str, input_keyword: &str) -> (String, String) {
+    let system_template = r###"[PUG CONTENT]
 {PUG_CONTENT}"###;
 
     let base_target = if target_name.ends_with("_name") { "name" }
@@ -966,7 +958,7 @@ pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str
                  else { target_name };
 
     let user_template = r###"[TASK]
-Find the exact {TARGET_NAME} from the following CONTENT.
+Find the exact {TARGET_NAME} from the following PUG CONTENT.
 
 [INSTRUCTION]
 - Local Language Context: {LOCAL_LANGUAGE}
@@ -975,15 +967,11 @@ Find the exact {TARGET_NAME} from the following CONTENT.
 
 
 [SCHEMA DEFINITIONS]
-- is_native: Boolean. Is this word a pure native word or a formally registered noun in the {LANGUAGE} dictionary? Default {IS_NATIVE_VAL}.
-- is_localized: Boolean. Is this word a localized word in {LANGUAGE}? Default {IS_LOCALIZED_VAL}.
-- {TARGET_BASE}: String. Default '{TARGET_ITEM}'.
-- {TARGET_NAME}: String. Extract the exact value matching the CONTENT. Return an empty string "" if not found.
+- {TARGET_BASE}: String. Default '{INPUT_KEYWORD}'.
+- {TARGET_NAME}: String. Extract the exact value matching the PUG CONTENT. Return an empty string "" if not found.
 
 [OUTPUT FORMAT]
 {
-    "is_native": Boolean,
-    "is_localized": Boolean,
     "{TARGET_BASE}": String,
     "{TARGET_NAME}": String
 }
@@ -997,17 +985,11 @@ Find the exact {TARGET_NAME} from the following CONTENT.
         format!(", {}", candidates_str)
     };
 
-    // 검증 에이전트 결과값 JSON 파싱 및 추출
-    let v_json: serde_json::Value = serde_json::from_str(verification_hint_str).unwrap_or_else(|_| serde_json::json!({}));
-    let is_native_val = v_json.get("is_native").and_then(|v| v.as_bool()).unwrap_or(true).to_string();
-    let is_localized_val = v_json.get("is_localized").and_then(|v| v.as_bool()).unwrap_or(false).to_string();
-    
-    let verb_key = format!("{}_verb_score", local_language);
-    let expr_key = format!("{}_expression_score", local_language);
-    let verb_score_val = v_json.get(&verb_key).and_then(|v| v.as_i64()).unwrap_or(0).to_string();
-    let expr_score_val = v_json.get(&expr_key).and_then(|v| v.as_i64()).unwrap_or(0).to_string();
+    let system_prompt = system_template
+        .replace("{PUG_CONTENT}", pug_content)
+        .replace("{TARGET_ITEM}", target_item)
+        .replace("{INPUT_KEYWORD}", input_keyword); // 🌟 system_template에 '리버풀' 같은 단어 치환 주입
 
-    let system_prompt = system_template.replace("{PUG_CONTENT}", pug_content);
     let user_prompt = user_template
         .replace("{PUG_CONTENT}", target_item)
         .replace("{TITLE}", title)
@@ -1017,12 +999,9 @@ Find the exact {TARGET_NAME} from the following CONTENT.
         .replace("{TARGET_ITEM}", target_item)
         .replace("{TARGET_BIAS}", target_bias)
         .replace("{TARGET_BASE}", &base_target.to_uppercase())
+        .replace("{INPUT_KEYWORD}", input_keyword)
         .replace("{TARGET_PREJUDICE}", target_prejudice)
-        .replace("{VECTOR_HINT_BLOCK}", &vector_hint_block)
-        .replace("{IS_NATIVE_VAL}", &is_native_val)
-        .replace("{IS_LOCALIZED_VAL}", &is_localized_val)
-        .replace("{VERB_SCORE_VAL}", &verb_score_val)
-        .replace("{EXPR_SCORE_VAL}", &expr_score_val);
+        .replace("{VECTOR_HINT_BLOCK}", &vector_hint_block);
 
     (system_prompt, user_prompt)
 }

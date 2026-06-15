@@ -708,7 +708,7 @@ async fn process_task(
                     if let Ok(re_double) = regex::Regex::new(r#"(?i)(href|src|data-src)\s*=\s*"([^"]*)""#) {
                         target_text = re_double.replace_all(&target_text, |caps: &regex::Captures| {
                             let original_full = caps[0].to_string();
-                            let marker = format!(" __LINK_{}_{}__ ", task_marker_hash, link_counter);
+                            let marker = format!(" [___REDACTED_LINK_{}___] ", link_counter);
                             link_map.insert(marker.trim().to_string(), original_full);
                             link_counter += 1;
                             marker
@@ -718,7 +718,7 @@ async fn process_task(
                     if let Ok(re_single) = regex::Regex::new(r#"(?i)(href|src|data-src)\s*=\s*'([^']*)'"#) {
                         target_text = re_single.replace_all(&target_text, |caps: &regex::Captures| {
                             let original_full = caps[0].to_string();
-                            let marker = format!(" __LINK_{}_{}__ ", task_marker_hash, link_counter);
+                            let marker = format!(" [___REDACTED_LINK_{}___] ", link_counter);
                             link_map.insert(marker.trim().to_string(), original_full);
                             link_counter += 1;
                             marker
@@ -852,7 +852,7 @@ async fn process_task(
                             let mnemonic = crate::parsing::generate_mnemonic();
                             let upper_key = "EMAIL".to_string();
                             let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                            let skip_marker = format!("___{}_{}___", task_marker_hash, skip_counter);
+                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                             masked_text = masked_text.replace(&email_val, &skip_marker);
                             doc_title = doc_title.replace(&email_val, &skip_marker);
                             doc_desc = doc_desc.replace(&email_val, &skip_marker);
@@ -870,21 +870,21 @@ async fn process_task(
                     let mut noise_counter = 0;
                     if let Ok(noise_re) = regex::Regex::new(r"(?i)(/(?:사진|AFPBBNews|뉴스1|기자|특파원|Copyright|ⓒ|©)[^\n]*)") {
                         masked_text = noise_re.replace_all(&masked_text, |caps: &regex::Captures| {
-                            let n_marker = format!(" __NOISE_{}_{}__ ", task_marker_hash, noise_counter);
+                            let n_marker = format!(" [___REDACTED_NOISE_{}___] ", noise_counter);
                             noise_map.insert(n_marker.trim().to_string(), caps[1].to_string());
                             noise_counter += 1;
                             n_marker
                         }).to_string();
                         
                         doc_title = noise_re.replace_all(&doc_title, |caps: &regex::Captures| {
-                            let n_marker = format!(" __NOISE_{}_{}__ ", task_marker_hash, noise_counter);
+                            let n_marker = format!(" [___REDACTED_NOISE_{}___] ", noise_counter);
                             noise_map.insert(n_marker.trim().to_string(), caps[1].to_string());
                             noise_counter += 1;
                             n_marker
                         }).to_string();
 
                         doc_desc = noise_re.replace_all(&doc_desc, |caps: &regex::Captures| {
-                            let n_marker = format!(" __NOISE_{}_{}__ ", task_marker_hash, noise_counter);
+                            let n_marker = format!(" [___REDACTED_NOISE_{}___] ", noise_counter);
                             noise_map.insert(n_marker.trim().to_string(), caps[1].to_string());
                             noise_counter += 1;
                             n_marker
@@ -994,8 +994,8 @@ async fn process_task(
                     }
                     let mut raw_spans = Vec::new();
 
-                    let noise_marker_prefix = format!("__NOISE_{}_", task_marker_hash);
-                    let link_marker_prefix = format!("__LINK_{}_", task_marker_hash);
+                    let noise_marker_prefix = "[___REDACTED_NOISE_".to_string();
+                    let link_marker_prefix = "[___REDACTED_LINK_".to_string();
 
                     for (line_idx, line) in lines.iter().enumerate() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
@@ -1200,60 +1200,43 @@ async fn process_task(
                     let final_spans = expanded_spans;
 
                     // 🌟 5. NMS 승자들을 바탕으로 매칭된 라인 및 valid_targets 재조립
-                    let mut valid_targets: Vec<(String, String, String, String, String, bool, Vec<String>)> = Vec::new(); // 🌟 Vector 후보(단서) 배열 추가
-                    let mut target_matched_lines: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-                    let mut target_candidates: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new(); // 🌟 Vector가 찾은 단어 저장소
-                    let mut active_target_indices = std::collections::HashSet::new();
+                    // 구조: (target_name, base_target, target_desc, bias_keyword, prejudice, is_phase2, specific_line_text, specific_candidate_text)
+                    let mut valid_targets: Vec<(String, String, String, String, String, bool, String, String)> = Vec::new(); // 🌟 PUG 한 줄, 단일 키워드 1:1 맵핑
 
                     for span in &final_spans {
-                        // 최종 LLM 투입 커트라인 0.10
                         if span.score >= 0.10 {
+                            let specific_line = lines[span.line_idx].clone();
+                            let specific_candidate = span.text.clone(); // 🌟 이게 바로 NMS WINNER / EXPANDED 값입니다!
+
                             for &t_idx in &span.target_indices {
-                                active_target_indices.insert(t_idx);
-                                let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                target_matched_lines.entry(context_name.clone()).or_default().push(lines[span.line_idx].clone());
-                                target_candidates.entry(context_name.clone()).or_default().push(span.text.clone());
-                            }
-                        }
-                    }
-
-                    // 중복된 라인 제거
-                    for lines_vec in target_matched_lines.values_mut() {
-                        lines_vec.sort();
-                        lines_vec.dedup();
-                    }
-
-                    // 🌟 승리한 타겟 도메인들에 대해서만 기존의 3중 루프(단일 키워드 주입) 로직 수행
-                    for idx in active_target_indices {
-                        let (context_name, base_target, context_desc) = &dynamic_target_items[idx];
-                        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
-                            let bias_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("");
-                            let prej_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("");
-                            
-                            let bias_keywords: Vec<&str> = bias_val.split(',')
-                                .map(|s| s.trim())
-                                .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
-                                .collect();
-                            
-                            let passed_lines = target_matched_lines.get(context_name).cloned().unwrap_or_default();
-                            let candidates = target_candidates.get(context_name).cloned().unwrap_or_default(); // 🌟 [추가] 수집된 단서 뭉치
-
-                            for keyword in bias_keywords {
-                                let lang_prefix = context_name.split('_').next().unwrap_or("english");
-                                let split_target_name = format!("{}_{}", lang_prefix, keyword);
-                                let split_target_desc = format!("{} associated with '{}'", context_desc, keyword);
-
-                                target_matched_lines.insert(split_target_name.clone(), passed_lines.clone());
+                                let (context_name, base_target, context_desc) = &dynamic_target_items[t_idx];
                                 
-                                valid_targets.push((
-                                    split_target_name,
-                                    base_target.to_string(),
-                                    split_target_desc,
-                                    keyword.to_string(),
-                                    prej_val.to_string(),
-                                    false,
-                                    candidates.clone() // 🌟 [추가] 단서 전달
-                                ));
+                                if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
+                                    let bias_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("");
+                                    let prej_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("");
+                                    
+                                    let bias_keywords: Vec<&str> = bias_val.split(',')
+                                        .map(|s| s.trim())
+                                        .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
+                                        .collect();
+                                    
+                                    for keyword in bias_keywords {
+                                        let lang_prefix = context_name.split('_').next().unwrap_or("english");
+                                        let split_target_name = format!("{}_{}", lang_prefix, keyword);
+                                        let split_target_desc = format!("{} associated with '{}'", context_desc, keyword);
+
+                                        valid_targets.push((
+                                            split_target_name,
+                                            base_target.to_string(),
+                                            split_target_desc,
+                                            keyword.to_string(),
+                                            prej_val.to_string(),
+                                            false,
+                                            specific_line.clone(),
+                                            specific_candidate.clone() // 🌟 단일 NMS 우승 단어 1:1 매핑
+                                        ));
+                                    }
+                                }
                             }
                         }
                     }
@@ -1267,8 +1250,11 @@ async fn process_task(
                     let mut p_idx = 0;
                     let mut phase2_companies: Vec<String> = Vec::new();
                     let mut phase2_executed = false; // Phase 2 진입 플래그
+                    
+                    // 🌟 [추가] 이미 성공적으로 마스킹된 NMS 후보를 기록하여 동의어 트랙에서 건너뛰게 하는 장부
+                    let mut fully_masked_candidates = std::collections::HashSet::new();
 
-                    // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다. (Phase 2 동적 펌핑 지원)
+                    // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
                     while p_idx < valid_targets.len() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
                         
@@ -1297,45 +1283,36 @@ async fn process_task(
                                             let bias_emb_vec = model.get_embedding(b_bias.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                             let prej_emb_vec = model.get_embedding(b_prej.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
 
-                                            let mut passed_lines: Vec<String> = Vec::new();
-                                            let mut best_score = -1.0;
-
                                             for (i, line_text) in lines.iter().enumerate() {
                                                 let line_emb = model.get_embedding(line_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                                 let b_score = cosine_similarity(&line_emb, &bias_emb_vec);
                                                 let p_score = cosine_similarity(&line_emb, &prej_emb_vec);
                                                 let score = b_score - (p_score * 0.3);
-                                                if score > best_score { best_score = score; }
+                                                
                                                 if score >= 0.10 {
-                                                    passed_lines.push(lines[i].clone());
-                                                }
-                                            }
+                                                    emit_term(&format!("[EXTRACTION] ✅ Phase 2 Vector matched for {} in line {}", c_name_desc, i));
+                                                    let specific_line = lines[i].clone();
 
-                                            if !passed_lines.is_empty() {
-                                                emit_term(&format!("[EXTRACTION] ✅ Phase 2 Vector matched for {} (최고 점수: {:.4})", c_name_desc, best_score));
-                                                target_matched_lines.insert(c_name_target.clone(), passed_lines.clone());
-                                                
-                                                let bias_keywords: Vec<&str> = b_bias.split(',')
-                                                    .map(|s| s.trim())
-                                                    .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
-                                                    .collect();
-                                                
-                                                for keyword in bias_keywords {
-                                                    let split_target_name = format!("{}_{}", c_name_target, keyword);
-                                                    let split_target_desc = format!("{} associated with '{}'", c_name_desc, keyword);
-
-                                                    target_matched_lines.insert(split_target_name.clone(), passed_lines.clone());
+                                                    let bias_keywords: Vec<&str> = b_bias.split(',')
+                                                        .map(|s| s.trim())
+                                                        .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
+                                                        .collect();
                                                     
-                                                    // valid_targets에 Phase 2 타겟 append!
-                                                    valid_targets.push((
-                                                        split_target_name,
-                                                        c_name_target.clone(), // 🌟 Phase 2에서는 이것을 덮어씀 (ex: 레알 마드리드_korean_name)
-                                                        split_target_desc,
-                                                        keyword.to_string(),
-                                                        b_prej.to_string(),
-                                                        true, // 🌟 Phase 2 플래그!
-                                                        Vec::new() // 🌟 Phase 2는 LLM이 찾도록 빈 단서 전달
-                                                    ));
+                                                    for keyword in bias_keywords {
+                                                        let split_target_name = format!("{}_{}", c_name_target, keyword);
+                                                        let split_target_desc = format!("{} associated with '{}'", c_name_desc, keyword);
+
+                                                        valid_targets.push((
+                                                            split_target_name,
+                                                            c_name_target.clone(), // 🌟 Phase 2에서는 이것을 덮어씀
+                                                            split_target_desc,
+                                                            keyword.to_string(),
+                                                            b_prej.to_string(),
+                                                            true, // 🌟 Phase 2 플래그!
+                                                            specific_line.clone(),
+                                                            String::new() // 🌟 Phase 2는 LLM이 찾도록 단서를 비워둠
+                                                        ));
+                                                    }
                                                 }
                                             }
                                         }
@@ -1346,20 +1323,22 @@ async fn process_task(
 
                         // 만약 valid_targets.len()을 넘어섰다면 진짜 끝
                         if p_idx >= valid_targets.len() { break; }
-                        let (target_name, base_target, target_item, target_bias, target_prejudice, is_phase2, vector_candidates) = valid_targets[p_idx].clone();
+                        let (target_name, base_target, target_item, target_bias, target_prejudice, is_phase2, specific_line, specific_candidate) = valid_targets[p_idx].clone();
                         p_idx += 1;
+
+                        // 🌟 [추가] 이미 다른 동의어 트랙에서 마스킹을 마친 후보(specific_candidate)인지 확인하고 건너뜁니다 (접근법 A)
+                        if !specific_candidate.is_empty() && fully_masked_candidates.contains(&specific_candidate) {
+                            emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 마스킹 완료된 타겟입니다. 스킵합니다: '{}'", specific_candidate));
+                            continue;
+                        }
                         
-                        // 🌟 [추가] 현재 찾고 있는 타겟과 일치하는 값들만 모아 CoT 프롬프트에 주입할 배열
                         let mut current_target_found: Vec<String> = Vec::new();
-                        let mut ignore_list: Vec<String> = Vec::new(); // 🌟 추가: 본문에 존재하지 않는 잘못된 추출값 기록
-                        let mut localized_guide_str = String::new(); // 🌟 [추가] 검증 단계에서 실패한 외래어 가이드 축적
+                        let mut ignore_list: Vec<String> = Vec::new();
+                        let mut localized_guide_str = String::new();
                         
-                        // 🌟 [CRITICAL FIX] LLM이 임시 마커를 엔티티로 착각하고 뱉는 환각을 Logit 단계에서 원천 압살합니다!
-                        ignore_list.push(format!("___{}_", task_marker_hash));
-                        ignore_list.push(format!("_{}_", task_marker_hash));
-                        ignore_list.push(task_marker_hash.to_string());
+                        ignore_list.push("[___REDACTED_".to_string());
+                        ignore_list.push("REDACTED".to_string());
                         
-                        // 🌟 [해결책 1 적용] 이전에 찾은 값 중, 현재 타겟과 "다른" 도메인의 값들은 무조건 ignore_list에 넣어 Logit을 차단!
                         for (history_target, history_val) in &domain_history {
                             if *history_target != target_name {
                                 ignore_list.push(history_val.clone());
@@ -1369,22 +1348,16 @@ async fn process_task(
                             }
                         }
 
-                        let mut miss_counter = 0; // 🌟 추가: 무한 루프 방지 카운터
-                        let mut item_extract_count = 0; // 🌟 [추가] 각 항목별 최대 추출 횟수 제한 카운터
-                        let mut current_temperature: f64 = 0.0; // 🌟 [추가] LLM이 환각을 뱉을 때마다 창의성을 높여 빠져나오게 만드는 동적 온도 변수
-                        // let mut empty_count = 0; // 🌟 [추가] 빈 값 반환 횟수 추적
-                        let mut value_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new(); // 🌟 [추가] 동일한 오탐지 값 반복 횟수 추적
+                        let mut miss_counter = 0;
+                        let mut item_extract_count = 0;
+                        let mut current_temperature: f64 = 0.0;
+                        let mut value_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
                         
                         // 🌟 [CRITICAL FIX] Qwen3에게 전체 문서(masked_text)를 주지 않고, 
-                        // 앞서 벡터 유사도로 0.10점을 넘긴(통과한) PUG 라인들만 묶어서 제공합니다!
-                        let matched_lines = target_matched_lines.get(&target_name).cloned().unwrap_or_default();
-                        let mut matched_context = matched_lines.join("\n");
+                        // 앞서 벡터 유사도로 0.10점을 넘긴(통과한) 정확히 PUG 한 줄만 제공합니다!
+                        let mut matched_context = specific_line.clone();
 
-                        // 🌟 [CRITICAL FIX] 이전 항목(target)에서 추출하여 치환해둔 마커를 이번 컨텍스트에도 강제로 적용합니다. 
-                        // 이를 통해 Qwen3가 동일한 값을 중복 추출하거나 혼동하는 현상을 완벽히 차단합니다.
                         for (original_val, marker) in &replacement_history {
-                            // 🌟 [Phase 2 오버랩 방어] Phase 2의 name/username 타겟은 원본 텍스트를 봐야 하므로 
-                            // 이미 치환된 마커(NAME, USERNAME)를 덮어쓰지 않고 건너뜁니다!
                             if is_phase2 {
                                 if let Some(final_repl) = skip_map.get(marker) {
                                     if final_repl.contains("NAME:") || final_repl.contains("USERNAME:") {
@@ -1403,32 +1376,23 @@ async fn process_task(
                                 break;
                             }
 
-                            // 🌟 [CRITICAL FIX] Qwen3가 추출할 때는 `masked_text` 전체가 아닌, 압축된 `matched_context`만 줍니다.
-                            // 이를 통해 불필요한 컨텍스트 토큰 소모를 방지하고 환각을 차단합니다.
-                            
-                            // 🌟 [Direction B 적용] 지금까지 찾은 추출값들을 모아서 프롬프트에 샘플로 전달합니다.
-                            // 🌟 [해결책 1 적용] 전체 history가 아닌 현재 타겟과 "동일한 도메인"에서 찾은 값만 CoT 프롬프트에 제공
                             let already_found_str = if current_target_found.is_empty() {
                                 "".to_string()
                             } else {
                                 current_target_found.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
                             };
 
-                            // 🌟 [신규 추가] 매칭에 실패한 값(환각/오탐지 등)을 not_found 로 전달하여 LLM이 동일 실수를 반복하지 않도록 유도합니다.
                             let not_found_str = if ignore_list.is_empty() {
                                 "".to_string()
                             } else {
                                 ignore_list.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
                             };
 
-                            // 🌟 [신규 추가] Vector가 찾아낸 후보 단서들을 콤마로 연결하여 전달
-                            let candidates_str = if vector_candidates.is_empty() {
+                            // 🌟 [신규 추가] Vector가 찾아낸 1개의 후보 단서를 전달
+                            let candidates_str = if specific_candidate.is_empty() {
                                 "".to_string()
                             } else {
-                                let mut unique_cands = vector_candidates.clone();
-                                unique_cands.sort();
-                                unique_cands.dedup();
-                                unique_cands.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
+                                format!("\"{}\"", specific_candidate.replace("\"", "\\\""))
                             };
 
                             let mut current_lang = target_name.split('_').next().unwrap_or("english");
@@ -1436,7 +1400,6 @@ async fn process_task(
                                 current_lang = detected_languages_vec.first().map(|s| s.as_str()).unwrap_or("english");
                             }
                             
-                            // 🌟 [CRITICAL FIX] 검증 에이전트(Stage 2)에게 전달할 분리된 힌트 문구를 가져옵니다.
                             let current_verb_hint = bias_json.get("verb")
                                 .and_then(|v| v.get("bias"))
                                 .and_then(|v| v.get(current_lang))
@@ -1449,85 +1412,20 @@ async fn process_task(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("idiom, phrase");
 
-                            // 🌟 [CRITICAL FIX] LLM에게는 링크, 메타데이터 해시 마커를 모두 공백으로 치환한 순도 100%의 깨끗한 문맥만 제공합니다.
                             let mut clean_matched_context = matched_context.clone();
-                            if let Ok(marker_re) = regex::Regex::new(&format!(r"__(LINK|NOISE)_{}_\d+__", task_marker_hash)) {
+                            if let Ok(marker_re) = regex::Regex::new(r"\[___REDACTED_(LINK|NOISE)_\d+___\]") {
                                 clean_matched_context = marker_re.replace_all(&clean_matched_context, " ").to_string();
                             }
 
-                            // 🌟 [STAGE 1] 사전 검증 에이전트 호출 (문서 프로파일링)
-                            let (v_system, v_user) = crate::parsing::build_verification_prompt(&clean_matched_context, &target_item, current_lang, current_verb_hint, current_expr_hint);
-                            let cancel_clone_v = cancellation_token.clone();
-                            
-                            let res_verify = if is_large_context {
-                                let gen_arc = model.generator.clone();
-                                let mut gen_guard = gen_arc.lock().await;
-                                if let Some(gen) = gen_guard.as_mut() {
-                                    let params = crate::openai_types::ChatCompletionParameters {
-                                        messages: vec![
-                                            crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
-                                                content: v_system,
-                                                name: None,
-                                            }),
-                                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user),
-                                                name: None,
-                                            })
-                                        ],
-                                        model: "qwen".to_string(), max_tokens: Some(256), temperature: Some(0.1), top_p: Some(0.1),
-                                        ..Default::default()
-                                    };
-                                    gen.clear_kv_cache();
-                                    let res = gen.generate(params, Some(cancel_clone_v), None, None, None).await.unwrap_or("{}".to_string());
-                                    gen.clear_kv_cache();
-                                    res
-                                } else { "{}".to_string() }
+                            // 🌟 [CRITICAL FIX] NMS 값(specific_candidate)이 바로 input_keyword 로 할당됩니다.
+                            let input_keyword = if specific_candidate.is_empty() {
+                                target_bias.clone()
                             } else {
-                                let gen_arc = model.qwen3_generator.clone();
-                                tokio::task::spawn_blocking(move || -> String {
-                                    let mut gen_guard = gen_arc.blocking_lock();
-                                    if let Some(gen) = gen_guard.as_mut() {
-                                        let params = crate::openai_types::ChatCompletionParameters {
-                                            messages: vec![
-                                                crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
-                                                    content: v_system,
-                                                    name: None,
-                                                }),
-                                                crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                                                    content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user),
-                                                    name: None,
-                                                })
-                                            ],
-                                            model: "qwen3".to_string(), max_tokens: Some(256), temperature: Some(0.1), top_p: Some(0.1),
-                                            ..Default::default()
-                                        };
-                                        gen.clear_kv_cache();
-                                        let res = gen.generate(params, Some(cancel_clone_v), None, None).unwrap_or("{}".to_string());
-                                        gen.clear_kv_cache();
-                                        res
-                                    } else { "{}".to_string() }
-                                }).await.unwrap_or("{}".to_string())
+                                specific_candidate.clone()
                             };
-                            
-                            if !model.is_cpu_mode {
-                                let dev = model.device_config.device.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    if dev.is_cuda() { let _ = dev.synchronize(); }
-                                }).await;
-                            }
 
-                            // 검증 결과를 추출 에이전트에게 힌트로 전달하기 위한 문자열 변환
-                            let verification_hint_str = res_verify.trim().to_string();
+                            let (mut system_prompt, user_prompt) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, &local_language, &localized_guide_str, &input_keyword);
                             
-                            emit_term(&format!("\n======================================="));
-                            emit_term(&format!("[DEBUG-VERIFY] 🎯 사전 검증 에이전트 채점 결과 (문서 프로파일링) 🎯"));
-                            emit_term(&format!("- 성향 지표 JSON: {}", verification_hint_str));
-                            emit_term(&format!("=======================================\n"));
-
-                            // 🌟 [STAGE 2] 추출 에이전트 호출 (사전 검증 힌트 주입)
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, &local_language, &localized_guide_str, &verification_hint_str);
-                            
-                            // 🌟 [수정] ModelSize::Qwen3 전용 추론 및 스피너 로직 적용
                             let payload = json!({ 
                                 "task_id": task.id.clone(),
                                 "category": format!("Masking ({}/{}) - Type {}", idx + 1, total, p_idx + 1), 
@@ -1542,7 +1440,6 @@ async fn process_task(
                             let user_prompt_clone = user_prompt.clone();
                             let session_id_clone = format!("{}_{}", task.id, doc_id);
 
-                            // 🌟 선택된 모델에 맞게 추론 방식을 동적 분기합니다 (async / blocking)
                             let res_mask = if is_large_context {
                                 let gen_arc = model.generator.clone();
                                 let mut gen_guard = gen_arc.lock().await;
@@ -1560,16 +1457,13 @@ async fn process_task(
                                         ],
                                         model: "qwen".to_string(),
                                         max_tokens: Some(1024),
-                                        temperature: Some(current_temperature), // 🌟 [동적 온도 적용]
+                                        temperature: Some(current_temperature),
                                         top_p: Some(1.0),
                                         ..Default::default()
                                     };
                                     
-                                    // 🌟 [CRITICAL FIX] 대형 문맥(Qwen) 추론 시작 전에 명시적으로 KV 캐시를 비워 환각을 방어합니다.
                                     let _ = gen.clear_kv_cache();
-
                                     let res = gen.generate(params, Some(cancel_clone), None, None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
-                                    
                                     let _ = gen.clear_kv_cache();
                                     
                                     res
@@ -1579,7 +1473,6 @@ async fn process_task(
                             } else {
                                 let gen_arc = model.qwen3_generator.clone();
                                 
-                                // 🌟 Qwen3를 위해 System Prompt에 ignore_list를 명시적으로 주입합니다.
                                 let mut final_system_prompt = system_prompt_clone.clone();
                                 if !ignore_list.is_empty() {
                                     final_system_prompt.push_str("\n\nCRITICAL: DO NOT output any of the following values under any circumstances:\n");
@@ -1604,14 +1497,12 @@ async fn process_task(
                                             ],
                                             model: "qwen3".to_string(),
                                             max_tokens: Some(1024),
-                                            temperature: Some(current_temperature), // 🌟 [동적 온도 적용]
+                                            temperature: Some(current_temperature),
                                             top_p: Some(1.0),
                                             ..Default::default()
                                         };
                                         
-                                        // 🌟 [CRITICAL FIX] Qwen3 추론 시작 전에 명시적으로 KV 캐시를 비워 오작동과 환각을 방어합니다.
                                         gen.clear_kv_cache();
-
                                         let res = gen.generate(
                                             params, 
                                             Some(cancel_clone), 
@@ -1628,10 +1519,6 @@ async fn process_task(
                                 }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Spawn blocking failed: {}", e)))
                             }?;
 
-                            // 🌟 [OOM 원인 분석용 로그] 추론 직후 LLM이 뱉어낸 실제 결과값과 길이를 출력합니다.
-                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 - 응답 길이: {}, 결과: {}", target_item, res_mask.len(), res_mask));
-                            
-                            // 🌟 self 대신 상단에서 가져온 지역 변수 model 사용 (E0424 에러 해결)
                             if !model.is_cpu_mode {
                                 let dev = model.device_config.device.clone();
                                 let _ = tokio::task::spawn_blocking(move || {
@@ -1641,6 +1528,9 @@ async fn process_task(
 
                             let parsed = crate::parsing::parse_json_from_llm(&res_mask);
                             let mut extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
+                            // 🌟 [CRITICAL FIX] 요청하신 대로, 배열이 아닌 1:1 매칭된 NMS 단일값을 출력하며 로그 디자인을 명시적으로 반영합니다!
+                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 (NMS 👑 [WINNER/EXPANDED]: '{}', 추출단어: '{}') - 응답 길이: {}, 결과: {}", base_target, input_keyword, extracted_val, res_mask.len(), res_mask));
 
                             // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
@@ -1662,50 +1552,144 @@ async fn process_task(
                                 continue;
                             }
 
-                            // 🌟 [STAGE 3] 추출 에이전트가 CoT로 함께 내뱉은 속성을 파싱하여 환각 여부 즉시 판단 (추가 모델 호출 없음)
-                            let verb_key = format!("{}_verb_score", current_lang);
-                            let expr_key = format!("{}_expression_score", current_lang);
-                            let mut verb_score = parsed.get(&verb_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let mut expr_score = parsed.get(&expr_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            // 🌟 [STAGE 3] 추출 단어 다국어 순차 검증 (Sequential CoT Evaluation with Early Exit)
                             let is_mismatch = parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
-                            
-                            let is_native = parsed.get("is_native").and_then(|v| v.as_bool()).unwrap_or(true);
-                            let mut is_localized_word = parsed.get("is_localized").and_then(|v| v.as_bool()).unwrap_or(false);
-                            
-                            // 🌟 is_native가 false면 무조건 is_localized_word를 true로 강제 반영
-                            if !is_native {
-                                is_localized_word = true;
-                            }
 
                             emit_term(&format!("\n======================================="));
-                            emit_term(&format!("[DEBUG-EXTRACTION-CoT] 🎯 추출 단어 자가 검증(CoT) 결과 🎯"));
+                            emit_term(&format!("[DEBUG-EXTRACTION-STAGE3] 🎯 추출 단어 다국어 순차 검증 시작 🎯"));
                             emit_term(&format!("- 추출 단어: '{}'", extracted_val));
-                            emit_term(&format!("- {}: {}", verb_key, verb_score));
-                            emit_term(&format!("- {}: {}", expr_key, expr_score));
                             emit_term(&format!("- is_target_mismatch: {}", is_mismatch));
-                            emit_term(&format!("- is_native: {}", is_native));
-                            emit_term(&format!("- is_localized_word: {}", is_localized_word));
                             emit_term(&format!("=======================================\n"));
 
-                            // 🌟 [외래어 쉴드] 외래어/고유명사로 판별되었고, 물리적 제한(길이 등)을 통과하면 서술어 점수를 1.0으로 강제 보정 (Bypass Penalty)
-                            let word_count_check = extracted_val.split_whitespace().count();
-                            let has_marker_check = extracted_val.contains(&format!("___{}_", task_marker_hash)) || extracted_val.contains(&task_marker_hash.to_string());
+                            let mut is_hallucination = false;
                             
-                            if is_localized_word && word_count_check <= 5 && !has_marker_check {
-                                emit_term(&format!("[DEBUG-EXTRACTION-CoT] 🚀 외래어/고유명사 감지됨. 서술어/표현 점수를 1.0으로 강제 보정하여 무사 통과시킵니다."));
-                                verb_score = 1.0;
-                                expr_score = 1.0;
+                            if is_mismatch {
+                                emit_term(&format!("    💀 [REJECT] 타겟 미스매치 (is_target_mismatch=true)"));
+                                is_hallucination = true;
+                            } else {
+                                // 🌟 다국어 순환하며 Early Exit (하나라도 7.0 넘으면 즉시 차단)
+                                for lang in &detected_languages_vec {
+                                    if cancellation_token.load(Ordering::Relaxed) { break; }
+
+                                    let verb_hint = bias_json.get("verb").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Does the word represent an action, state, or predicate (e.g., ends with a verb conjugation)?");
+                                    let expr_hint = bias_json.get("expression").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Is it an idiom, conversational phrase, or full sentence?");
+
+                                    // --- 1. Verb Score Check ---
+                                    let (v_sys, v_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, "verb, predicate", verb_hint);
+                                    let cancel_clone_v = cancellation_token.clone();
+                                    
+                                    let v_res = if is_large_context {
+                                        let gen_arc = model.generator.clone();
+                                        let mut gen_guard = gen_arc.lock().await;
+                                        if let Some(gen) = gen_guard.as_mut() {
+                                            let params = crate::openai_types::ChatCompletionParameters {
+                                                messages: vec![
+                                                    crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: v_sys, name: None }),
+                                                    crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user), name: None })
+                                                ],
+                                                model: "qwen".to_string(), max_tokens: Some(64), temperature: Some(0.1), top_p: Some(0.1), ..Default::default()
+                                            };
+                                            gen.clear_kv_cache();
+                                            let res = gen.generate(params, Some(cancel_clone_v), None, None, None).await.unwrap_or("{}".to_string());
+                                            gen.clear_kv_cache();
+                                            res
+                                        } else { "{}".to_string() }
+                                    } else {
+                                        let gen_arc = model.qwen3_generator.clone();
+                                        tokio::task::spawn_blocking(move || -> String {
+                                            let mut gen_guard = gen_arc.blocking_lock();
+                                            if let Some(gen) = gen_guard.as_mut() {
+                                                let params = crate::openai_types::ChatCompletionParameters {
+                                                    messages: vec![
+                                                        crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: v_sys, name: None }),
+                                                        crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user), name: None })
+                                                    ],
+                                                    model: "qwen3".to_string(), max_tokens: Some(64), temperature: Some(0.1), top_p: Some(0.1), ..Default::default()
+                                                };
+                                                gen.clear_kv_cache();
+                                                let res = gen.generate(params, Some(cancel_clone_v), None, None).unwrap_or("{}".to_string());
+                                                gen.clear_kv_cache();
+                                                res
+                                            } else { "{}".to_string() }
+                                        }).await.unwrap_or("{}".to_string())
+                                    };
+
+                                    if !model.is_cpu_mode {
+                                        let dev = model.device_config.device.clone();
+                                        let _ = tokio::task::spawn_blocking(move || { if dev.is_cuda() { let _ = dev.synchronize(); } }).await;
+                                    }
+
+                                    let v_json = crate::parsing::parse_json_from_llm(&v_res);
+                                    let verb_score = v_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    
+                                    emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {}", lang, verb_score));
+                                    if verb_score >= 7.0 {
+                                        emit_term(&format!("    💀 [REJECT] {} Verb Score 초과 (Early Exit)", lang));
+                                        is_hallucination = true;
+                                        break;
+                                    }
+
+                                    // --- 2. Expression Score Check ---
+                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, "idiom, phrase, full sentence", expr_hint);
+                                    let cancel_clone_e = cancellation_token.clone();
+                                    
+                                    let e_res = if is_large_context {
+                                        let gen_arc = model.generator.clone();
+                                        let mut gen_guard = gen_arc.lock().await;
+                                        if let Some(gen) = gen_guard.as_mut() {
+                                            let params = crate::openai_types::ChatCompletionParameters {
+                                                messages: vec![
+                                                    crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: e_sys, name: None }),
+                                                    crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(e_user), name: None })
+                                                ],
+                                                model: "qwen".to_string(), max_tokens: Some(64), temperature: Some(0.1), top_p: Some(0.1), ..Default::default()
+                                            };
+                                            gen.clear_kv_cache();
+                                            let res = gen.generate(params, Some(cancel_clone_e), None, None, None).await.unwrap_or("{}".to_string());
+                                            gen.clear_kv_cache();
+                                            res
+                                        } else { "{}".to_string() }
+                                    } else {
+                                        let gen_arc = model.qwen3_generator.clone();
+                                        tokio::task::spawn_blocking(move || -> String {
+                                            let mut gen_guard = gen_arc.blocking_lock();
+                                            if let Some(gen) = gen_guard.as_mut() {
+                                                let params = crate::openai_types::ChatCompletionParameters {
+                                                    messages: vec![
+                                                        crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: e_sys, name: None }),
+                                                        crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(e_user), name: None })
+                                                    ],
+                                                    model: "qwen3".to_string(), max_tokens: Some(64), temperature: Some(0.1), top_p: Some(0.1), ..Default::default()
+                                                };
+                                                gen.clear_kv_cache();
+                                                let res = gen.generate(params, Some(cancel_clone_e), None, None).unwrap_or("{}".to_string());
+                                                gen.clear_kv_cache();
+                                                res
+                                            } else { "{}".to_string() }
+                                        }).await.unwrap_or("{}".to_string())
+                                    };
+
+                                    if !model.is_cpu_mode {
+                                        let dev = model.device_config.device.clone();
+                                        let _ = tokio::task::spawn_blocking(move || { if dev.is_cuda() { let _ = dev.synchronize(); } }).await;
+                                    }
+
+                                    let e_json = crate::parsing::parse_json_from_llm(&e_res);
+                                    let expr_score = e_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    
+                                    emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {}", lang, expr_score));
+                                    if expr_score >= 7.0 {
+                                        emit_term(&format!("    💀 [REJECT] {} Expr Score 초과 (Early Exit)", lang));
+                                        is_hallucination = true;
+                                        break;
+                                    }
+                                }
                             }
 
-                            // 🌟 [CRITICAL FIX] 서술어 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.
-                            if verb_score >= 7.0 || expr_score >= 7.0 || is_mismatch {
+                            // 🌟 [CRITICAL FIX] 서술어/표현 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.
+                            if is_hallucination {
                                 miss_counter += 1;
                                 current_temperature += 0.2; // 🌟 환각이므로 온도를 올려 변형 유도
-                                
-                                // 🌟 [피드백 루프] 외래어지만 다른 이유(mismatch 등)로 기각되었을 경우 다음 재시도(continue) 시 가이드에 누적 반영
-                                if is_localized_word {
-                                    localized_guide_str = format!("The word '{}' was identified as a localized word. Please reconsider the extraction carefully.", extracted_val);
-                                }
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
@@ -1731,7 +1715,7 @@ async fn process_task(
                             let exists_in_desc = doc_desc.contains(&extracted_val);
 
                             // 🌟 [CRITICAL FIX] 추출된 값이 임시 마커(해시 기반)를 포함하고 있다면 무조건 환각으로 간주하고 강제 차단합니다.
-                            if extracted_val.contains(&format!("___{}_", task_marker_hash)) || extracted_val.contains(&task_marker_hash.to_string()) {
+                            if extracted_val.contains("[___REDACTED_") {
                                 miss_counter += 1;
                                 current_temperature += 0.2; // 🌟 온도 상승
                                 
@@ -1755,8 +1739,13 @@ async fn process_task(
                                 // 길이가 2글자 이상인 경우에 한해서 부분 일치 검사 (너무 짧은 단어 오작동 방지)
                                 if orig.chars().count() >= 2 && extracted_val.chars().count() >= 2 {
                                     if extracted_val.contains(orig) || orig.contains(&extracted_val) {
-                                        is_derivative = true;
-                                        break;
+                                        // 🌟 [CRITICAL FIX] 본문(masked_text)에 해당 파생어가 마커에 종속되지 않고 독립적으로 살아있다면 허용합니다.
+                                        if masked_text.contains(&extracted_val) {
+                                            emit_term(&format!("[DEBUG] 파생어 '{}'가 본문에 독립적으로 존재하여 마스킹을 허용합니다. (원본: '{}')", extracted_val, orig));
+                                        } else {
+                                            is_derivative = true;
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -1949,7 +1938,7 @@ async fn process_task(
                                     let mnemonic = crate::parsing::generate_mnemonic();
                                     let upper_key = base_target.to_uppercase(); 
                                     let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                                    let skip_marker = format!("___{}_{}___", task_marker_hash, skip_counter);
+                                    let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                                     
                                     masked_text = masked_text.replace(&text_val, &skip_marker);
                                     doc_title = doc_title.replace(&text_val, &skip_marker);
@@ -1985,6 +1974,8 @@ async fn process_task(
                                     current_temperature = 0.0;
                                     item_extract_count += 1;
                                     
+                                    fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 완료된 후보 장부 등록
+
                                     // 🌟 [CRITICAL FIX] 마스킹 성공 시 무한 루프를 방지하고 다음 트랙으로 넘어가기 위해 break를 호출합니다.
                                     emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (부분 치환). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
                                     break;
@@ -2043,6 +2034,8 @@ async fn process_task(
                                     
                                     current_target_found.push(extracted_val.clone());
                                     domain_history.push((target_name.to_string(), extracted_val.clone()));
+                                    
+                                    fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 완료된 후보 장부 등록
 
                                     // 🌟 [CRITICAL FIX] 성공적으로 덮어썼으므로 루프를 종료하고 다음 트랙으로 넘어갑니다.
                                     emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (Phase 2 병합). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
@@ -2055,7 +2048,7 @@ async fn process_task(
                             let upper_key = base_target.to_uppercase(); 
                             
                             let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                            let skip_marker = format!("___{}_{}___", task_marker_hash, skip_counter);
+                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                             
                             // 🌟 [Subsumption 2단계] 추출된 거대 덩어리 내부에 이미 치환된 소형 마커가 존재하는지 확인하고, 
                             // 현재 masked_text에 반영된 형태(Hybrid)를 역산하여 덮어쓸 준비를 합니다.
@@ -2133,6 +2126,8 @@ async fn process_task(
                                 "mnemonic": mnemonic
                             }));
                             
+                            fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 완료된 후보 장부 등록
+
                             // 🌟 [CRITICAL FIX] 정상적으로 마스킹을 성공했으므로 무한 루프(continue)를 돌지 않고 즉시 탈출(break)하여 다음 트랙으로 이동합니다.
                             emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (전체 치환). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
                             break;
@@ -2141,7 +2136,7 @@ async fn process_task(
 
                     // 🌟 [추가] 모든 추론이 끝난 후 임시 해시 마커를 실제 니모닉으로 일괄 변환합니다.
                     for i in 0..skip_counter {
-                        let marker = format!("___{}_{}___", task_marker_hash, i);
+                        let marker = format!("[___REDACTED_{}___]", i);
                         if let Some(final_repl) = skip_map.get(&marker) {
                             masked_text = masked_text.replace(&marker, final_repl);
                             doc_title = doc_title.replace(&marker, final_repl);
@@ -2151,13 +2146,13 @@ async fn process_task(
 
                     // 🌟 [CRITICAL FIX] 마스킹이 모두 끝난 후, 외부 장부에 보관했던 메타데이터 노이즈, 링크를 정확한 포지션에 복원합니다.
                     // 마커 양옆에 주입했던 공백도 깔끔하게 제거하여 원본의 접착 상태(Glued)를 완벽히 복구합니다.
-                    if let Ok(noise_re) = regex::Regex::new(&format!(r"\s*(__NOISE_{}_\d+__)\s*", task_marker_hash)) {
+                    if let Ok(noise_re) = regex::Regex::new(r"\s*(\[___REDACTED_NOISE_\d+___\])\s*") {
                         masked_text = noise_re.replace_all(&masked_text, |caps: &regex::Captures| { noise_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
                         doc_title = noise_re.replace_all(&doc_title, |caps: &regex::Captures| { noise_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
                         doc_desc = noise_re.replace_all(&doc_desc, |caps: &regex::Captures| { noise_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
                     }
 
-                    if let Ok(link_re) = regex::Regex::new(&format!(r"\s*(__LINK_{}_\d+__)\s*", task_marker_hash)) {
+                    if let Ok(link_re) = regex::Regex::new(r"\s*(\[___REDACTED_LINK_\d+___\])\s*") {
                         masked_text = link_re.replace_all(&masked_text, |caps: &regex::Captures| { link_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
                         doc_title = link_re.replace_all(&doc_title, |caps: &regex::Captures| { link_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
                         doc_desc = link_re.replace_all(&doc_desc, |caps: &regex::Captures| { link_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();

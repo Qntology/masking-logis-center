@@ -48,6 +48,13 @@
   },
   "verb": {
     "semantic": "verbs, predicates, action words",
+    "hints": {
+      "korean": "단어가 '~다', '~요', '~까', '~지' 등의 종결 어미로 끝나거나, '~하는', '~된', '~할' 같은 관형사형 어미를 포함하여 동작이나 상태를 서술하는가?",
+      "english": "'is, are, was, were'와 같은 Be동사가 포함되어 있거나, '-ing', '-ed', '-s' 형태의 동작이나 상태를 나타내는 동사구인가?",
+      "japanese": "단어가 '~ます', '~です', '~る', '~た', '~ない' 형태로 끝나며 동작이나 상태を 서술하는가?",
+      "chinese": "단어가 동작을 나타내는 동사(예: 是, 有, 做, 吃)이거나 서술어 역할을 하는가?",
+      "default": "Does the word represent an action, state, or predicate (e.g., ends with a verb conjugation)?"
+    },
     "bias": {
       "albanian": "folje, kallëzues",
       "arabic": "فعل, مسند",
@@ -106,6 +113,13 @@
   },
   "expression": {
     "semantic": "idiomatic expressions, meaningless context without entities, conversational phrases",
+    "hints": {
+      "korean": "문장 전체가 완벽한 문장 구조(주어+서술어)를 띠거나, 대화체, 감탄사, 관용구 등으로 이루어져 있는가?",
+      "english": "Is the text a complete sentence with subject and verb, or a conversational phrase/idiom rather than a simple noun entity?",
+      "japanese": "完全な文章(主語+述語)であるか、会話表現、感嘆詞、慣用句などの表現が含まれているか？",
+      "chinese": "句子是否结构完整（包含主语和谓语），或者是否包含口语表达、感叹词、习语等？",
+      "default": "Is it a complete sentence, an idiom, or a conversational phrase rather than a pure noun entity?"
+    },
     "bias": {
       "albanian": "idiomë, frazë",
       "arabic": "مصطلح, عبارة",
