@@ -1380,7 +1380,7 @@ async fn process_task(
                         loop {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
                             
-                            if current_temperature > 0.8 {
+                            if current_temperature > 0.6 {
                                 emit_term(&format!("[EXTRACTION] 🛑 온도 1.0 도달. {} 항목 종료.", target_item));
                                 break;
                             }
@@ -1548,7 +1548,7 @@ async fn process_task(
 
                                 emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
                                 
-                                if current_temperature >= 0.8 {
+                                if current_temperature > 0.6 {
                                     emit_term(&format!("[EXTRACTION] 🛑 온도 1.0 도달로 강제 종료."));
                                     break;
                                 }
@@ -1639,7 +1639,7 @@ async fn process_task(
                                     ignore_list.push(format!("\"{}", extracted_val));
                                 }
                                 
-                                if current_temperature >= 0.8 || *count >= 3 {
+                                if current_temperature > 0.6 || *count >= 3 {
                                     emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값 3회 누적 또는 온도 1.0 도달로 강제 종료."));
                                     break;
                                 }
@@ -1679,7 +1679,7 @@ async fn process_task(
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
                                 
-                                if current_temperature >= 0.8 || *count >= 3 {
+                                if current_temperature > 0.6 || *count >= 3 {
                                     emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값 3회 누적 또는 온도 1.0 도달로 강제 종료."));
                                     break;
                                 }
@@ -1865,7 +1865,7 @@ async fn process_task(
                                 
                                 emit_term(&format!("[DEBUG] 검증 탈락 감지됨. 환각으로 간주하여 강제 기각 (재시도 {}): '{}'", miss_counter, extracted_val));
                                 
-                                if current_temperature >= 0.8 || *count >= 3 {
+                                if current_temperature > 0.6 || *count >= 3 {
                                     emit_term(&format!("[EXTRACTION] 🛑 동일한 검증 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
                                     break;
                                 }
@@ -1895,7 +1895,7 @@ async fn process_task(
                                 
                                 emit_term(&format!("[DEBUG] 임시 마커 추출 시도 감지, 강제 차단 (재시도 {} - 무한): '{}' (현재 온도: {:.2}, 동일값: {}회)", miss_counter, extracted_val, current_temperature, count));
                                 
-                                if current_temperature >= 0.8 || *count >= 3 {
+                                if current_temperature > 0.6 || *count >= 3 {
                                     emit_term(&format!("[EXTRACTION] 🛑 동일한 마커 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
                                     break;
                                 }
@@ -1948,7 +1948,7 @@ async fn process_task(
                                 
                                 emit_term(&format!("[DEBUG] 과잉 추출 감지 (어절: {}, 글자수: {}), 강제 차단: '{}'", word_count, char_count, extracted_val));
                                 
-                                if current_temperature >= 0.8 || *count >= 3 {
+                                if current_temperature > 0.6 || *count >= 3 {
                                     emit_term(&format!("[EXTRACTION] 🛑 과잉 추출 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
                                     break;
                                 }
@@ -1999,7 +1999,7 @@ async fn process_task(
 
                                 emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
                                 
-                                if current_temperature > 0.8 {
+                                if current_temperature > 0.6 {
                                     emit_term(&format!("[EXTRACTION] 🛑 온도 1.0 도달로 강제 종료."));
                                     break;
                                 }
@@ -2027,7 +2027,7 @@ async fn process_task(
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
 
-                                if current_temperature > 0.8 {
+                                if current_temperature > 0.6 {
                                     emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값({}회) 누적 또는 온도 {:.2} 도달로 강제 종료.", count, current_temperature));
                                     break;
                                 }
