@@ -1567,11 +1567,10 @@ async fn process_task(
                                 emit_term(&format!("    💀 [REJECT] 타겟 미스매치 (is_target_mismatch=true)"));
                                 is_hallucination = true;
                             } else {
-                                // 🌟 [추가] 모든 검증 점수가 정확히 1.0인지 추적하는 상태 변수 선언
-                                let mut all_scores_are_one = true;
-                                let mut score_checked = false;
+                                // 🌟 다국어 전체를 순회하며 모두 0점을 초과할 때만 할루시네이션으로 판단
+                                let mut hallucination_count = 0;
+                                let total_langs = detected_languages_vec.len();
 
-                                // 🌟 다국어 순환하며 Early Exit (하나라도 7.0 넘으면 즉시 차단)
                                 for lang in &detected_languages_vec {
                                     if cancellation_token.load(Ordering::Relaxed) { break; }
 
@@ -1627,12 +1626,10 @@ async fn process_task(
                                     let verb_score = v_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     
                                     emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {}", lang, verb_score));
-                                    
-                                    score_checked = true;
-                                    if verb_score != 1.0 { all_scores_are_one = false; }
 
+                                    // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
                                     if verb_score >= 7.0 {
-                                        emit_term(&format!("    💀 [REJECT] {} Verb Score 초과 (Early Exit)", lang));
+                                        emit_term(&format!("    💀 [REJECT] {} Verb Score 7.0 이상 (Fatal Early Exit)", lang));
                                         is_hallucination = true;
                                         break;
                                     }
@@ -1686,19 +1683,28 @@ async fn process_task(
                                     let expr_score = e_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     
                                     emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {}", lang, expr_score));
-                                    
-                                    if expr_score != 1.0 { all_scores_are_one = false; }
 
+                                    // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
                                     if expr_score >= 7.0 {
-                                        emit_term(&format!("    💀 [REJECT] {} Expr Score 초과 (Early Exit)", lang));
+                                        emit_term(&format!("    💀 [REJECT] {} Expr Score 7.0 이상 (Fatal Early Exit)", lang));
                                         is_hallucination = true;
                                         break;
                                     }
+
+                                    // 🌟 [수정] 해당 언어에서 Verb와 Expr 점수가 '전부(둘 다)' 0을 초과할 때만 애매한 오답으로 간주하여 카운트 증가
+                                    if verb_score > 0.0 && expr_score > 0.0 {
+                                        emit_term(&format!("    ⚠️ [WARNING] {} 검증에서 전부 0점 초과 (Verb: {}, Expr: {})", lang, verb_score, expr_score));
+                                        hallucination_count += 1;
+                                    } else {
+                                        // 🌟 하나라도 0점(또는 0 이하)인 값이 발견되면 완벽한 명사(타겟)로 간주하여 즉시 조기 종료(Early Exit) 허용!
+                                        emit_term(&format!("    ✅ [PASS] {} 검증 통과 (0점 포함). 완벽한 타겟으로 간주하여 나머지 검증 스킵", lang));
+                                        break; 
+                                    }
                                 }
 
-                                // 🌟 [추가] 검증을 거친 모든 언어의 Verb/Expr 점수가 전부 정확히 1.0인 경우 기각
-                                if !is_hallucination && score_checked && all_scores_are_one {
-                                    emit_term(&format!("    💀 [REJECT] 모든 검증 점수가 1.0으로 평가됨 (조사 및 무의미한 일반명사 파편 의심)"));
+                                // 🌟 Fatal(>= 7.0)로 강제 종료되지 않고 끝까지 돌았을 때, 모든 다국어가 전부 0점을 초과했다면 최종 할루시네이션으로 판정
+                                if !is_hallucination && hallucination_count == total_langs && total_langs > 0 {
+                                    emit_term(&format!("    💀 [REJECT] 모든 다국어 검증에서 전부 0점 초과. 할루시네이션으로 최종 차단"));
                                     is_hallucination = true;
                                 }
                             }
