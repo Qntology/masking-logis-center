@@ -1252,10 +1252,10 @@ async fn process_task(
                     let mut phase2_executed = false; // Phase 2 진입 플래그
                     
                     // 🌟 [추가] 이미 성공적으로 마스킹된 NMS 후보를 기록하여 동의어 트랙에서 건너뛰게 하는 장부
-                    let mut fully_masked_candidates = std::collections::HashSet::new();
+                    let mut fully_masked_candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
                     
                     // 🌟 [추가] 할루시네이션으로 판명된 단어를 기록하여 이후 스킵하게 하는 장부
-                    let mut hallucinated_candidates = std::collections::HashSet::new();
+                    let mut hallucinated_candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
 
                     // 🌟 각 속성별로 매칭이 안 될 때까지 무한 반복(loop)하며 순차적으로 처리합니다.
                     while p_idx < valid_targets.len() {
@@ -1589,24 +1589,61 @@ async fn process_task(
                             }
 
                             if !nms_valid {
-                                hallucinated_candidates.insert(extracted_val.clone());
-                                if !specific_candidate.is_empty() {
-                                    hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 연쇄 파기 명부 등재
+                                let no_space_ext: String = extracted_val.chars().filter(|c| !c.is_whitespace()).collect();
+                                
+                                // 🔍 Step 1: 좀비 단어 (이미 마스킹 완료된 정답) 판별
+                                let mut is_zombie = false;
+                                for masked in &fully_masked_candidates {
+                                    let no_space_masked: String = masked.chars().filter(|c| !c.is_whitespace()).collect();
+                                    if no_space_masked.contains(&no_space_ext) || no_space_ext.contains(&no_space_masked) {
+                                        is_zombie = true;
+                                        break;
+                                    }
                                 }
+
+                                // 🔍 Step 2: 스포일러 단어 (아직 대기 중인 정답) 판별
+                                let mut is_spoiler = false;
+                                if !is_zombie {
+                                    for target in &valid_targets {
+                                        let target_cand = &target.7; // specific_candidate
+                                        if !target_cand.is_empty() {
+                                            let no_space_target: String = target_cand.chars().filter(|c| !c.is_whitespace()).collect();
+                                            if no_space_target.contains(&no_space_ext) || no_space_ext.contains(&no_space_target) {
+                                                is_spoiler = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
                                 miss_counter += 1;
                                 current_temperature += 0.2;
                                 
                                 let count = value_counts.entry(extracted_val.clone()).or_insert(0);
                                 *count += 1;
+
+                                if is_zombie {
+                                    emit_term(&format!("[DEBUG] 🧟 좀비 단어(이미 마스킹 완료) 추출 감지. 연쇄 파기(Cascade Cancellation) 발동: '{}'", extracted_val));
+                                    hallucinated_candidates.insert(extracted_val.clone());
+                                    if !specific_candidate.is_empty() {
+                                        hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 연쇄 파기 명부 등재
+                                    }
+                                } else if is_spoiler {
+                                    emit_term(&format!("[DEBUG] 🎬 스포일러 단어(대기 중인 미래 정답) 추출 감지. 무시 리스트 등재 면제 및 온도 상승 재시도: '{}'", extracted_val));
+                                    // 🌟 독성 리스트 및 ignore_list 추가 면제
+                                } else {
+                                    emit_term(&format!("[DEBUG] ❌ 단순 오답 추출 감지. 무시 리스트 등재 및 온도 상승 재시도: '{}'", extracted_val));
+                                    // 🌟 영구 독성 리스트(hallucinated_candidates)에는 넣지 않음. (다른 트랙에서는 정답일 수 있으므로)
+                                    ignore_list.push(extracted_val.clone());
+                                    ignore_list.push(format!(" {}", extracted_val));
+                                    ignore_list.push(format!("\"{}", extracted_val));
+                                }
                                 
                                 if current_temperature >= 0.8 || *count >= 3 {
                                     emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값 3회 누적 또는 온도 1.0 도달로 강제 종료."));
                                     break;
                                 }
 
-                                ignore_list.push(extracted_val.clone());
-                                ignore_list.push(format!(" {}", extracted_val));
-                                ignore_list.push(format!("\"{}", extracted_val));
                                 continue;
                             }
 

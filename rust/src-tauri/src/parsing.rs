@@ -929,7 +929,7 @@ Hint: {HINT}
 
 [OUTPUT FORMAT]
 {
-  "score": Integer(1 to 10)
+  "score": Integer(0 to 10)
 }
 
 [ACTION] RETURN JSON ONLY. NO EXPLANATION.
