@@ -1567,6 +1567,10 @@ async fn process_task(
                                 emit_term(&format!("    💀 [REJECT] 타겟 미스매치 (is_target_mismatch=true)"));
                                 is_hallucination = true;
                             } else {
+                                // 🌟 [추가] 모든 검증 점수가 정확히 1.0인지 추적하는 상태 변수 선언
+                                let mut all_scores_are_one = true;
+                                let mut score_checked = false;
+
                                 // 🌟 다국어 순환하며 Early Exit (하나라도 7.0 넘으면 즉시 차단)
                                 for lang in &detected_languages_vec {
                                     if cancellation_token.load(Ordering::Relaxed) { break; }
@@ -1623,6 +1627,10 @@ async fn process_task(
                                     let verb_score = v_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     
                                     emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {}", lang, verb_score));
+                                    
+                                    score_checked = true;
+                                    if verb_score != 1.0 { all_scores_are_one = false; }
+
                                     if verb_score >= 7.0 {
                                         emit_term(&format!("    💀 [REJECT] {} Verb Score 초과 (Early Exit)", lang));
                                         is_hallucination = true;
@@ -1678,11 +1686,20 @@ async fn process_task(
                                     let expr_score = e_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     
                                     emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {}", lang, expr_score));
+                                    
+                                    if expr_score != 1.0 { all_scores_are_one = false; }
+
                                     if expr_score >= 7.0 {
                                         emit_term(&format!("    💀 [REJECT] {} Expr Score 초과 (Early Exit)", lang));
                                         is_hallucination = true;
                                         break;
                                     }
+                                }
+
+                                // 🌟 [추가] 검증을 거친 모든 언어의 Verb/Expr 점수가 전부 정확히 1.0인 경우 기각
+                                if !is_hallucination && score_checked && all_scores_are_one {
+                                    emit_term(&format!("    💀 [REJECT] 모든 검증 점수가 1.0으로 평가됨 (조사 및 무의미한 일반명사 파편 의심)"));
+                                    is_hallucination = true;
                                 }
                             }
 
