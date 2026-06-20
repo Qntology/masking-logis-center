@@ -122,6 +122,7 @@ pub enum ModelSize {
     Qwen,    // 0.6B for Ingestion (기존 Small)
     Qwen3,   // Qwen3 Text Model (기존 Large, /qwen3/ 로직 전용)
     Qwen3_5, // 0.8B Qwen 3.5 (Text Optimized)
+    Granite, // 🌟 Granite 4.0 추가
 }
 
 #[derive(Clone)]
@@ -131,6 +132,8 @@ pub struct LogisModel {
     // 🌟 [복구 완료] 사용자님이 원하시던 오리지널 Qwen3 텍스트 전용 로직을 띄웁니다!
     pub qwen3_generator: Arc<TokioMutex<Option<Qwen3GenerateModel>>>, 
     pub qwen3_5_generator: Arc<TokioMutex<Option<Qwen3_5GenerateModel>>>,
+    
+    pub granite_generator: Arc<TokioMutex<Option<(crate::models::granite::model::GraniteMoeHybrid, tokenizers::Tokenizer)>>>,
     
     pub embedding_model: Arc<TokioMutex<Option<EmbeddingModel>>>,
 
@@ -142,6 +145,7 @@ pub struct LogisModel {
     qwen_model_path: String,      // 🌟 (기존 small_model_path 대신 이름 맞춤)
     qwen3_model_path: String,     // 🌟 Qwen3 모델 경로 추가
     qwen3_5_model_path: String,
+    granite_model_path: String,   // 🌟 Granite 모델 경로 추가
     embedding_path: std::path::PathBuf,
     pub device_config: utils::DeviceConfig,
     max_tokens_limit: u32,
@@ -157,6 +161,8 @@ impl LogisModel {
         *q3_gen = None;
         let mut q35_gen = self.qwen3_5_generator.lock().await;
         *q35_gen = None;
+        let mut granite_gen = self.granite_generator.lock().await;
+        *granite_gen = None;
         
         let mut size = self.current_size.lock().await;
         *size = None;
@@ -203,6 +209,14 @@ impl LogisModel {
             if let Some(mut g) = q35_gen.take() {
                 println!("[DIAG-PURGE] Dropping Qwen 3.5 Generator..."); //
                 g.clear_kv_cache();
+                drop(g);
+            }
+        }
+        
+        {
+            let mut granite_gen = self.granite_generator.lock().await;
+            if let Some(g) = granite_gen.take() {
+                println!("[DIAG-PURGE] Dropping Granite Generator...");
                 drop(g);
             }
         }
@@ -477,6 +491,7 @@ impl LogisModel {
                     },
                     ModelSize::Qwen3 => self.qwen3_generator.lock().await.is_some(),
                     ModelSize::Qwen3_5 => self.qwen3_5_generator.lock().await.is_some(),
+                    ModelSize::Granite => self.granite_generator.lock().await.is_some(),
                 };
                 if is_loaded {
                     println!("[RELAY] {:?} is already loaded. Skipping purge/reload.", target_size);
@@ -505,6 +520,9 @@ impl LogisModel {
             },
             ModelSize::Qwen3_5 => {
                 self.ensure_qwen3_5(false).await?;
+            },
+            ModelSize::Granite => {
+                self.ensure_granite().await?;
             }
         }
 
@@ -540,6 +558,58 @@ impl LogisModel {
 
     // --- File: src/model.rs (LogisModel 내부) ---
     
+    pub async fn ensure_granite(&self) -> anyhow::Result<()> {
+        let needs_load = { self.granite_generator.lock().await.is_none() };
+        if needs_load {
+            println!("[MODEL] Loading Granite 4.0 (350m) Model...");
+            self.unload_generator().await;
+            {
+                *self.current_size.lock().await = Some(ModelSize::Granite);
+            }
+            
+            let path = self.granite_model_path.clone();
+            let dev = self.device_config.device.clone();
+            
+            let gen_result = tokio::task::spawn_blocking(move || -> anyhow::Result<(crate::models::granite::model::GraniteMoeHybrid, tokenizers::Tokenizer)> {
+                let config_path = std::path::Path::new(&path).join("config.json");
+                let cfg: crate::models::granite::model::Config = serde_json::from_slice(&std::fs::read(config_path)?)?;
+                let tokenizer_model = crate::tokenizer::TokenizerModel::init(&path)?;
+                
+                let gguf_files = crate::utils::find_type_files(&path, "gguf")?;
+                let model_file = gguf_files.first().ok_or_else(|| anyhow::anyhow!("No GGUF found"))?;
+                
+                let mut file = std::fs::File::open(model_file)?;
+                let ct = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+                
+                let mut data = std::collections::HashMap::new();
+                let dtype = if dev.is_cuda() { candle_core::DType::BF16 } else { candle_core::DType::F32 };
+                
+                for (name, _) in ct.tensor_infos.iter() {
+                    let t_cpu = ct.tensor(&mut file, name, &candle_core::Device::Cpu)?;
+                    let t = t_cpu.dequantize_f16(&candle_core::Device::Cpu).or_else(|_| t_cpu.dequantize(&candle_core::Device::Cpu))?.to_device(&dev)?.to_dtype(dtype)?;
+                    data.insert(name.clone(), t);
+                }
+                
+                let vb = candle_nn::VarBuilder::from_tensors(data, dtype, &dev);
+                let model = crate::models::granite::model::GraniteMoeHybrid::load(vb, &cfg)?;
+                
+                Ok((model, tokenizer_model.tokenizer))
+            }).await?;
+
+            match gen_result {
+                Ok(gen) => {
+                    println!("[MODEL] 🎉 Granite 4.0 loaded successfully!");
+                    *self.granite_generator.lock().await = Some(gen);
+                },
+                Err(e) => {
+                    println!("🚨 [CRITICAL ERROR] Granite 4.0 로딩 실패: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn ensure_qwen3(&self) -> anyhow::Result<()> {
         let needs_load = { self.qwen3_generator.lock().await.is_none() };
         if needs_load {
@@ -795,6 +865,7 @@ impl LogisModel {
         let qwen_model_path = normalize_path(base_path.join("Qwen3-0.6B-Instruct-gguf")); 
         let qwen3_model_path = normalize_path(base_path.join("Qwen3-0.6B-Instruct-gguf")); 
         let qwen3_5_model_path = normalize_path(base_path.join("Qwen3.5-2B-Instruct-gguf"));
+        let granite_model_path = normalize_path(base_path.join("granite-4.0-h-350m-gguf"));
         let embedding_path = base_path.join("granite-embedding-97m-multilingual-r2");
 
         let max_tokens_limit = 65536; 
@@ -804,6 +875,7 @@ impl LogisModel {
             generator: Arc::new(TokioMutex::new(None)),
             qwen3_generator: Arc::new(TokioMutex::new(None)), // 🌟 추가
             qwen3_5_generator: Arc::new(TokioMutex::new(None)),
+            granite_generator: Arc::new(TokioMutex::new(None)),
             embedding_model: Arc::new(TokioMutex::new(None)),
             is_cpu_mode: config.is_cpu,
             is_disk_swap,
@@ -811,6 +883,7 @@ impl LogisModel {
             qwen_model_path,    // 🌟 교체
             qwen3_model_path,   // 🌟 교체
             qwen3_5_model_path,
+            granite_model_path,
             embedding_path,
             device_config: config.clone(),
             max_tokens_limit: max_tokens_limit as u32,
@@ -1546,16 +1619,16 @@ impl LogisModel {
         // ----------------------------------------------------
         // Stage 1: 세그먼트 분할 (para2graph) - Qwen3 (0.6B) 사용
         // ----------------------------------------------------
-        emit_term("[STAGE-1] Preparing VRAM and Loading Qwen3 (0.6B) Model...");
+        emit_term("[STAGE-1] Preparing VRAM and Loading Granite 4.0 Model...");
         let payload = json!({ "task_id": task_id, "category": "Stage 1", "summary": "Analyzing semantic intent...", "spinner": "⠋" });
         let _ = app_handle.emit("extraction-progress", &payload);
         crate::scheduler::log_task_progress(app_handle, task_id, &payload);
 
-        self.secure_vram_relay(crate::model::ModelSize::Qwen3, None, Some(cancel_token.clone()), false, None).await?;
+        self.secure_vram_relay(crate::model::ModelSize::Granite, None, Some(cancel_token.clone()), false, None).await?;
         if cancel_token.load(std::sync::atomic::Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
 
         let prompt1 = crate::parsing::para2graph(language);
-        let task_question_1 = format!("{}\n\nQuery: {}", prompt1, query);
+        let task_question_1 = format!("System: You are an intelligent search parameter extractor.\nUser: {}\n\nQuery: {}", prompt1, query);
         
         let mut segments = serde_json::json!({});
         let max_retries = 2; 
@@ -1565,31 +1638,18 @@ impl LogisModel {
             
             emit_term(&format!("[STAGE-1] Generating intent segment... (Attempt {}/{})", attempt, max_retries));
             
-            let gen_arc = self.qwen3_generator.clone();
+            let gen_arc = self.granite_generator.clone();
             let task_q = task_question_1.clone();
+            let dev = self.device_config.device.clone();
             let cancel_clone = cancel_token.clone();
             
             let res1 = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-                let mut gen_guard = gen_arc.blocking_lock();
-                if let Some(gen) = gen_guard.as_mut() {
-                    let params = crate::openai_types::ChatCompletionParameters {
-                        messages: vec![
-                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(task_q),
-                                name: None,
-                            })
-                        ],
-                        model: "qwen3".to_string(),
-                        max_tokens: Some(256),
-                        temperature: Some(1.0), 
-                        // 🌟 [CRITICAL FIX] top_k(80) 효과를 온전히 보려면 top_p를 1.0으로 개방해야 합니다.
-                        // (0.95일 경우 상위 5~10개 토큰 선에서 먼저 잘려버려 top_k 80이 무시되는 것처럼 보입니다)
-                        top_p: Some(1.0), 
-                        ..Default::default()
-                    };
-                    gen.generate(params, Some(cancel_clone), None, None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e))
+                let gen_guard = gen_arc.blocking_lock();
+                if let Some((model, tokenizer)) = gen_guard.as_ref() {
+                    crate::models::granite::generate::generate(model, tokenizer, &task_q, 256, &dev, Some(cancel_clone))
+                        .map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e))
                 } else {
-                    Err(anyhow::anyhow!("Qwen3 Generator is missing"))
+                    Err(anyhow::anyhow!("Granite Generator is missing"))
                 }
             }).await??;
 
@@ -1642,25 +1702,18 @@ impl LogisModel {
                 let seg_type = seg.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let prompt1_5 = crate::parsing::extract_numeric_conditions(&current_text, &query, &seg_type, metrics_json);
                 
-                let gen_arc = self.qwen3_generator.clone();
+                let gen_arc = self.granite_generator.clone();
+                let prompt_granite = format!("System: Extract conditions.\nUser: {}", prompt1_5);
+                let dev = self.device_config.device.clone();
                 let cancel_clone = cancel_token.clone();
                 
                 let res1_5 = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-                    let mut gen_guard = gen_arc.blocking_lock();
-                    if let Some(gen) = gen_guard.as_mut() {
-                        let params = crate::openai_types::ChatCompletionParameters {
-                            messages: vec![
-                                crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                                    content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(prompt1_5),
-                                    name: None,
-                                })
-                            ],
-                            model: "qwen3".to_string(), max_tokens: Some(256), temperature: Some(0.0), top_p: Some(0.01),
-                            ..Default::default()
-                        };
-                        gen.generate(params, Some(cancel_clone), None, None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e))
+                    let gen_guard = gen_arc.blocking_lock();
+                    if let Some((model, tokenizer)) = gen_guard.as_ref() {
+                        crate::models::granite::generate::generate(model, tokenizer, &prompt_granite, 256, &dev, Some(cancel_clone))
+                            .map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e))
                     } else {
-                        Err(anyhow::anyhow!("Qwen3 Generator is missing"))
+                        Err(anyhow::anyhow!("Granite Generator is missing"))
                     }
                 }).await??;
 
@@ -1819,31 +1872,24 @@ impl LogisModel {
         let _ = app_handle.emit("extraction-progress", &payload);
         crate::scheduler::log_task_progress(app_handle, task_id, &payload);
 
-        emit_term("[STAGE-1] Preparing VRAM and Loading Qwen3 (0.6B) Model...");
-        self.secure_vram_relay(crate::model::ModelSize::Qwen3, None, Some(cancel_token.clone()), false, None).await?;
+        emit_term("[STAGE-1] Preparing VRAM and Loading Granite 4.0 Model...");
+        self.secure_vram_relay(crate::model::ModelSize::Granite, None, Some(cancel_token.clone()), false, None).await?;
         if cancel_token.load(std::sync::atomic::Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
 
         emit_term(&format!("[STAGE-1] Extracting shipping filters from query: '{}'", query));
         let prompt = crate::parsing::extract_shipping_conditions(&query, language);
-        let gen_arc = self.qwen3_generator.clone();
+        let prompt_granite = format!("System: Extract shipping conditions.\nUser: {}", prompt);
+        let gen_arc = self.granite_generator.clone();
+        let dev = self.device_config.device.clone();
         let cancel_clone = cancel_token.clone();
         
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            let mut gen_guard = gen_arc.blocking_lock();
-            if let Some(gen) = gen_guard.as_mut() {
-                let params = crate::openai_types::ChatCompletionParameters {
-                    messages: vec![
-                        crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                            content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(prompt),
-                            name: None,
-                        })
-                    ],
-                    model: "qwen3".to_string(), max_tokens: Some(256), temperature: Some(0.0), top_p: Some(0.01),
-                    ..Default::default()
-                };
-                gen.generate(params, Some(cancel_clone), None, None).map_err(|e| anyhow::anyhow!("Qwen3 Inference failed: {}", e))
+            let gen_guard = gen_arc.blocking_lock();
+            if let Some((model, tokenizer)) = gen_guard.as_ref() {
+                crate::models::granite::generate::generate(model, tokenizer, &prompt_granite, 256, &dev, Some(cancel_clone))
+                    .map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e))
             } else {
-                Err(anyhow::anyhow!("Qwen3 Generator is missing"))
+                Err(anyhow::anyhow!("Granite Generator is missing"))
             }
         }).await??;
 

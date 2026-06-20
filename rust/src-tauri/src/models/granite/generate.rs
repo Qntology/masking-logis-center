@@ -1,7 +1,11 @@
+use crate::models::granite::model::MambaLayerCache;
+
 use candle_core::{Result, Tensor, D, IndexOp};
-use crate::model::{GraniteMoeHybrid, GraniteHybridCache};
+use crate::models::granite::model::{GraniteMoeHybrid, GraniteHybridCache};
 use tokenizers::Tokenizer;
 use std::io::Write;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub fn generate(
     model: &GraniteMoeHybrid,
@@ -9,6 +13,7 @@ pub fn generate(
     prompt: &str,
     max_tokens: usize,
     device: &candle_core::Device,
+    cancel_token: Option<Arc<AtomicBool>>,
 ) -> Result<String> {
     let tokens = tokenizer.encode(prompt, true).map_err(candle_core::Error::msg)?;
     let mut tokens = tokens.get_ids().to_vec();
@@ -25,7 +30,7 @@ pub fn generate(
                 Tensor::zeros((1, model.cfg.num_key_value_heads(), 0, model.cfg.head_dim()), candle_core::DType::F32, device)?,
             ));
         } else {
-            mamba_caches.push(crate::model::MambaLayerCache::new(1, &model.cfg, device, candle_core::DType::F32)?);
+            mamba_caches.push(MambaLayerCache::new(1, &model.cfg, device, candle_core::DType::F32)?);
         }
     }
     let mut cache = GraniteHybridCache { attention_caches, mamba_caches };
@@ -35,6 +40,12 @@ pub fn generate(
     let mut logits = model.forward(&input, &mut cache)?;
 
     for _ in 0..max_tokens {
+        if let Some(flag) = &cancel_token {
+            if flag.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+
         let logits_last = logits.i((0, logits.dim(1)? - 1, ..))?;
         
         // Greedy sampling

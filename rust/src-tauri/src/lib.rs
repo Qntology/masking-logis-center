@@ -2124,11 +2124,13 @@ async fn check_model_status() -> Result<serde_json::Value, String> {
     let qwen3_dir = base_path.join("Qwen3-0.6B-Instruct-gguf");
     let qwen3_5_dir = base_path.join("Qwen3.5-2B-Instruct-gguf");
     let embed_dir = base_path.join("granite-embedding-97m-multilingual-r2");
+    let granite_dir = base_path.join("granite-4.0-h-350m-gguf");
 
     Ok(serde_json::json!({
         "Qwen3": has_model_file(&qwen3_dir),
         "Qwen3.5": has_model_file(&qwen3_5_dir),
-        "Embedding": has_model_file(&embed_dir)
+        "Embedding": has_model_file(&embed_dir),
+        "Granite": has_model_file(&granite_dir)
     }))
 }
 
@@ -2154,6 +2156,7 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
             "Qwen3" => "Qwen3-0.6B-Instruct-gguf",
             "Qwen3.5" => "Qwen3.5-2B-Instruct-gguf",
             "Embedding" => "granite-embedding-97m-multilingual-r2",
+            "Granite" => "granite-4.0-h-350m-gguf",
             _ => "unknown"
         };
 
@@ -2173,6 +2176,9 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
             ],
             "Embedding" => vec![
                 ("https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2/resolve/main/model.safetensors", "model.safetensors")
+            ],
+            "Granite" => vec![
+                ("https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF/resolve/main/granite-4.0-h-350m-Q8_0.gguf", "granite-4.0-h-350m-Q8_0.gguf")
             ],
             _ => vec![]
         };

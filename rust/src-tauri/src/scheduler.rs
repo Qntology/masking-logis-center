@@ -725,25 +725,19 @@ async fn process_task(
                         }).to_string();
                     }
 
-                    // 컨텍스트 크기에 따른 동적 모델 할당 (60,000 초과 시 Qwen, 이하 시 Qwen3)
+                    // 🌟 [변경] qwen, qwen3 대신 모두 Granite 사용
                     let is_large_context = target_text.len() > 60000;
-                    let target_model_size = if is_large_context { crate::model::ModelSize::Qwen } else { crate::model::ModelSize::Qwen3 };
+                    let target_model_size = crate::model::ModelSize::Granite;
 
                     // 🌟 [OOM 원인 분석용 로그] 모델에 투입되기 직전 전체 컨텍스트의 문자열 길이를 터미널에 출력합니다.
                     emit_term(&format!("[DEBUG-OOM] 현재 투입되는 컨텍스트 사이즈(문자 수): {}. 선택된 모델: {:?}", target_text.len(), target_model_size));
 
-                    // 🌟 [CRITICAL FIX] Qwen3.5(LLM) 모델 백그라운드 로딩 트리거!
-                    // 임베딩 연산과 동시에 모델이 VRAM에 올라가도록 스레드를 분리합니다.
+                    // 🌟 [CRITICAL FIX] Granite 모델 백그라운드 로딩 트리거!
                     let bg_model = model.clone();
                     let bg_cancel = cancellation_token.clone();
                     let llm_load_handle = tokio::spawn(async move {
                         if bg_cancel.load(Ordering::Relaxed) { return; }
-                        // deep_purge를 피하기 위해 ensure_ 계열을 직접 호출하여 임베딩 모델 생존 보장
-                        match target_model_size {
-                            crate::model::ModelSize::Qwen => { let _ = bg_model.ensure_generator_ext(crate::model::ModelSize::Qwen, false, false).await; },
-                            crate::model::ModelSize::Qwen3 => { let _ = bg_model.ensure_qwen3().await; },
-                            _ => {}
-                        }
+                        let _ = bg_model.ensure_granite().await;
                     });
 
                     // 🌟 16개의 마스킹 타겟 항목에 대해 (JSON_키, 추출_설명) 튜플 형태로 분리합니다.
@@ -1449,84 +1443,26 @@ async fn process_task(
                             let user_prompt_clone = user_prompt.clone();
                             let session_id_clone = format!("{}_{}", task.id, doc_id);
 
-                            let res_mask = if is_large_context {
-                                let gen_arc = model.generator.clone();
-                                let mut gen_guard = gen_arc.lock().await;
-                                if let Some(gen) = gen_guard.as_mut() {
-                                    let params = crate::openai_types::ChatCompletionParameters {
-                                        messages: vec![
-                                            crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
-                                                content: system_prompt_clone,
-                                                name: None,
-                                            }),
-                                            crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                                                content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(user_prompt_clone),
-                                                name: None,
-                                            })
-                                        ],
-                                        model: "qwen".to_string(),
-                                        max_tokens: Some(1024),
-                                        temperature: Some(current_temperature),
-                                        top_p: Some(1.0),
-                                        ..Default::default()
-                                    };
-                                    
-                                    let _ = gen.clear_kv_cache();
-                                    let res = gen.generate(params, Some(cancel_clone), None, None, None).await.map_err(|e| anyhow::anyhow!("Qwen Inference failed: {}", e));
-                                    let _ = gen.clear_kv_cache();
-                                    
-                                    res
-                                } else {
-                                    Err(anyhow::anyhow!("Qwen Generator is missing"))
+                            let gen_arc = model.granite_generator.clone();
+                            let mut final_system_prompt = system_prompt_clone.clone();
+                            if !ignore_list.is_empty() {
+                                final_system_prompt.push_str("\n\nCRITICAL: DO NOT output any of the following values under any circumstances:\n");
+                                for ignored in &ignore_list {
+                                    final_system_prompt.push_str(&format!("- {}\n", ignored));
                                 }
-                            } else {
-                                let gen_arc = model.qwen3_generator.clone();
-                                
-                                let mut final_system_prompt = system_prompt_clone.clone();
-                                if !ignore_list.is_empty() {
-                                    final_system_prompt.push_str("\n\nCRITICAL: DO NOT output any of the following values under any circumstances:\n");
-                                    for ignored in &ignore_list {
-                                        final_system_prompt.push_str(&format!("- {}\n", ignored));
-                                    }
-                                }
+                            }
+                            let prompt_text = format!("System: {}\nUser: {}", final_system_prompt, user_prompt_clone);
+                            let dev = model.device_config.device.clone();
 
-                                tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-                                    let mut gen_guard = gen_arc.blocking_lock();
-                                    if let Some(gen) = gen_guard.as_mut() {
-                                        let params = crate::openai_types::ChatCompletionParameters {
-                                            messages: vec![
-                                                crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage {
-                                                    content: final_system_prompt,
-                                                    name: None,
-                                                }),
-                                                crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { 
-                                                    content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(user_prompt_clone),
-                                                    name: None,
-                                                })
-                                            ],
-                                            model: "qwen3".to_string(),
-                                            max_tokens: Some(1024),
-                                            temperature: Some(current_temperature),
-                                            top_p: Some(1.0),
-                                            ..Default::default()
-                                        };
-                                        
-                                        gen.clear_kv_cache();
-                                        let res = gen.generate(
-                                            params, 
-                                            Some(cancel_clone), 
-                                            None, 
-                                            None
-                                        ).map_err(|e| anyhow::anyhow!("Qwen 3 Inference failed: {}", e));
-                                        
-                                        gen.clear_kv_cache();
-                                        
-                                        res
-                                    } else {
-                                        Err(anyhow::anyhow!("Qwen 3 Generator is missing"))
-                                    }
-                                }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Spawn blocking failed: {}", e)))
-                            }?;
+                            let res_mask = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+                                let gen_guard = gen_arc.blocking_lock();
+                                if let Some((granite_model, tokenizer)) = gen_guard.as_ref() {
+                                    crate::models::granite::generate::generate(granite_model, tokenizer, &prompt_text, 1024, &dev, Some(cancel_clone))
+                                        .map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e))
+                                } else {
+                                    Err(anyhow::anyhow!("Granite Generator is missing"))
+                                }
+                            }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Spawn blocking failed: {}", e)))?;
 
                             if !model.is_cpu_mode {
                                 let dev = model.device_config.device.clone();
