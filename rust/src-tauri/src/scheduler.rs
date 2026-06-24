@@ -1586,55 +1586,69 @@ async fn process_task(
                             if !specific_candidate.is_empty() {
                                 let words: Vec<&str> = specific_candidate.split_whitespace().collect();
                                 if let Ok(input_tensor) = stanza.preprocessor.encode_to_tensor(&words) {
-                                    // onnxruntime 0.0.14 추론 실행 (ort와 달리 ndarray 텐서를 리스트로 직접 주입합니다)
-                                    let inputs = vec![input_tensor];
-                                    // 🌟 [CRITICAL FIX] 입출력 텐서의 타입(i64 -> f32)을 명시하고 직접 배열 슬라이스로 접근합니다.
-                                    if let Ok(outputs) = stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
-                                        let output_tensor = &outputs[0];
-                                        let shape = output_tensor.shape();
-                                        if let Some(data) = output_tensor.as_slice() {
-                                            let mut tags = Vec::new();
-                                            if shape.len() == 3 {
-                                                let seq_len = shape[1] as usize;
-                                                let num_classes = shape[2] as usize;
-                                                for i in 0..seq_len {
-                                                    let mut max_val = std::f32::MIN;
-                                                    let mut max_idx = 0;
-                                                    for c in 0..num_classes {
-                                                        let val = data[i * num_classes + c];
-                                                        if val > max_val { max_val = val; max_idx = c; }
+                                    let seq_len = words.len();
+                                    
+                                    // 🌟 [CRITICAL FIX] ONNX 기하 구조([[Some(1), None], [Some(1), None]]) 규격에 완벽히 대응합니다.
+                                    // 모델이 요구하는 입력의 개수는 정확히 2개이므로 불필요한 4개의 더미 텐서 할당을 전면 제거합니다.
+                                    let word_ids = input_tensor.into_dyn();
+                                    
+                                    // 🌟 wordchars 역시 첫 차원이 무조건 1이어야 하므로 (1, seq_len * 5) 구조의 2차원 dynamic 텐서로 직결합니다.
+                                    let wordchars = ndarray::Array2::<i64>::ones((1, seq_len * 5)).into_dyn();
+                                    
+                                    let inputs = vec![word_ids, wordchars];
+                                    
+                                    match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
+                                        Ok(outputs) => {
+                                            let output_tensor = &outputs[0];
+                                            let shape = output_tensor.shape();
+                                            if let Some(data) = output_tensor.as_slice() {
+                                                let mut tags = Vec::new();
+                                                if shape.len() == 3 {
+                                                    let seq_len = shape[1] as usize;
+                                                    let num_classes = shape[2] as usize;
+                                                    for i in 0..seq_len {
+                                                        let mut max_val = std::f32::MIN;
+                                                        let mut max_idx = 0;
+                                                        for c in 0..num_classes {
+                                                            let val = data[i * num_classes + c];
+                                                            if val > max_val { max_val = val; max_idx = c; }
+                                                        }
+                                                        tags.push(max_idx);
                                                     }
-                                                    tags.push(max_idx);
                                                 }
-                                            }
-                                            
-                                            // Universal POS tags 맵핑 (Stanza UPOS 기준)
-                                            let upos = ["ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"];
-                                            let tag_names: Vec<&str> = tags.into_iter()
-                                                .map(|id| *upos.get(id).unwrap_or(&"X"))
-                                                .collect();
                                                 
-                                            emit_term(&format!("[STANZA] '{}' -> {:?}", specific_candidate, tag_names));
+                                                // Universal POS tags 맵핑 (Stanza UPOS 기준)
+                                                let upos = ["ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"];
+                                                let tag_names: Vec<&str> = tags.into_iter()
+                                                    .map(|id| *upos.get(id).unwrap_or(&"X"))
+                                                    .collect();
+                                                    
+                                                emit_term(&format!("[STANZA] '{}' -> {:?}", specific_candidate, tag_names));
 
-                                            // [Rule 1] 할루시네이션 원천 차단: 단어들이 모두 동사(VERB), 형용사(ADJ), 부사(ADV), 조사(ADP), 구두점(PUNCT)이라면 강제 기각
-                                            let all_invalid = tag_names.iter().all(|&t| t == "VERB" || t == "ADJ" || t == "ADV" || t == "ADP" || t == "PUNCT");
-                                            if all_invalid {
-                                                emit_term(&format!("[STANZA] 💀 순수 동사/수식어/조사 감지. 강제 기각: '{}'", specific_candidate));
-                                                hallucinated_candidates.insert(specific_candidate.clone());
-                                            } else {
+                                                // [Rule 1] 할루시네이션 원천 차단: 단어들이 모두 동사(VERB), 형용사(ADJ), 부사(ADV), 조사(ADP), 구두점(PUNCT)이라면 강제 기각
+                                                let all_invalid = tag_names.iter().all(|&t| t == "VERB" || t == "ADJ" || t == "ADV" || t == "ADP" || t == "PUNCT");
+                                                if all_invalid {
+                                                    emit_term(&format!("[STANZA] 💀 순수 동사/수식어/조사 감지. 강제 기각: '{}'", specific_candidate));
+                                                    hallucinated_candidates.insert(specific_candidate.clone());
+                                                } else {
                                                     // [Rule 2] 꼬리 자르기: 마지막 단어가 조사(ADP)나 구두점(PUNCT)이면 잘라냄
-                                                if let Some(last_tag) = tag_names.last() {
-                                                    if *last_tag == "ADP" || *last_tag == "PUNCT" {
-                                                        let mut trimmed_words = words.clone();
-                                                        trimmed_words.pop();
-                                                        let trimmed_candidate = trimmed_words.join(" ");
-                                                        emit_term(&format!("[STANZA] ✂️ 조사/구두점 절단: '{}' -> '{}'", specific_candidate, trimmed_candidate));
-                                                        specific_candidate = trimmed_candidate;
+                                                    if let Some(last_tag) = tag_names.last() {
+                                                        if *last_tag == "ADP" || *last_tag == "PUNCT" {
+                                                            let mut trimmed_words = words.clone();
+                                                            trimmed_words.pop();
+                                                            let trimmed_candidate = trimmed_words.join(" ");
+                                                            emit_term(&format!("[STANZA] ✂️ 조사/구두점 절단: '{}' -> '{}'", specific_candidate, trimmed_candidate));
+                                                            specific_candidate = trimmed_candidate;
+                                                        }
                                                     }
                                                 }
                                             }
+                                        },
+                                        // 🌟 [안전망 추가] 추론 연산 실패 시 무음 처리를 해제하고 터미널에 명확한 C++ 에러 사유를 로깅합니다.
+                                        Err(e) => {
+                                            emit_term(&format!("[STANZA] ⚠️ POS ONNX 추론 연산 실패 원인: {:?}", e));
                                         }
-                                    } 
+                                    }
                                 }
                             }
                         }
