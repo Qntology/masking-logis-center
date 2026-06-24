@@ -50,8 +50,40 @@ impl StanzaPreprocessor {
         let data = std::fs::read_to_string(vocab_path.as_ref())
             .map_err(|e| anyhow::anyhow!("Failed to read vocab.json: {}", e))?;
         
-        let word_vocab: HashMap<String, i64> = serde_json::from_str(&data)
-            .map_err(|e| anyhow::anyhow!("Failed to parse vocab.json: {}", e))?;
+        // 🌟 [CRITICAL FIX] 단순 HashMap 파싱 대신, serde_json::Value로 유연하게 읽어들여 
+        // HF의 tokenizer.json 포맷이나 배열 포맷 등 다양한 구조에 대응합니다.
+        let json_val: serde_json::Value = serde_json::from_str(&data)
+            .map_err(|e| anyhow::anyhow!("Failed to parse vocab.json as JSON: {}", e))?;
+            
+        let mut word_vocab: HashMap<String, i64> = HashMap::new();
+        
+        // 1. HF tokenizer.json 포맷 ({"model": {"vocab": {...}}}) 또는 직접 vocab 객체가 있는 경우
+        let target_obj = if let Some(model) = json_val.get("model") {
+            model.get("vocab").and_then(|v| v.as_object())
+        } else if let Some(vocab) = json_val.get("vocab") {
+            vocab.as_object()
+        } else {
+            json_val.as_object()
+        };
+
+        if let Some(obj) = target_obj {
+            for (k, v) in obj {
+                if let Some(id) = v.as_i64() {
+                    word_vocab.insert(k.clone(), id);
+                }
+            }
+        } else if let Some(arr) = json_val.as_array() {
+            // 2. 단어들의 배열 포맷인 경우 (인덱스가 곧 ID)
+            for (i, v) in arr.iter().enumerate() {
+                if let Some(s) = v.as_str() {
+                    word_vocab.insert(s.to_string(), i as i64);
+                }
+            }
+        }
+        
+        if word_vocab.is_empty() {
+            return Err(anyhow::anyhow!("vocab.json 내부에서 단어 매핑(Vocab) 구조를 찾을 수 없습니다."));
+        }
         
         // 보통 UNK(Unknown) 토큰은 0 또는 <unk> 키 매핑 사용
         let unk_id = *word_vocab.get("<unk>").unwrap_or(&0);
