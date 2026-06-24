@@ -23,14 +23,15 @@ pub fn generate(
     // Initialize cache
     let mut attention_caches = Vec::new();
     let mut mamba_caches = Vec::new();
+    let dtype = model.wte.embeddings().dtype();
     for layer_type in &model.cfg.layer_types {
         if layer_type == "attention" {
             attention_caches.push((
-                Tensor::zeros((1, model.cfg.num_key_value_heads(), 0, model.cfg.head_dim()), candle_core::DType::F32, device)?,
-                Tensor::zeros((1, model.cfg.num_key_value_heads(), 0, model.cfg.head_dim()), candle_core::DType::F32, device)?,
+                Tensor::zeros((1, model.cfg.num_key_value_heads(), 0, model.cfg.head_dim()), dtype, device)?,
+                Tensor::zeros((1, model.cfg.num_key_value_heads(), 0, model.cfg.head_dim()), dtype, device)?,
             ));
         } else {
-            mamba_caches.push(MambaLayerCache::new(1, &model.cfg, device, candle_core::DType::F32)?);
+            mamba_caches.push(MambaLayerCache::new(1, &model.cfg, device, dtype)?);
         }
     }
     let mut cache = GraniteHybridCache { attention_caches, mamba_caches };

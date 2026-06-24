@@ -70,6 +70,8 @@ rand_chacha = "0.3"
 windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_System_Memory"] }
 libc = "0.2"
 boa_engine = { path = "../crates/boa-engine/core/engine" }
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+ndarray = "0.17.2"
 
 [target.'cfg(windows)'.dependencies]
 direct-storage = { path = "./direct-storage" }

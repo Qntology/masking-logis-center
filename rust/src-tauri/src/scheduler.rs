@@ -32,6 +32,97 @@ use tokio::sync::Notify;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 
+// 🌟 [추가] Stanza ONNX 모델(pos.onnx, depparse.onnx) 입력용 전처리 모듈 (Vocab -> ndarray Tensor)
+use std::collections::HashMap;
+use std::path::Path;
+use ndarray::Array2;
+use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel;
+
+#[derive(Debug, Clone)]
+pub struct StanzaPreprocessor {
+    pub word_vocab: HashMap<String, i64>,
+    pub unk_id: i64,
+}
+
+impl StanzaPreprocessor {
+    pub fn new<P: AsRef<Path>>(vocab_path: P) -> anyhow::Result<Self> {
+        let data = std::fs::read_to_string(vocab_path.as_ref())
+            .map_err(|e| anyhow::anyhow!("Failed to read vocab.json: {}", e))?;
+        
+        let word_vocab: HashMap<String, i64> = serde_json::from_str(&data)
+            .map_err(|e| anyhow::anyhow!("Failed to parse vocab.json: {}", e))?;
+        
+        // 보통 UNK(Unknown) 토큰은 0 또는 <unk> 키 매핑 사용
+        let unk_id = *word_vocab.get("<unk>").unwrap_or(&0);
+        
+        Ok(Self { word_vocab, unk_id })
+    }
+
+    /// 품사 태깅(pos.onnx) 및 의존 구문 분석(depparse.onnx)을 위해 
+    /// 분할된 단어(어절) 배열을 ndarray 텐서(Array2)로 변환합니다.
+    pub fn encode_to_tensor(&self, words: &[&str]) -> Result<Array2<i64>, anyhow::Error> {
+        let mut ids = Vec::with_capacity(words.len());
+        for w in words {
+            // Stanza는 다국어 소문자화 등 자체 전처리가 필요할 수 있으나 기본적으로 일치하는 토큰을 찾습니다.
+            let token_id = *self.word_vocab.get(*w)
+                .or_else(|| self.word_vocab.get(&w.to_lowercase()))
+                .unwrap_or(&self.unk_id);
+            ids.push(token_id);
+        }
+        
+        // ONNX Runtime(ort)에 주입할 Shape: [batch_size=1, sequence_length]
+        let seq_len = words.len();
+        let tensor = Array2::from_shape_vec((1, seq_len), ids)
+            .map_err(|e| anyhow::anyhow!("Failed to build ndarray tensor for Stanza: {}", e))?;
+        
+        Ok(tensor)
+    }
+}
+
+// 🌟 [추가] ONNX Runtime 세션을 초기화하고 보유하는 파이프라인 구조체
+pub struct StanzaPipeline {
+    pub preprocessor: StanzaPreprocessor,
+    pub pos_session: Session,
+    pub depparse_session: Session,
+}
+
+impl StanzaPipeline {
+    pub fn new<P: AsRef<Path>>(base_dir: P, lang: &str) -> anyhow::Result<Self> {
+        // 🌟 ort 글로벌 초기화 (이미 초기화된 경우 내부적으로 무시되므로 안전함)
+        let _ = ort::init()
+            .with_name("logis_stanza")
+            .commit();
+
+        let lang_dir = base_dir.as_ref().join(lang);
+        let vocab_path = lang_dir.join("vocab.json");
+        let pos_path = lang_dir.join("pos.onnx");
+        let depparse_path = lang_dir.join("depparse.onnx");
+
+        let preprocessor = StanzaPreprocessor::new(&vocab_path)?;
+
+        // 🌟 POS (품사 태깅) 세션 초기화
+        let pos_session = Session::builder().map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
+            .with_optimization_level(GraphOptimizationLevel::Level3).map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
+            .with_intra_threads(1).map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
+            .commit_from_file(&pos_path)
+            .map_err(|e| anyhow::anyhow!("pos.onnx 모델 로드 실패: {}", e))?;
+
+        // 🌟 Dependency Parsing (의존 구문 분석) 세션 초기화
+        let depparse_session = Session::builder().map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
+            .with_optimization_level(GraphOptimizationLevel::Level3).map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
+            .with_intra_threads(1).map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
+            .commit_from_file(&depparse_path)
+            .map_err(|e| anyhow::anyhow!("depparse.onnx 모델 로드 실패: {}", e))?;
+
+        Ok(Self {
+            preprocessor,
+            pos_session,
+            depparse_session,
+        })
+    }
+}
+
 pub static PROGRESS_TX: OnceCell<tokio::sync::mpsc::UnboundedSender<serde_json::Value>> = OnceCell::new();
 
 // [UI-SYNC] Instant notification system to wake up the worker
@@ -802,6 +893,38 @@ async fn process_task(
 
                     emit_term(&format!("[EXTRACTION] 🌐 Detected Languages: {:?} (Local: {})", detected_languages_vec, local_language));
 
+                    // 🌟 [추가] Stanza Pipeline 동적 로드 (로컬 언어 기준)
+                    let stanza_lang_code = match local_language.as_str() {
+                        "korean" => "ko",
+                        "english" => "en",
+                        "japanese" => "ja",
+                        "chinese" => "zh-hans",
+                        "french" => "fr",
+                        "german" => "de",
+                        "spanish" => "es",
+                        "italian" => "it",
+                        "portuguese" => "pt",
+                        "dutch" => "nl",
+                        "russian" => "ru",
+                        "arabic" => "ar",
+                        _ => "en",
+                    };
+                    
+                    let stanza_base_dir = crate::utils::get_app_dir().join("models").join("stanza");
+                    let mut stanza_pipeline = None;
+                    if stanza_base_dir.join(stanza_lang_code).exists() {
+                        emit_term(&format!("[STANZA] 🧠 Loading Stanza ONNX models for '{}'...", stanza_lang_code));
+                        match StanzaPipeline::new(&stanza_base_dir, stanza_lang_code) {
+                            Ok(pipeline) => {
+                                stanza_pipeline = Some(pipeline);
+                                emit_term("[STANZA] ✅ Stanza Pipeline loaded successfully.");
+                            },
+                            Err(e) => emit_term(&format!("[STANZA] ⚠️ Failed to load Stanza models: {}", e)),
+                        }
+                    } else {
+                        emit_term(&format!("[STANZA] ⚠️ Stanza models for '{}' not found. Skipping POS/Depparse filtering.", stanza_lang_code));
+                    }
+
                     // 🌟 [추가] 언어 기반 동적 타겟 확장 로직
                     // bias.json에서는 기존 키를 사용하여 설정값을 가져오고, 컨텍스트(LLM)에만 언어 접두사를 붙여 전달합니다.
                     let mut dynamic_target_items: Vec<(String, String, String)> = Vec::new();
@@ -1320,8 +1443,65 @@ async fn process_task(
 
                         // 만약 valid_targets.len()을 넘어섰다면 진짜 끝
                         if p_idx >= valid_targets.len() { break; }
-                        let (target_name, base_target, target_item, target_bias, target_prejudice, is_phase2, specific_line, specific_candidate) = valid_targets[p_idx].clone();
+                        let (target_name, base_target, target_item, target_bias, target_prejudice, is_phase2, specific_line, mut specific_candidate) = valid_targets[p_idx].clone();
                         p_idx += 1;
+
+                        // 🌟 [STAGE 2.5] Stanza 정제 (Post-NMS Trimming - 미시적 정밀 타격)
+                        if let Some(stanza) = &mut stanza_pipeline {
+                            if !specific_candidate.is_empty() {
+                                let words: Vec<&str> = specific_candidate.split_whitespace().collect();
+                                if let Ok(input_tensor) = stanza.preprocessor.encode_to_tensor(&words) {
+                                    if let Ok(input_val) = ort::value::Tensor::from_array(input_tensor) {
+                                        // ONNX 추론 실행 (ort 2.x Positional Binding)
+                                        let inputs = ort::inputs![&input_val];
+                                        if let Ok(outputs) = stanza.pos_session.run(inputs) {
+                                            if let Ok((shape, data)) = outputs[0].try_extract_tensor::<f32>() {
+                                                let mut tags = Vec::new();
+                                                if shape.len() == 3 {
+                                                    let seq_len = shape[1] as usize;
+                                                    let num_classes = shape[2] as usize;
+                                                    for i in 0..seq_len {
+                                                        let mut max_val = f32::MIN;
+                                                        let mut max_idx = 0;
+                                                        for c in 0..num_classes {
+                                                            let val = data[i * num_classes + c];
+                                                            if val > max_val { max_val = val; max_idx = c; }
+                                                        }
+                                                        tags.push(max_idx);
+                                                    }
+                                                }
+                                                
+                                                // Universal POS tags 맵핑 (Stanza UPOS 기준)
+                                                let upos = ["ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"];
+                                                let tag_names: Vec<&str> = tags.into_iter()
+                                                    .map(|id| *upos.get(id).unwrap_or(&"X"))
+                                                    .collect();
+                                                    
+                                                emit_term(&format!("[STANZA] '{}' -> {:?}", specific_candidate, tag_names));
+
+                                                // [Rule 1] 할루시네이션 원천 차단: 단어들이 모두 동사(VERB), 형용사(ADJ), 부사(ADV), 조사(ADP), 구두점(PUNCT)이라면 강제 기각
+                                                let all_invalid = tag_names.iter().all(|&t| t == "VERB" || t == "ADJ" || t == "ADV" || t == "ADP" || t == "PUNCT");
+                                                if all_invalid {
+                                                    emit_term(&format!("[STANZA] 💀 순수 동사/수식어/조사 감지. 강제 기각: '{}'", specific_candidate));
+                                                    hallucinated_candidates.insert(specific_candidate.clone());
+                                                } else {
+                                                        // [Rule 2] 꼬리 자르기: 마지막 단어가 조사(ADP)나 구두점(PUNCT)이면 잘라냄
+                                                    if let Some(last_tag) = tag_names.last() {
+                                                        if *last_tag == "ADP" || *last_tag == "PUNCT" {
+                                                            let mut trimmed_words = words.clone();
+                                                            trimmed_words.pop();
+                                                            let trimmed_candidate = trimmed_words.join(" ");
+                                                            emit_term(&format!("[STANZA] ✂️ 조사/구두점 절단: '{}' -> '{}'", specific_candidate, trimmed_candidate));
+                                                            specific_candidate = trimmed_candidate;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } // 🌟 누락되었던 ort::value::Tensor::from_array 블록의 닫는 괄호 복구
+                                }
+                            }
+                        }
 
                         // 🌟 [추가] 이미 다른 동의어 트랙에서 마스킹을 마친 후보(specific_candidate)인지 확인하고 건너뜁니다 (접근법 A)
                         if !specific_candidate.is_empty() && fully_masked_candidates.contains(&specific_candidate) {
@@ -1451,7 +1631,37 @@ async fn process_task(
                                     final_system_prompt.push_str(&format!("- {}\n", ignored));
                                 }
                             }
-                            let prompt_text = format!("System: {}\nUser: {}", final_system_prompt, user_prompt_clone);
+                            
+                            let mut props = serde_json::Map::new();
+                            props.insert(base_target.to_uppercase(), serde_json::json!({
+                                "type": "string",
+                                "description": "The extracted value matching the target."
+                            }));
+                            props.insert(target_name.clone(), serde_json::json!({
+                                "type": "string",
+                                "description": "The exact value matching the PUG CONTENT to be masked."
+                            }));
+
+                            let tools_json = serde_json::json!([{
+                                "type": "function",
+                                "function": {
+                                    "name": "extract_anonymized_data",
+                                    "description": "Extract the specific entity value for anonymization.",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": props,
+                                        "required": [base_target.to_uppercase(), target_name.clone()]
+                                    }
+                                }
+                            }]);
+
+                            let prompt_text = format!(
+                                "<|start_of_role|>system<|end_of_role|>{}\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
+                                final_system_prompt,
+                                serde_json::to_string_pretty(&tools_json).unwrap_or_default(),
+                                user_prompt_clone
+                            );
+                            
                             let dev = model.device_config.device.clone();
 
                             let res_mask = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
@@ -1471,7 +1681,9 @@ async fn process_task(
                                 }).await;
                             }
 
-                            let parsed = crate::parsing::parse_json_from_llm(&res_mask);
+                            let raw_parsed = crate::parsing::parse_json_from_llm(&res_mask);
+                            let parsed = raw_parsed.get("arguments").cloned().unwrap_or(raw_parsed);
+                            
                             let mut extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
 
                             // 🌟 [CRITICAL FIX] 요청하신 대로, 배열이 아닌 1:1 매칭된 NMS 단일값을 출력하며 로그 디자인을 명시적으로 반영합니다!

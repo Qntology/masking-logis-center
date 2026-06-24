@@ -575,22 +575,15 @@ impl LogisModel {
                 let cfg: crate::models::granite::model::Config = serde_json::from_slice(&std::fs::read(config_path)?)?;
                 let tokenizer_model = crate::tokenizer::TokenizerModel::init(&path)?;
                 
-                let gguf_files = crate::utils::find_type_files(&path, "gguf")?;
-                let model_file = gguf_files.first().ok_or_else(|| anyhow::anyhow!("No GGUF found"))?;
-                
-                let mut file = std::fs::File::open(model_file)?;
-                let ct = candle_core::quantized::gguf_file::Content::read(&mut file)?;
-                
-                let mut data = std::collections::HashMap::new();
+                let safetensors_files = crate::utils::find_type_files(&path, "safetensors")?;
+                let model_file = safetensors_files.first().ok_or_else(|| anyhow::anyhow!("No Safetensors found"))?;
+
                 let dtype = if dev.is_cuda() { candle_core::DType::BF16 } else { candle_core::DType::F32 };
-                
-                for (name, _) in ct.tensor_infos.iter() {
-                    let t_cpu = ct.tensor(&mut file, name, &candle_core::Device::Cpu)?;
-                    let t = t_cpu.dequantize_f16(&candle_core::Device::Cpu).or_else(|_| t_cpu.dequantize(&candle_core::Device::Cpu))?.to_device(&dev)?.to_dtype(dtype)?;
-                    data.insert(name.clone(), t);
-                }
-                
-                let vb = candle_nn::VarBuilder::from_tensors(data, dtype, &dev);
+
+                // 🌟 Safetensors 전용 로더 사용 (메모리 맵핑으로 로딩 속도 대폭 향상)
+                let vb = unsafe {
+                    candle_nn::VarBuilder::from_mmaped_safetensors(&[model_file], dtype, &dev)?
+                };
                 let model = crate::models::granite::model::GraniteMoeHybrid::load(vb, &cfg)?;
                 
                 Ok((model, tokenizer_model.tokenizer))
@@ -865,7 +858,7 @@ impl LogisModel {
         let qwen_model_path = normalize_path(base_path.join("Qwen3-0.6B-Instruct-gguf")); 
         let qwen3_model_path = normalize_path(base_path.join("Qwen3-0.6B-Instruct-gguf")); 
         let qwen3_5_model_path = normalize_path(base_path.join("Qwen3.5-2B-Instruct-gguf"));
-        let granite_model_path = normalize_path(base_path.join("granite-4.0-h-350m-gguf"));
+        let granite_model_path = normalize_path(base_path.join("granite-4.0-h-350m"));
         let embedding_path = base_path.join("granite-embedding-97m-multilingual-r2");
 
         let max_tokens_limit = 65536; 
@@ -1628,7 +1621,41 @@ impl LogisModel {
         if cancel_token.load(std::sync::atomic::Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
 
         let prompt1 = crate::parsing::para2graph(language);
-        let task_question_1 = format!("System: You are an intelligent search parameter extractor.\nUser: {}\n\nQuery: {}", prompt1, query);
+        
+        let tools_json = serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "segment_search_query",
+                "description": "Translate and segment the natural language search query into the specified dataset structure.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "original_text": { "type": "string" },
+                        "segmented_plan": { "type": "string" },
+                        "context": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text": { "type": "string" },
+                                    "language": { "type": "string" },
+                                    "type": { "type": "string", "enum": ["order", "goods", "tracking", "review", "coupon", "event", ""] }
+                                },
+                                "required": ["text", "language", "type"]
+                            }
+                        }
+                    },
+                    "required": ["original_text", "segmented_plan", "context"]
+                }
+            }
+        }]);
+
+        let task_question_1 = format!(
+            "<|start_of_role|>system<|end_of_role|>You are an intelligent search parameter extractor.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}\n\nQuery: {}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
+            serde_json::to_string_pretty(&tools_json).unwrap_or_default(),
+            prompt1, 
+            query
+        );
         
         let mut segments = serde_json::json!({});
         let max_retries = 2; 
@@ -1655,7 +1682,9 @@ impl LogisModel {
 
             emit_term(&format!("[STAGE-1 RESULT]\n{}", res1)); // 🌟 AI가 뱉어낸 JSON 응답을 UI 터미널에 그대로 꽂아버립니다!
             
-            segments = crate::parsing::parse_json_from_llm(&res1);
+            let raw_segments = crate::parsing::parse_json_from_llm(&res1);
+            segments = raw_segments.get("arguments").cloned().unwrap_or(raw_segments);
+            
             let plan_str = segments.get("segmented_plan").and_then(|v| v.as_str()).unwrap_or("");
             let ctx_len = segments.get("context").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
             let intended_segments = if plan_str.is_empty() { 0 } else { plan_str.matches('|').count() + 1 };
@@ -1703,7 +1732,43 @@ impl LogisModel {
                 let prompt1_5 = crate::parsing::extract_numeric_conditions(&current_text, &query, &seg_type, metrics_json);
                 
                 let gen_arc = self.granite_generator.clone();
-                let prompt_granite = format!("System: Extract conditions.\nUser: {}", prompt1_5);
+                
+                let mut condition_props = serde_json::Map::new();
+                condition_props.insert(seg_type.clone(), serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "is_percent": { "type": "boolean" },
+                        "percent_total": { "type": "number" },
+                        "value": { "type": "string" },
+                        "operator": { "type": "string", "enum": ["gt", "gte", "lt", "lte", "eq"] }
+                    },
+                    "required": ["is_percent", "percent_total", "value", "operator"]
+                }));
+
+                let tools_json = serde_json::json!([{
+                    "type": "function",
+                    "function": {
+                        "name": "extract_numeric_conditions",
+                        "description": "Extract, transform, and normalize numeric conditions from the query.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "condition": {
+                                    "type": "object",
+                                    "properties": condition_props
+                                }
+                            },
+                            "required": ["condition"]
+                        }
+                    }
+                }]);
+
+                let prompt_granite = format!(
+                    "<|start_of_role|>system<|end_of_role|>Extract conditions.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
+                    serde_json::to_string_pretty(&tools_json).unwrap_or_default(),
+                    prompt1_5
+                );
+                
                 let dev = self.device_config.device.clone();
                 let cancel_clone = cancel_token.clone();
                 
@@ -1717,7 +1782,8 @@ impl LogisModel {
                     }
                 }).await??;
 
-                let mut conditions_json = crate::parsing::parse_json_from_llm(&res1_5);
+                let raw_conditions_json = crate::parsing::parse_json_from_llm(&res1_5);
+                let mut conditions_json = raw_conditions_json.get("arguments").cloned().unwrap_or(raw_conditions_json);
                 if let Some(cond_wrapper) = conditions_json.get_mut("condition").and_then(|v| v.as_object_mut()) {
                     for (_, val_obj) in cond_wrapper.iter_mut() {
                         if let Some(is_pct) = val_obj.get("is_percent").and_then(|v| v.as_bool()) {
@@ -1878,7 +1944,36 @@ impl LogisModel {
 
         emit_term(&format!("[STAGE-1] Extracting shipping filters from query: '{}'", query));
         let prompt = crate::parsing::extract_shipping_conditions(&query, language);
-        let prompt_granite = format!("System: Extract shipping conditions.\nUser: {}", prompt);
+        
+        let tools_json = serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "extract_shipping_conditions",
+                "description": "Extract logistics filters from the natural language query.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "no": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
+                        "status": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
+                        "vessel": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
+                        "pol": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
+                        "pod": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
+                        "sender_name": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
+                        "recipient_name": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
+                        "incoterms": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
+                        "weight": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
+                        "amount": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } }
+                    }
+                }
+            }
+        }]);
+
+        let prompt_granite = format!(
+            "<|start_of_role|>system<|end_of_role|>Extract shipping conditions.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
+            serde_json::to_string_pretty(&tools_json).unwrap_or_default(),
+            prompt
+        );
+
         let gen_arc = self.granite_generator.clone();
         let dev = self.device_config.device.clone();
         let cancel_clone = cancel_token.clone();
@@ -1896,7 +1991,8 @@ impl LogisModel {
         // 🌟 추출된 결과를 터미널 화면에 꽂아줍니다!
         emit_term(&format!("[STAGE-1 RESULT]\n{}", res));
 
-        let extracted_conditions = crate::parsing::parse_json_from_llm(&res);
+        let raw_extracted = crate::parsing::parse_json_from_llm(&res);
+        let extracted_conditions = raw_extracted.get("arguments").cloned().unwrap_or(raw_extracted);
         
         let payload = json!({ "task_id": task_id, "category": "Done", "summary": "Filter extraction complete.", "spinner": "✅" });
         let _ = app_handle.emit("extraction-progress", &payload);
