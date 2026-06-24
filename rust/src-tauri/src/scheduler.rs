@@ -1592,10 +1592,10 @@ async fn process_task(
                                     // word_ids는 문장 내부 단어 배열 구조인 [1, seq_len] 형태의 2차원 동적 텐서입니다.
                                     let word_ids = input_tensor.into_dyn();
                                     
-                                    // 🌟 [FINAL FIX] wordchars의 올바른 기하학적 형상은 [seq_len, 5] 구조입니다.
-                                    // 문장 내 각 단어(seq_len)가 가진 고유 글자 패딩 정보(5)를 행렬로 올바르게 제공해야 
-                                    // 내부 합성곱/순환 신경망 레이어가 단어 개수 축을 훼손하지 않고 완벽하게 차단을 제어할 수 있습니다.
-                                    let wordchars = ndarray::Array2::<i64>::ones((seq_len, 5)).into_dyn();
+                                    // 🌟 [MANDATORY FIX] 두 입력 텐서의 차원 수(Rank 2)와 단어 개수 축(seq_len) 크기를 완벽하게 대칭 일치시킵니다.
+                                    // 기존의 seq_len * 5 플래튼 구조는 내부 레이어 연산 시 단어 축의 크기를 뒤틀리게 만들어 Concat mismatched 오류를 유발합니다.
+                                    // word_ids와 동일하게 [1, seq_len] 크기의 2차원 텐서로 정렬해주어야 내부 결합 노드에서 충돌 없이 연산이 성공합니다.
+                                    let wordchars = ndarray::Array2::<i64>::ones((1, seq_len)).into_dyn();
                                     
                                     // 🌟 Stanza 파이토치 forward 및 공식 ONNX 모델 규격 순서인 [word, wordchars] 정방향으로 재정렬합니다.
                                     // 단어 차원과 글자 차원이 내부 임베딩 레이어를 거쳐 동일한 축 스케일로 압축되므로 Concat 데드락이 완벽히 청소됩니다.
