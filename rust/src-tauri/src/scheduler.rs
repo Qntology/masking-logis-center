@@ -1595,7 +1595,10 @@ async fn process_task(
                                     // 🌟 wordchars 역시 첫 차원이 무조건 1이어야 하므로 (1, seq_len * 5) 구조의 2차원 dynamic 텐서로 직결합니다.
                                     let wordchars = ndarray::Array2::<i64>::ones((1, seq_len * 5)).into_dyn();
                                     
-                                    let inputs = vec![word_ids, wordchars];
+                                    // 🌟 [CRITICAL FIX] ONNX Runtime C++ 코어 엔진 내부의 입력 바인딩 순서 불일치 문제를 해결합니다.
+                                    // Stanza POS 모델은 구조상 wordchars 텐서가 첫 번째 입력(Index 0)이고, word_ids 텐서가 두 번째 입력(Index 1)으로 정의되어 있습니다.
+                                    // 주입 순서를 올바르게 스왑하여 내부 Concat 노드의 차원 매칭 오류를 완벽히 해결합니다.
+                                    let inputs = vec![wordchars, word_ids];
                                     
                                     match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
                                         Ok(outputs) => {
