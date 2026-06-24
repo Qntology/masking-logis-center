@@ -2270,6 +2270,8 @@ pub fn run() {
             cancellation_token: cancellation_token.clone(),
         })
         .setup(|app| {
+            // 🌟 ort 라이브러리를 onnxruntime 0.0.14로 교체하였으므로 초기화 로직을 삭제합니다.
+
             // [INIT] Copy model configs from local project source to AppData if they don't exist
             let app_dir = crate::utils::get_app_dir();
             let dest_models_dir = app_dir.join("models");

@@ -70,8 +70,10 @@ rand_chacha = "0.3"
 windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_System_Memory"] }
 libc = "0.2"
 boa_engine = { path = "../crates/boa-engine/core/engine" }
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
-ndarray = "0.17.2"
+onnxruntime = "0.0.14"
+# 🌟 [CRITICAL FIX] onnxruntime 0.0.14 내부의 하드코딩된 의존성 락(<0.15.2)을 통과하기 위해
+# 허용된 가장 높은 버전인 0.15.1로 최종 고정합니다.
+ndarray = "0.15.1"
 
 [target.'cfg(windows)'.dependencies]
 direct-storage = { path = "./direct-storage" }

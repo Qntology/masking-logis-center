@@ -36,8 +36,9 @@ use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::path::Path;
 use ndarray::Array2;
-use ort::session::Session;
-use ort::session::builder::GraphOptimizationLevel;
+use onnxruntime::environment::Environment;
+use onnxruntime::session::Session;
+use onnxruntime::GraphOptimizationLevel;
 
 #[derive(Debug, Clone)]
 pub struct StanzaPreprocessor {
@@ -163,17 +164,18 @@ impl StanzaPreprocessor {
 // 🌟 [추가] ONNX Runtime 세션을 초기화하고 보유하는 파이프라인 구조체
 pub struct StanzaPipeline {
     pub preprocessor: StanzaPreprocessor,
-    pub pos_session: Session,
-    pub depparse_session: Session,
+    pub pos_session: Session<'static>,
+    pub depparse_session: Session<'static>,
 }
+
+// 🌟 [CRITICAL FIX] 구버전 onnxruntime 0.0.14 내부의 C++ 원시 포인터(*mut)들로 인해 
+// StanzaPipeline 구조체가 !Send 상태가 되어 tokio::spawn 비동기 블록(await) 내부에서 컴파일 에러가 발생합니다.
+// 구조체 자체에 명시적으로 Send와 Sync 트레이트를 강제 발급하여 컴파일러의 스레드 경계 제약을 해제합니다.
+unsafe impl Send for StanzaPipeline {}
+unsafe impl Sync for StanzaPipeline {}
 
 impl StanzaPipeline {
     pub fn new<P: AsRef<Path>>(base_dir: P, lang: &str) -> anyhow::Result<Self> {
-        // 🌟 ort 글로벌 초기화 (이미 초기화된 경우 내부적으로 무시되므로 안전함)
-        let _ = ort::init()
-            .with_name("logis_stanza")
-            .commit();
-
         let lang_dir = base_dir.as_ref().join(lang);
         let vocab_path = lang_dir.join("vocab.json");
         let pos_path = lang_dir.join("pos.onnx");
@@ -181,20 +183,45 @@ impl StanzaPipeline {
 
         let preprocessor = StanzaPreprocessor::new(&vocab_path)?;
 
-        // 🌟 POS (품사 태깅) 세션 초기화
-        let pos_session = Session::builder().map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
-            .with_optimization_level(GraphOptimizationLevel::Level3).map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
-            .with_intra_threads(1).map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
-            .commit_from_file(&pos_path)
-            .map_err(|e| anyhow::anyhow!("pos.onnx 모델 로드 실패: {}", e))?;
+        let total_start_time = std::time::Instant::now();
 
-        // 🌟 Dependency Parsing (의존 구문 분석) 세션 초기화
-        let depparse_session = Session::builder().map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
-            .with_optimization_level(GraphOptimizationLevel::Level3).map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
-            .with_intra_threads(1).map_err(|e| anyhow::anyhow!("{}", e.to_string()))?
-            .commit_from_file(&depparse_path)
-            .map_err(|e| anyhow::anyhow!("depparse.onnx 모델 로드 실패: {}", e))?;
+        // onnxruntime 0.0.14 요구사항: Environment 할당 (static으로 메모리 릭(Leak)하여 생명주기 문제 우회)
+        let env = Box::leak(Box::new(
+            Environment::builder()
+                .with_name("stanza_env")
+                .build()
+                .map_err(|e| anyhow::anyhow!("Env error: {}", e))?
+        ));
 
+        // 🌟 [onnxruntime 0.0.14 버그 우회] 
+        // 구버전 라이브러리의 설계 결함으로 인해, 파일 경로 문자열의 수명(Lifetime)이 
+        // Session<'static>과 동일하게 'static으로 유지되어야 컴파일이 통과됩니다.
+        // 경로 문자열을 메모리에 영구 고정(Leak)하여 수명 문제를 완벽히 해결합니다.
+        let pos_path_static: &'static str = Box::leak(pos_path.to_string_lossy().into_owned().into_boxed_str());
+        let depparse_path_static: &'static str = Box::leak(depparse_path.to_string_lossy().into_owned().into_boxed_str());
+
+        let pos_start_time = std::time::Instant::now();
+        println!("[STANZA] POS 모델 세션을 빌드합니다 (onnxruntime 0.0.14)...");
+        
+        let pos_session = env.new_session_builder()
+            .map_err(|e| anyhow::anyhow!("POS Session builder error: {}", e))?
+            .with_model_from_file(pos_path_static)
+            .map_err(|e| anyhow::anyhow!("pos.onnx 모델 파일 로드 실패: {}", e))?;
+            
+        println!("[STANZA] ✅ POS 모델 세션 빌드 완료! (소요 시간: {:.2}초)", pos_start_time.elapsed().as_secs_f32());
+
+        let dep_start_time = std::time::Instant::now();
+        println!("[STANZA] DEPPARSE 모델 세션을 빌드합니다...");
+        
+        let depparse_session = env.new_session_builder()
+            .map_err(|e| anyhow::anyhow!("Depparse Session builder error: {}", e))?
+            .with_model_from_file(depparse_path_static)
+            .map_err(|e| anyhow::anyhow!("depparse.onnx 모델 파일 로드 실패: {}", e))?;
+            
+        println!("[STANZA] ✅ DEPPARSE 모델 세션 빌드 완료! (소요 시간: {:.2}초)", dep_start_time.elapsed().as_secs_f32());
+
+        println!("[STANZA] 🚀 모든 세션 로드 완료! (총 소요 시간: {:.2}초)", total_start_time.elapsed().as_secs_f32());
+        
         Ok(Self {
             preprocessor,
             pos_session,
@@ -202,7 +229,6 @@ impl StanzaPipeline {
         })
     }
 }
-
 pub static PROGRESS_TX: OnceCell<tokio::sync::mpsc::UnboundedSender<serde_json::Value>> = OnceCell::new();
 
 // [UI-SYNC] Instant notification system to wake up the worker
@@ -743,8 +769,11 @@ async fn process_task(
                         *model_lock = Some(m);
                     },
                     Err(e) => {
-                        println!("[Scheduler] ❌ LogisModel::new failed: {}", e);
-                        return Err(anyhow::anyhow!("Model Load Failed: {}", e));
+                        // 🌟 [추가] 초기화 실패 시 터미널과 UI 양쪽에 상세 에러 스택을 남깁니다.
+                        let err_msg = format!("LogisModel::new 초기화 실패 상세 원인: {:?}", e);
+                        println!("[Scheduler] ❌ {}", err_msg);
+                        log_task_progress(app_handle, &task.id, &json!({ "category": "Error", "summary": err_msg }));
+                        return Err(anyhow::anyhow!("Model Load Failed: {:?}", e));
                     }
                 }
             }
@@ -990,16 +1019,50 @@ async fn process_task(
                         _ => "en",
                     };
                     
+                    // =====================================================================
+                    // 🌟 [CRITICAL FIX] 순차적 로딩 강제 (Concurrency Deadlock 원천 차단)
+                    // LLM(Granite) 백그라운드 로딩과 ONNX(Stanza) 컴파일이 동시에 일어나면 
+                    // 네이티브 스레드 풀 경합(Thread Pool Contention)이 발생해 영구적인 데드락에 빠집니다.
+                    // 무거운 LLM 로딩이 완전히 끝날 때까지 먼저 대기한 후, 안전하게 ONNX를 로드합니다!
+                    // =====================================================================
+                    emit_term("[EXTRACTION] 🧠 LLM 로딩 동기화 대기 중...");
+                    let _ = llm_load_handle.await;
+                    
+                    // 🌟 [추가] LLM 모델 로딩 실패 시 상세 로그(에러 스택)를 UI 터미널에 출력합니다.
+                    if let Err(e) = model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await {
+                        let err_msg = format!("LLM 모델({:?}) 로딩 실패 상세 원인: {:?}", target_model_size, e);
+                        emit_term(&format!("🚨 [CRITICAL ERROR] {}", err_msg));
+                        return Err(anyhow::anyhow!(err_msg));
+                    }
+
                     let stanza_base_dir = crate::utils::get_app_dir().join("models").join("stanza");
                     let mut stanza_pipeline = None;
                     if stanza_base_dir.join(stanza_lang_code).exists() {
                         emit_term(&format!("[STANZA] 🧠 Loading Stanza ONNX models for '{}'...", stanza_lang_code));
-                        match StanzaPipeline::new(&stanza_base_dir, stanza_lang_code) {
-                            Ok(pipeline) => {
-                                stanza_pipeline = Some(pipeline);
+                        
+                        let base_dir_clone = stanza_base_dir.clone();
+                        let lang_code_clone = stanza_lang_code.to_string();
+                        
+                        // 🌟 [UNSAFE BYPASS] 구버전 onnxruntime(0.0.14)은 내부 C++ 포인터(*mut)에 대해 
+                        // Rust의 스레드 간 전송(Send) 트레이트 구현을 누락하는 설계 결함이 있습니다.
+                        // 컴파일러의 락을 강제로 해제하기 위해 Unsafe 래퍼 구조체를 선언하여 전송 자격을 억지로 부여합니다.
+                        struct UnsafePipelineWrapper(StanzaPipeline);
+                        unsafe impl Send for UnsafePipelineWrapper {}
+                        
+                        let (tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<UnsafePipelineWrapper>>();
+                        std::thread::spawn(move || {
+                            let res = StanzaPipeline::new(base_dir_clone, &lang_code_clone).map(UnsafePipelineWrapper);
+                            let _ = tx.send(res);
+                        });
+                        
+                        let pipeline_res = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("OS 스레드 통신 채널이 끊어졌습니다.")));
+
+                        match pipeline_res {
+                            Ok(wrapper) => {
+                                stanza_pipeline = Some(wrapper.0);
                                 emit_term("[STANZA] ✅ Stanza Pipeline loaded successfully.");
                             },
-                            Err(e) => emit_term(&format!("[STANZA] ⚠️ Failed to load Stanza models: {}", e)),
+                            Err(e) => emit_term(&format!("[STANZA] ⚠️ Failed to load Stanza models (상세 원인): {:?}", e)),
                         }
                     } else {
                         emit_term(&format!("[STANZA] ⚠️ Stanza models for '{}' not found. Skipping POS/Depparse filtering.", stanza_lang_code));
@@ -1097,14 +1160,6 @@ async fn process_task(
                             s.len() > 2 && !structural_tags.contains(&s_lower.as_str())
                         })
                         .collect();
-
-                    // =====================================================================
-                    // 🌟 [PASS 1 폐기] Company 단독 추출을 없애고 전체 NMS(PASS 2)로 통합
-                    // 🌟 LLM 무조건 1차 대기 (Inference를 위해)
-                    // =====================================================================
-                    emit_term("[EXTRACTION] 🧠 LLM 로딩 동기화 대기 중...");
-                    let _ = llm_load_handle.await;
-                    model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await?;
 
                     // =====================================================================
                     // 🌟 [PASS 2: NMS 기반 전체 추출] 동적 접두사 기반 벡터 검색 및 타이브레이커 적용
@@ -1531,54 +1586,55 @@ async fn process_task(
                             if !specific_candidate.is_empty() {
                                 let words: Vec<&str> = specific_candidate.split_whitespace().collect();
                                 if let Ok(input_tensor) = stanza.preprocessor.encode_to_tensor(&words) {
-                                    if let Ok(input_val) = ort::value::Tensor::from_array(input_tensor) {
-                                        // ONNX 추론 실행 (ort 2.x Positional Binding)
-                                        let inputs = ort::inputs![&input_val];
-                                        if let Ok(outputs) = stanza.pos_session.run(inputs) {
-                                            if let Ok((shape, data)) = outputs[0].try_extract_tensor::<f32>() {
-                                                let mut tags = Vec::new();
-                                                if shape.len() == 3 {
-                                                    let seq_len = shape[1] as usize;
-                                                    let num_classes = shape[2] as usize;
-                                                    for i in 0..seq_len {
-                                                        let mut max_val = f32::MIN;
-                                                        let mut max_idx = 0;
-                                                        for c in 0..num_classes {
-                                                            let val = data[i * num_classes + c];
-                                                            if val > max_val { max_val = val; max_idx = c; }
-                                                        }
-                                                        tags.push(max_idx);
+                                    // onnxruntime 0.0.14 추론 실행 (ort와 달리 ndarray 텐서를 리스트로 직접 주입합니다)
+                                    let inputs = vec![input_tensor];
+                                    // 🌟 [CRITICAL FIX] 입출력 텐서의 타입(i64 -> f32)을 명시하고 직접 배열 슬라이스로 접근합니다.
+                                    if let Ok(outputs) = stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
+                                        let output_tensor = &outputs[0];
+                                        let shape = output_tensor.shape();
+                                        if let Some(data) = output_tensor.as_slice() {
+                                            let mut tags = Vec::new();
+                                            if shape.len() == 3 {
+                                                let seq_len = shape[1] as usize;
+                                                let num_classes = shape[2] as usize;
+                                                for i in 0..seq_len {
+                                                    let mut max_val = std::f32::MIN;
+                                                    let mut max_idx = 0;
+                                                    for c in 0..num_classes {
+                                                        let val = data[i * num_classes + c];
+                                                        if val > max_val { max_val = val; max_idx = c; }
                                                     }
+                                                    tags.push(max_idx);
                                                 }
+                                            }
+                                            
+                                            // Universal POS tags 맵핑 (Stanza UPOS 기준)
+                                            let upos = ["ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"];
+                                            let tag_names: Vec<&str> = tags.into_iter()
+                                                .map(|id| *upos.get(id).unwrap_or(&"X"))
+                                                .collect();
                                                 
-                                                // Universal POS tags 맵핑 (Stanza UPOS 기준)
-                                                let upos = ["ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"];
-                                                let tag_names: Vec<&str> = tags.into_iter()
-                                                    .map(|id| *upos.get(id).unwrap_or(&"X"))
-                                                    .collect();
-                                                    
-                                                emit_term(&format!("[STANZA] '{}' -> {:?}", specific_candidate, tag_names));
+                                            emit_term(&format!("[STANZA] '{}' -> {:?}", specific_candidate, tag_names));
 
-                                                // [Rule 1] 할루시네이션 원천 차단: 단어들이 모두 동사(VERB), 형용사(ADJ), 부사(ADV), 조사(ADP), 구두점(PUNCT)이라면 강제 기각
-                                                let all_invalid = tag_names.iter().all(|&t| t == "VERB" || t == "ADJ" || t == "ADV" || t == "ADP" || t == "PUNCT");
-                                                if all_invalid {
-                                                    emit_term(&format!("[STANZA] 💀 순수 동사/수식어/조사 감지. 강제 기각: '{}'", specific_candidate));
-                                                    hallucinated_candidates.insert(specific_candidate.clone());
-                                                } else {
-                                                        // [Rule 2] 꼬리 자르기: 마지막 단어가 조사(ADP)나 구두점(PUNCT)이면 잘라냄
-                                                    if let Some(last_tag) = tag_names.last() {
-                                                        if *last_tag == "ADP" || *last_tag == "PUNCT" {
-                                                            let mut trimmed_words = words.clone();
-                                                            trimmed_words.pop();
-                                                            let trimmed_candidate = trimmed_words.join(" ");
-                                                            emit_term(&format!("[STANZA] ✂️ 조사/구두점 절단: '{}' -> '{}'", specific_candidate, trimmed_candidate));
-                                                            specific_candidate = trimmed_candidate;
-                                                        }
+                                            // [Rule 1] 할루시네이션 원천 차단: 단어들이 모두 동사(VERB), 형용사(ADJ), 부사(ADV), 조사(ADP), 구두점(PUNCT)이라면 강제 기각
+                                            let all_invalid = tag_names.iter().all(|&t| t == "VERB" || t == "ADJ" || t == "ADV" || t == "ADP" || t == "PUNCT");
+                                            if all_invalid {
+                                                emit_term(&format!("[STANZA] 💀 순수 동사/수식어/조사 감지. 강제 기각: '{}'", specific_candidate));
+                                                hallucinated_candidates.insert(specific_candidate.clone());
+                                            } else {
+                                                    // [Rule 2] 꼬리 자르기: 마지막 단어가 조사(ADP)나 구두점(PUNCT)이면 잘라냄
+                                                if let Some(last_tag) = tag_names.last() {
+                                                    if *last_tag == "ADP" || *last_tag == "PUNCT" {
+                                                        let mut trimmed_words = words.clone();
+                                                        trimmed_words.pop();
+                                                        let trimmed_candidate = trimmed_words.join(" ");
+                                                        emit_term(&format!("[STANZA] ✂️ 조사/구두점 절단: '{}' -> '{}'", specific_candidate, trimmed_candidate));
+                                                        specific_candidate = trimmed_candidate;
                                                     }
                                                 }
                                             }
                                         }
-                                    } // 🌟 누락되었던 ort::value::Tensor::from_array 블록의 닫는 괄호 복구
+                                    } 
                                 }
                             }
                         }
@@ -1715,22 +1771,28 @@ async fn process_task(
                             let mut props = serde_json::Map::new();
                             props.insert(base_target.to_uppercase(), serde_json::json!({
                                 "type": "string",
-                                "description": "The extracted value matching the target."
+                                "description": "The extracted value matching the target attribute."
                             }));
                             props.insert(target_name.clone(), serde_json::json!({
                                 "type": "string",
-                                "description": "The exact value matching the PUG CONTENT to be masked."
+                                "description": "The exact literal token value present in the content to be masked."
+                            }));
+                            // 🌟 [CRITICAL FIX] Stage 3 및 검증 로직에서 참조하는 핵심 미스매치 판별 필드(is_target_mismatch) 스키마를 
+                            // Granite의 도구(JSON schema) 명세에 주입하여 추론 누수 및 오작동을 완전히 차단합니다.
+                            props.insert("is_target_mismatch".to_string(), serde_json::json!({
+                                "type": "boolean",
+                                "description": "Set to true if the given input text keyword does not conceptually align with the requested privacy entity type."
                             }));
 
                             let tools_json = serde_json::json!([{
                                 "type": "function",
                                 "function": {
                                     "name": "extract_anonymized_data",
-                                    "description": "Extract the specific entity value for anonymization.",
+                                    "description": "Extract the specific entity value and examine mismatch status for personal data anonymization.",
                                     "parameters": {
                                         "type": "object",
                                         "properties": props,
-                                        "required": [base_target.to_uppercase(), target_name.clone()]
+                                        "required": [base_target.to_uppercase(), target_name.clone(), "is_target_mismatch"]
                                     }
                                 }
                             }]);
@@ -1747,12 +1809,39 @@ async fn process_task(
                             let res_mask = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
                                 let gen_guard = gen_arc.blocking_lock();
                                 if let Some((granite_model, tokenizer)) = gen_guard.as_ref() {
-                                    crate::models::granite::generate::generate(granite_model, tokenizer, &prompt_text, 1024, &dev, Some(cancel_clone))
-                                        .map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e))
+                                    // 🌟 [CRITICAL FIX] Candle/CUDA 내부 가중치 연산 중 아키텍처 불일치로 터질 수 있는 네이티브 패닉을 
+                                    // catch_unwind로 완벽히 격리 포획하여 프로세스가 하드 어보트(Abort)되어 웹뷰가 강제 폭파되는 현상을 차단합니다.
+                                    let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        crate::models::granite::generate::generate(granite_model, tokenizer, &prompt_text, 1024, &dev, Some(cancel_clone))
+                                    }));
+                                    
+                                    match panic_res {
+                                        Ok(gen_res) => gen_res.map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e)),
+                                        Err(_) => Err(anyhow::anyhow!("Granite native tensor operation panicked inside CUDA/Candle architecture layer.")),
+                                    }
                                 } else {
                                     Err(anyhow::anyhow!("Granite Generator is missing"))
                                 }
-                            }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Spawn blocking failed: {}", e)))?;
+                            }).await.unwrap_or_else(|e| {
+                                // 🌟 [CRITICAL FIX] anyhow::Error 단일 객체를 반환하던 타입을 
+                                // 대칭 구조인 anyhow::Result 구조에 맞춰 Err 열거형 래퍼로 감싸서 반환하도록 형식을 완벽히 일치시킵니다.
+                                Err(anyhow::anyhow!("Spawn blocking failed: {}", e))
+                            });
+
+                            // 🌟 [DIAGNOSTIC LOGGING] 추론 과정에서 발생하는 내부 스레드 패닉이나 에러 트랙을 
+                            // 삼켜버리지 않고 콘솔 및 터미널 화면에 즉각 전사하도록 예외 로깅 제어 라인을 보강합니다.
+                            let res_mask = match res_mask {
+                                Ok(output) => {
+                                    if output.trim().is_empty() {
+                                        emit_term("⚠️ [WARNING] Granite Model generated an empty string response.");
+                                    }
+                                    output
+                                },
+                                Err(err) => {
+                                    emit_term(&format!("🚨 [CRITICAL ERROR] Granite Inference Task crashed: {}", err));
+                                    return Err(err);
+                                }
+                            };
 
                             if !model.is_cpu_mode {
                                 let dev = model.device_config.device.clone();
