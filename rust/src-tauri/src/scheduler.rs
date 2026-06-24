@@ -50,33 +50,79 @@ impl StanzaPreprocessor {
         let data = std::fs::read_to_string(vocab_path.as_ref())
             .map_err(|e| anyhow::anyhow!("Failed to read vocab.json: {}", e))?;
         
-        // 🌟 [CRITICAL FIX] 단순 HashMap 파싱 대신, serde_json::Value로 유연하게 읽어들여 
-        // HF의 tokenizer.json 포맷이나 배열 포맷 등 다양한 구조에 대응합니다.
         let json_val: serde_json::Value = serde_json::from_str(&data)
             .map_err(|e| anyhow::anyhow!("Failed to parse vocab.json as JSON: {}", e))?;
             
         let mut word_vocab: HashMap<String, i64> = HashMap::new();
         
-        // 1. HF tokenizer.json 포맷 ({"model": {"vocab": {...}}}) 또는 직접 vocab 객체가 있는 경우
-        let target_obj = if let Some(model) = json_val.get("model") {
-            model.get("vocab").and_then(|v| v.as_object())
-        } else if let Some(vocab) = json_val.get("vocab") {
-            vocab.as_object()
+        // 최상위 분기 이전에 Stanza ko 패키지 특유의 중첩 구조인 {"tokenize": {"main": [...]}} 구조를 먼저 확인하고 임포트합니다.
+        let target_value = if let Some(tokenize) = json_val.get("tokenize") {
+            tokenize.get("main").unwrap_or(&json_val)
+        } else if let Some(pos) = json_val.get("pos") {
+            pos.get("word").or_else(|| pos.get("char")).unwrap_or(&json_val)
         } else {
-            json_val.as_object()
+            &json_val
         };
 
-        if let Some(obj) = target_obj {
-            for (k, v) in obj {
-                if let Some(id) = v.as_i64() {
-                    word_vocab.insert(k.clone(), id);
-                }
-            }
-        } else if let Some(arr) = json_val.as_array() {
-            // 2. 단어들의 배열 포맷인 경우 (인덱스가 곧 ID)
+        if let Some(arr) = target_value.as_array() {
             for (i, v) in arr.iter().enumerate() {
                 if let Some(s) = v.as_str() {
                     word_vocab.insert(s.to_string(), i as i64);
+                } else if let Some(obj) = v.as_object() {
+                    // [{ "word": "토큰", "id": 0 }] 또는 [{ "단어": { "id": 0 } }] 형태의 복합 구조 대응
+                    let word_opt = obj.get("word").and_then(|w| w.as_str());
+                    let id_opt = obj.get("id").and_then(|id| id.as_i64()).unwrap_or(i as i64);
+                    if let Some(w) = word_opt {
+                        word_vocab.insert(w.to_string(), id_opt);
+                    } else {
+                        // 키 자체가 단어이고 내부 객체에 id 정보가 매핑된 변종 구조 파싱
+                        for (k, val) in obj {
+                            if let Some(id_val) = val.get("id").and_then(|id| id.as_i64()) {
+                                word_vocab.insert(k.clone(), id_val);
+                            } else if let Some(id_val) = val.as_i64() {
+                                word_vocab.insert(k.clone(), id_val);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            let target_obj = if let Some(model) = target_value.get("model") {
+                model.get("vocab").and_then(|v| v.as_object())
+            } else if let Some(vocab) = target_value.get("vocab") {
+                vocab.as_object()
+            } else if let Some(id_to_string) = target_value.get("id_to_string") {
+                // {"id_to_string": {"0": "단어"}} 형태 구조 대응을 위해 역산 처리 추가
+                if let Some(obj) = id_to_string.as_object() {
+                    for (id_str, word_val) in obj {
+                        if let (Ok(parsed_id), Some(w)) = (id_str.parse::<i64>(), word_val.as_str()) {
+                            word_vocab.insert(w.to_string(), parsed_id);
+                        }
+                    }
+                }
+                None
+            } else {
+                target_value.as_object()
+            };
+
+            if let Some(obj) = target_obj {
+                for (k, v) in obj {
+                    if let Some(id) = v.as_i64() {
+                        word_vocab.insert(k.clone(), id);
+                    } else if let Some(s) = v.as_str() {
+                        // {"단어": "0"} 형태의 문자열화된 ID 대응
+                        if let Ok(parsed_id) = s.parse::<i64>() {
+                            word_vocab.insert(k.clone(), parsed_id);
+                        }
+                    } else if let Some(id_val) = v.get("id").and_then(|i| i.as_i64()) {
+                        // 복합 토큰 메타데이터 내부 객체 {"id": 0} 형태 대응
+                        word_vocab.insert(k.clone(), id_val);
+                    } else if v.is_object() || v.is_array() {
+                        // 기타 내부 깊은 스캔 구조 대응
+                        if let Some(id_val) = v.get("id").and_then(|i| i.as_i64()) {
+                            word_vocab.insert(k.clone(), id_val);
+                        }
+                    }
                 }
             }
         }
@@ -85,8 +131,10 @@ impl StanzaPreprocessor {
             return Err(anyhow::anyhow!("vocab.json 내부에서 단어 매핑(Vocab) 구조를 찾을 수 없습니다."));
         }
         
-        // 보통 UNK(Unknown) 토큰은 0 또는 <unk> 키 매핑 사용
-        let unk_id = *word_vocab.get("<unk>").unwrap_or(&0);
+        let unk_id = *word_vocab.get("<unk>")
+            .or_else(|| word_vocab.get("<UNK>"))
+            .or_else(|| word_vocab.get("[UNK]"))
+            .unwrap_or(&0);
         
         Ok(Self { word_vocab, unk_id })
     }
