@@ -1623,37 +1623,21 @@ impl LogisModel {
 
         let prompt1 = crate::parsing::para2graph(language);
         
-        let tools_json = serde_json::json!([{
-            "type": "function",
-            "function": {
-                "name": "segment_search_query",
-                "description": "Translate and segment the natural language search query into the specified dataset structure.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "original_text": { "type": "string" },
-                        "segmented_plan": { "type": "string" },
-                        "context": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "text": { "type": "string" },
-                                    "language": { "type": "string" },
-                                    "type": { "type": "string", "enum": ["order", "goods", "tracking", "review", "coupon", "event", ""] }
-                                },
-                                "required": ["text", "language", "type"]
-                            }
-                        }
-                    },
-                    "required": ["original_text", "segmented_plan", "context"]
+        let expected_json_format = serde_json::json!({
+            "original_text": "string",
+            "segmented_plan": "string",
+            "context": [
+                {
+                    "text": "string",
+                    "language": "string",
+                    "type": "order|goods|tracking|review|coupon|event|"
                 }
-            }
-        }]);
+            ]
+        });
 
         let system_prompt_baked = format!(
-            "<|start_of_role|>system<|end_of_role|>You are an intelligent search parameter extractor.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n",
-            serde_json::to_string_pretty(&tools_json).unwrap_or_default()
+            "<|start_of_role|>system<|end_of_role|>You are an intelligent search parameter extractor.\nYou must respond ONLY with a valid JSON object. Do not wrap in tags. Use this exact format:\n{}\n<|end_of_text|>\n",
+            serde_json::to_string_pretty(&expected_json_format).unwrap_or_default()
         );
         
         let user_prompt = format!(
@@ -1772,27 +1756,20 @@ impl LogisModel {
                     "required": ["is_percent", "percent_total", "value", "operator"]
                 }));
 
-                let tools_json = serde_json::json!([{
-                    "type": "function",
-                    "function": {
-                        "name": "extract_numeric_conditions",
-                        "description": "Extract, transform, and normalize numeric conditions from the query.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "condition": {
-                                    "type": "object",
-                                    "properties": condition_props
-                                }
-                            },
-                            "required": ["condition"]
+                let expected_json_format = serde_json::json!({
+                    "condition": {
+                        seg_type.clone(): {
+                            "is_percent": false,
+                            "percent_total": 0.0,
+                            "value": "string",
+                            "operator": "gt|gte|lt|lte|eq"
                         }
                     }
-                }]);
+                });
 
                 let system_prompt_baked = format!(
-                    "<|start_of_role|>system<|end_of_role|>Extract conditions.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n",
-                    serde_json::to_string_pretty(&tools_json).unwrap_or_default()
+                    "<|start_of_role|>system<|end_of_role|>Extract conditions.\nYou must respond ONLY with a valid JSON object. Do not wrap in tags. Use this exact format:\n{}\n<|end_of_text|>\n",
+                    serde_json::to_string_pretty(&expected_json_format).unwrap_or_default()
                 );
                 
                 let user_prompt = format!("<|start_of_role|>user<|end_of_role|>{}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>", prompt1_5);
@@ -1996,32 +1973,22 @@ impl LogisModel {
         emit_term(&format!("[STAGE-1] Extracting shipping filters from query: '{}'", query));
         let prompt = crate::parsing::extract_shipping_conditions(&query, language);
         
-        let tools_json = serde_json::json!([{
-            "type": "function",
-            "function": {
-                "name": "extract_shipping_conditions",
-                "description": "Extract logistics filters from the natural language query.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "no": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
-                        "status": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
-                        "vessel": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
-                        "pol": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
-                        "pod": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
-                        "sender_name": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
-                        "recipient_name": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
-                        "incoterms": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
-                        "weight": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } },
-                        "amount": { "type": "object", "properties": { "operator": {"type":"string"}, "value": {"type":"string"} } }
-                    }
-                }
-            }
-        }]);
+        let expected_json_format = serde_json::json!({
+            "no": { "operator": "eq", "value": "string" },
+            "status": { "operator": "eq", "value": "string" },
+            "vessel": { "operator": "contains", "value": "string" },
+            "pol": { "operator": "contains", "value": "string" },
+            "pod": { "operator": "contains", "value": "string" },
+            "sender_name": { "operator": "contains", "value": "string" },
+            "recipient_name": { "operator": "contains", "value": "string" },
+            "incoterms": { "operator": "eq", "value": "string" },
+            "weight": { "operator": "eq", "value": "string" },
+            "amount": { "operator": "eq", "value": "string" }
+        });
 
         let system_prompt_baked = format!(
-            "<|start_of_role|>system<|end_of_role|>Extract shipping conditions.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n",
-            serde_json::to_string_pretty(&tools_json).unwrap_or_default()
+            "<|start_of_role|>system<|end_of_role|>Extract shipping conditions.\nYou must respond ONLY with a valid JSON object. Do not wrap in tags. Use this exact format:\n{}\n<|end_of_text|>\n",
+            serde_json::to_string_pretty(&expected_json_format).unwrap_or_default()
         );
 
         let user_prompt = format!(

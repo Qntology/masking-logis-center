@@ -1685,9 +1685,6 @@ async fn process_task(
                         for (history_target, history_val) in &domain_history {
                             if *history_target != target_name {
                                 ignore_list.push(history_val.clone());
-                                ignore_list.push(format!(" {}", history_val));
-                                ignore_list.push(format!("\"{}", history_val));
-                                ignore_list.push(format!(" \"{}", history_val));
                             }
                         }
 
@@ -1711,6 +1708,40 @@ async fn process_task(
                             matched_context = matched_context.replace(original_val, marker);
                         }
 
+                        // 🌟 [PREFIX CACHING] Mamba State 유지를 위해 루프 진입 전 공통 프롬프트를 1회 사전 연산(Prefill)합니다.
+                        let already_found_str = if current_target_found.is_empty() { "".to_string() } else { current_target_found.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ") };
+                        let candidates_str = if specific_candidate.is_empty() { "".to_string() } else { format!("\"{}\"", specific_candidate.replace("\"", "\\\"")) };
+                        let input_keyword = if specific_candidate.is_empty() { target_bias.clone() } else { specific_candidate.clone() };
+
+                        let mut clean_matched_context = matched_context.clone();
+                        if let Ok(marker_re) = regex::Regex::new(r"\[___REDACTED_(LINK|NOISE)_\d+___\]") {
+                            clean_matched_context = marker_re.replace_all(&clean_matched_context, " ").to_string();
+                        }
+
+                        // 변하지 않는 기본 프롬프트만 생성 (ignore_list 배제)
+                        let (system_prompt_base, user_prompt_base) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, "", &candidates_str, &local_language, &localized_guide_str, &input_keyword);
+                        
+                        let base_prompt_text = format!(
+                            "<|start_of_role|>system<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}",
+                            system_prompt_base,
+                            user_prompt_base
+                        );
+
+                        let dev_base = model.device_config.device.clone();
+                        let gen_arc_base = model.granite_generator.clone();
+                        
+                        // 공통 컨텍스트 스냅샷 생성 (루프 외부에서 단 1회 실행)
+                        let base_cache = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<crate::models::granite::model::GraniteHybridCache>> {
+                            let mut gen_guard = gen_arc_base.blocking_lock();
+                            if let Some(gen) = gen_guard.as_mut() {
+                                gen.clear_kv_cache();
+                                gen.prefill(&base_prompt_text, &dev_base).map_err(|e| anyhow::anyhow!("Prefill failed: {}", e))?;
+                                Ok(gen.get_cache_snapshot())
+                            } else {
+                                Ok(None)
+                            }
+                        }).await.unwrap_or(Ok(None)).unwrap_or(None);
+
                         loop {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
                             
@@ -1718,25 +1749,6 @@ async fn process_task(
                                 emit_term(&format!("[EXTRACTION] 🛑 온도 1.0 도달. {} 항목 종료.", target_item));
                                 break;
                             }
-
-                            let already_found_str = if current_target_found.is_empty() {
-                                "".to_string()
-                            } else {
-                                current_target_found.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
-                            };
-
-                            let not_found_str = if ignore_list.is_empty() {
-                                "".to_string()
-                            } else {
-                                ignore_list.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ")
-                            };
-
-                            // 🌟 [신규 추가] Vector가 찾아낸 1개의 후보 단서를 전달
-                            let candidates_str = if specific_candidate.is_empty() {
-                                "".to_string()
-                            } else {
-                                format!("\"{}\"", specific_candidate.replace("\"", "\\\""))
-                            };
 
                             let mut current_lang = target_name.split('_').next().unwrap_or("english");
                             if !detected_languages_vec.contains(&current_lang.to_string()) {
@@ -1755,20 +1767,6 @@ async fn process_task(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("idiom, phrase");
 
-                            let mut clean_matched_context = matched_context.clone();
-                            if let Ok(marker_re) = regex::Regex::new(r"\[___REDACTED_(LINK|NOISE)_\d+___\]") {
-                                clean_matched_context = marker_re.replace_all(&clean_matched_context, " ").to_string();
-                            }
-
-                            // 🌟 [CRITICAL FIX] NMS 값(specific_candidate)이 바로 input_keyword 로 할당됩니다.
-                            let input_keyword = if specific_candidate.is_empty() {
-                                target_bias.clone()
-                            } else {
-                                specific_candidate.clone()
-                            };
-
-                            let (mut system_prompt, user_prompt) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, &not_found_str, &candidates_str, &local_language, &localized_guide_str, &input_keyword);
-                            
                             let payload = json!({ 
                                 "task_id": task.id.clone(),
                                 "category": format!("Masking ({}/{}) - Type {}", idx + 1, total, p_idx + 1), 
@@ -1779,67 +1777,51 @@ async fn process_task(
                             crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
 
                             let cancel_clone = cancellation_token.clone();
-                            let system_prompt_clone = system_prompt.clone();
-                            let user_prompt_clone = user_prompt.clone();
                             let session_id_clone = format!("{}_{}", task.id, doc_id);
 
                             let gen_arc = model.granite_generator.clone();
-                            let mut final_system_prompt = system_prompt_clone.clone();
+                            
+                            // 🌟 재시도마다 내용이 바뀌는 가변 영역 조립
+                            let mut variable_suffix = String::new();
                             if !ignore_list.is_empty() {
-                                final_system_prompt.push_str("\n\nCRITICAL: DO NOT output any of the following values under any circumstances:\n");
-                                for ignored in &ignore_list {
-                                    final_system_prompt.push_str(&format!("- {}\n", ignored));
+                                let mut unique_ignores = std::collections::HashSet::new();
+                                let mut clean_ignore_list = Vec::new();
+                                for ign in ignore_list.iter().rev() {
+                                    if unique_ignores.insert(ign.clone()) {
+                                        clean_ignore_list.push(ign.clone());
+                                        if clean_ignore_list.len() >= 15 { break; }
+                                    }
+                                }
+                                
+                                variable_suffix.push_str("\n\nCRITICAL: DO NOT output any of the following values under any circumstances (regardless of upper/lowercase, spaces, or quotes):\n");
+                                for ignored in clean_ignore_list.iter().rev() {
+                                    variable_suffix.push_str(&format!("- {}\n", ignored));
                                 }
                             }
                             
-                            let mut props = serde_json::Map::new();
-                            props.insert(base_target.to_lowercase(), serde_json::json!({
-                                "type": "string",
-                                "description": "The extracted value matching the target attribute."
-                            }));
-                            props.insert(target_name.clone(), serde_json::json!({
-                                "type": "string",
-                                "description": "The exact literal token value present in the content to be masked."
-                            }));
-                            // 🌟 [CRITICAL FIX] Stage 3 및 검증 로직에서 참조하는 핵심 미스매치 판별 필드(is_target_mismatch) 스키마를 
-                            // Granite의 도구(JSON schema) 명세에 주입하여 추론 누수 및 오작동을 완전히 차단합니다.
-                            props.insert("is_target_mismatch".to_string(), serde_json::json!({
-                                "type": "boolean",
-                                "description": "Set to true if the given input text keyword does not conceptually align with the requested privacy entity type."
-                            }));
+                            let expected_json_format = serde_json::json!({
+                                base_target.to_lowercase(): "The extracted value matching the target attribute",
+                                target_name.clone(): "The exact literal token value present in the content to be masked",
+                                "is_target_mismatch": false
+                            });
 
-                            let tools_json = serde_json::json!([{
-                                "type": "function",
-                                "function": {
-                                    "name": "extract_anonymized_data",
-                                    "description": "Extract the specific entity value and examine mismatch status for personal data anonymization.",
-                                    "parameters": {
-                                        "type": "object",
-                                        "properties": props,
-                                        "required": [base_target.to_lowercase(), target_name.clone(), "is_target_mismatch"]
-                                    }
-                                }
-                            }]);
-
-                            let prompt_text = format!(
-                                "<|start_of_role|>system<|end_of_role|>{}\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
-                                final_system_prompt,
-                                serde_json::to_string_pretty(&tools_json).unwrap_or_default(),
-                                user_prompt_clone
-                            );
+                            variable_suffix.push_str(&format!(
+                                "\n\nYou must respond ONLY with a valid JSON object. Do not wrap in tags. Use this exact format:\n{}\n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
+                                serde_json::to_string_pretty(&expected_json_format).unwrap_or_default()
+                            ));
                             
                             let dev = model.device_config.device.clone();
+                            let base_cache_clone = base_cache.clone();
 
                             let res_mask = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
                                 let mut gen_guard = gen_arc.blocking_lock();
                                 if let Some(gen) = gen_guard.as_mut() {
-                                    // 🌟 [CRITICAL FIX] Mamba의 상태(Cache) 오염을 막기 위해 각 타겟 추출 전 반드시 캐시를 초기화합니다.
-                                    gen.clear_kv_cache();
+                                    // 🌟 [PREFIX CACHING 적용] Base Snapshot을 복원하고 가변 영역(변동되는 지시어)만 추가 추론합니다.
+                                    gen.set_cache_snapshot(base_cache_clone);
                                     
-                                    // 🌟 [CRITICAL FIX] Candle/CUDA 내부 가중치 연산 중 아키텍처 불일치로 터질 수 있는 네이티브 패닉을 
-                                    // catch_unwind로 완벽히 격리 포획하여 프로세스가 하드 어보트(Abort)되어 웹뷰가 강제 폭파되는 현상을 차단합니다.
                                     let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        gen.generate(&prompt_text, 1024, &dev, Some(cancel_clone))
+                                        // 전체 프롬프트가 아닌, 꼬리표(variable_suffix)만 넘깁니다!
+                                        gen.generate(&variable_suffix, 1024, &dev, Some(cancel_clone))
                                     }));
                                     
                                     match panic_res {
@@ -1850,8 +1832,6 @@ async fn process_task(
                                     Err(anyhow::anyhow!("Granite Generator is missing"))
                                 }
                             }).await.unwrap_or_else(|e| {
-                                // 🌟 [CRITICAL FIX] anyhow::Error 단일 객체를 반환하던 타입을 
-                                // 대칭 구조인 anyhow::Result 구조에 맞춰 Err 열거형 래퍼로 감싸서 반환하도록 형식을 완벽히 일치시킵니다.
                                 Err(anyhow::anyhow!("Spawn blocking failed: {}", e))
                             });
 
@@ -1898,10 +1878,7 @@ async fn process_task(
                                 }
 
                                 // 빈 값 꼼수 방지 및 재시도 유도
-                                ignore_list.push("".to_string());
                                 ignore_list.push("null".to_string());
-                                ignore_list.push("\"\"".to_string());
-                                ignore_list.push("\"null\"".to_string());
                                 continue;
                             }
 
@@ -1979,8 +1956,6 @@ async fn process_task(
                                     emit_term(&format!("[DEBUG] ❌ 단순 오답 추출 감지. 무시 리스트 등재 및 온도 상승 재시도: '{}'", extracted_val));
                                     // 🌟 영구 독성 리스트(hallucinated_candidates)에는 넣지 않음. (다른 트랙에서는 정답일 수 있으므로)
                                     ignore_list.push(extracted_val.clone());
-                                    ignore_list.push(format!(" {}", extracted_val));
-                                    ignore_list.push(format!("\"{}", extracted_val));
                                 }
                                 
                                 if current_temperature > 0.6 || *count >= 3 {
@@ -2029,11 +2004,6 @@ async fn process_task(
                                 }
 
                                 ignore_list.push(extracted_val.clone());
-                                ignore_list.push(format!(" {}", extracted_val));
-                                ignore_list.push(format!("\"{}", extracted_val));
-                                ignore_list.push(format!(" \"{}", extracted_val));
-                                ignore_list.push(extracted_val.to_lowercase());
-                                ignore_list.push(extracted_val.to_uppercase());
                                 continue;
                             }
 
@@ -2216,8 +2186,6 @@ async fn process_task(
 
                                 if !extracted_val.is_empty() {
                                     ignore_list.push(extracted_val.clone());
-                                    ignore_list.push(format!(" {}", extracted_val));
-                                    ignore_list.push(format!("\"{}", extracted_val));
                                 }
                                 continue;
                             }
@@ -2349,10 +2317,7 @@ async fn process_task(
                                 }
 
                                 // 빈 값 꼼수 방지 및 재시도 유도
-                                ignore_list.push("".to_string());
                                 ignore_list.push("null".to_string());
-                                ignore_list.push("\"\"".to_string());
-                                ignore_list.push("\"null\"".to_string());
                                 continue;
                             }
 
@@ -2481,8 +2446,6 @@ async fn process_task(
 
                                 if partial_masked {
                                     ignore_list.push(extracted_val.clone());
-                                    ignore_list.push(format!(" {}", extracted_val));
-                                    ignore_list.push(format!("\"{}", extracted_val));
                                     
                                     miss_counter = 0;
                                     current_temperature = 0.0;
@@ -2498,15 +2461,8 @@ async fn process_task(
                                 // 🌟 [전략 D 적용] 무작정 ignore_list에 넣기 전에 로깅하여 어떤 값이 날아갔는지 파악합니다.
                                 emit_term(&format!("[DEBUG] 완전 환각/오탐지 감지 (재시도 {} - 무한): '{}' -> 온도 {:.2}로 상승", miss_counter, extracted_val, current_temperature));
                                 
-                                // 🌟 [CRITICAL FIX] Tokenizer 꼼수를 부리지 못하도록 공백을 포함한 변형도 함께 억제 리스트에 넣습니다.
-                                // JSON 생성 환경에서 BPE 토크나이저가 쌍따옴표(")와 결합하여 완전히 다른 단일 토큰으로 
-                                // 파편화시키는 현상(Logit 제어 누수)을 완벽하게 방어합니다.
+                                // 🌟 [다이어트 적용] Tokenizer 꼼수 방지는 프롬프트 지시어로 대체하고 단일 코어 단어만 등록하여 토큰을 절약합니다.
                                 ignore_list.push(extracted_val.clone());
-                                ignore_list.push(format!(" {}", extracted_val));
-                                ignore_list.push(format!("\"{}", extracted_val));
-                                ignore_list.push(format!(" \"{}", extracted_val));
-                                ignore_list.push(extracted_val.to_lowercase());
-                                ignore_list.push(extracted_val.to_uppercase());
                                 continue;
                             }
 
