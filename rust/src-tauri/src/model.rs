@@ -133,7 +133,7 @@ pub struct LogisModel {
     pub qwen3_generator: Arc<TokioMutex<Option<Qwen3GenerateModel>>>, 
     pub qwen3_5_generator: Arc<TokioMutex<Option<Qwen3_5GenerateModel>>>,
     
-    pub granite_generator: Arc<TokioMutex<Option<(crate::models::granite::model::GraniteMoeHybrid, tokenizers::Tokenizer)>>>,
+    pub granite_generator: Arc<TokioMutex<Option<crate::models::granite::generate::GraniteGenerateModel>>>,
     
     pub embedding_model: Arc<TokioMutex<Option<EmbeddingModel>>>,
 
@@ -215,8 +215,9 @@ impl LogisModel {
         
         {
             let mut granite_gen = self.granite_generator.lock().await;
-            if let Some(g) = granite_gen.take() {
+            if let Some(mut g) = granite_gen.take() {
                 println!("[DIAG-PURGE] Dropping Granite Generator...");
+                g.clear_kv_cache();
                 drop(g);
             }
         }
@@ -570,7 +571,7 @@ impl LogisModel {
             let path = self.granite_model_path.clone();
             let dev = self.device_config.device.clone();
             
-            let gen_result = tokio::task::spawn_blocking(move || -> anyhow::Result<(crate::models::granite::model::GraniteMoeHybrid, tokenizers::Tokenizer)> {
+            let gen_result = tokio::task::spawn_blocking(move || -> anyhow::Result<crate::models::granite::generate::GraniteGenerateModel> {
                 let config_path = std::path::Path::new(&path).join("config.json");
                 let cfg: crate::models::granite::model::Config = serde_json::from_slice(&std::fs::read(config_path)?)?;
                 let tokenizer_model = crate::tokenizer::TokenizerModel::init(&path)?;
@@ -586,7 +587,7 @@ impl LogisModel {
                 };
                 let model = crate::models::granite::model::GraniteMoeHybrid::load(vb, &cfg)?;
                 
-                Ok((model, tokenizer_model.tokenizer))
+                Ok(crate::models::granite::generate::GraniteGenerateModel::new(model, tokenizer_model.tokenizer))
             }).await?;
 
             match gen_result {
@@ -1650,15 +1651,22 @@ impl LogisModel {
             }
         }]);
 
-        let task_question_1 = format!(
-            "<|start_of_role|>system<|end_of_role|>You are an intelligent search parameter extractor.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}\n\nQuery: {}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
-            serde_json::to_string_pretty(&tools_json).unwrap_or_default(),
+        let system_prompt_baked = format!(
+            "<|start_of_role|>system<|end_of_role|>You are an intelligent search parameter extractor.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n",
+            serde_json::to_string_pretty(&tools_json).unwrap_or_default()
+        );
+        
+        let user_prompt = format!(
+            "<|start_of_role|>user<|end_of_role|>{}\n\nQuery: {}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
             prompt1, 
             query
         );
         
         let mut segments = serde_json::json!({});
         let max_retries = 2; 
+        
+        // 🌟 [신규 추가] 재시도를 위한 Base 캐시 변수 (상태 복제 및 롤백용)
+        let mut base_cache_opt = None;
 
         for attempt in 1..=max_retries {
             if cancel_token.load(std::sync::atomic::Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
@@ -1666,19 +1674,36 @@ impl LogisModel {
             emit_term(&format!("[STAGE-1] Generating intent segment... (Attempt {}/{})", attempt, max_retries));
             
             let gen_arc = self.granite_generator.clone();
-            let task_q = task_question_1.clone();
+            let sys_q = system_prompt_baked.clone();
+            let usr_q = user_prompt.clone();
             let dev = self.device_config.device.clone();
             let cancel_clone = cancel_token.clone();
+            let cache_clone = base_cache_opt.clone();
             
-            let res1 = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-                let gen_guard = gen_arc.blocking_lock();
-                if let Some((model, tokenizer)) = gen_guard.as_ref() {
-                    crate::models::granite::generate::generate(model, tokenizer, &task_q, 256, &dev, Some(cancel_clone))
-                        .map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e))
+            let (res1, new_base_cache) = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, Option<crate::models::granite::model::GraniteHybridCache>)> {
+                let mut gen_guard = gen_arc.blocking_lock();
+                if let Some(gen) = gen_guard.as_mut() {
+                    // 🌟 [캐시 복제 및 롤백] 이전 상태 오염을 막고 베이킹된 시점으로 되돌립니다.
+                    let mut current_base = cache_clone;
+                    if current_base.is_none() {
+                        gen.clear_kv_cache();
+                        gen.prefill(&sys_q, &dev).map_err(|e| anyhow::anyhow!("Prefill failed: {}", e))?;
+                        current_base = gen.get_cache_snapshot();
+                    }
+                    
+                    // 복사본을 주입하여 Mamba 상태 오염 방지
+                    gen.set_cache_snapshot(current_base.clone());
+                    
+                    let res = gen.generate(&usr_q, 256, &dev, Some(cancel_clone))
+                        .map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e))?;
+                        
+                    Ok((res, current_base))
                 } else {
                     Err(anyhow::anyhow!("Granite Generator is missing"))
                 }
             }).await??;
+            
+            base_cache_opt = new_base_cache;
 
             emit_term(&format!("[STAGE-1 RESULT]\n{}", res1)); // 🌟 AI가 뱉어낸 JSON 응답을 UI 터미널에 그대로 꽂아버립니다!
             
@@ -1714,10 +1739,12 @@ impl LogisModel {
         if cancel_token.load(std::sync::atomic::Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
 
         // ----------------------------------------------------
-        // Stage 1.5: 수치/연산자 추출 - Qwen3 (0.6B) 연속 사용
+        // Stage 1.5: 수치/연산자 추출 - Qwen3 (0.6B) 연속 사용 (Granite 베이킹 적용)
         // ----------------------------------------------------
         if let Some(ctx_arr) = segments.get_mut("context").and_then(|v| v.as_array_mut()) {
             let total_segments = ctx_arr.len();
+            // 🌟 [CRITICAL FIX] 제네릭 타입 추론 에러(E0282) 해결을 위해 명시적 타입 지정
+            let baked_caches = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<String, crate::models::granite::model::GraniteHybridCache>::new()));
 
             for (idx, seg) in ctx_arr.iter_mut().enumerate() {
                 // 🌟 루프 도중에도 취소 버튼을 누르면 즉시 멈춥니다!
@@ -1763,19 +1790,41 @@ impl LogisModel {
                     }
                 }]);
 
-                let prompt_granite = format!(
-                    "<|start_of_role|>system<|end_of_role|>Extract conditions.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
-                    serde_json::to_string_pretty(&tools_json).unwrap_or_default(),
-                    prompt1_5
+                let system_prompt_baked = format!(
+                    "<|start_of_role|>system<|end_of_role|>Extract conditions.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n",
+                    serde_json::to_string_pretty(&tools_json).unwrap_or_default()
                 );
+                
+                let user_prompt = format!("<|start_of_role|>user<|end_of_role|>{}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>", prompt1_5);
                 
                 let dev = self.device_config.device.clone();
                 let cancel_clone = cancel_token.clone();
+                let seg_type_clone = seg_type.clone();
+                let baked_caches_clone = baked_caches.clone();
                 
                 let res1_5 = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-                    let gen_guard = gen_arc.blocking_lock();
-                    if let Some((model, tokenizer)) = gen_guard.as_ref() {
-                        crate::models::granite::generate::generate(model, tokenizer, &prompt_granite, 256, &dev, Some(cancel_clone))
+                    let mut gen_guard = gen_arc.blocking_lock();
+                    if let Some(gen) = gen_guard.as_mut() {
+                        let mut cache_opt = None;
+                        if let Ok(guard) = baked_caches_clone.lock() {
+                            if let Some(c) = guard.get(&seg_type_clone) {
+                                cache_opt = Some(c.clone());
+                            }
+                        }
+                        
+                        if cache_opt.is_some() {
+                            gen.set_cache_snapshot(cache_opt);
+                        } else {
+                            gen.clear_kv_cache();
+                            gen.prefill(&system_prompt_baked, &dev).map_err(|e| anyhow::anyhow!("Prefill failed: {}", e))?;
+                            if let Some(c) = gen.get_cache_snapshot() {
+                                if let Ok(mut guard) = baked_caches_clone.lock() {
+                                    guard.insert(seg_type_clone, c);
+                                }
+                            }
+                        }
+
+                        gen.generate(&user_prompt, 256, &dev, Some(cancel_clone))
                             .map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e))
                     } else {
                         Err(anyhow::anyhow!("Granite Generator is missing"))
@@ -1796,35 +1845,37 @@ impl LogisModel {
                         }
                     }
                 }
+                
+                // 🌟 [CRITICAL FIX] 복사/붙여넣기 과정에서 Stage 2 코드가 Stage 1.5로 침범(E0425 res2 에러)한 오염을 원상 복구합니다.
                 if let Some(obj) = seg.as_object_mut() {
                     if let Some(cond_val) = conditions_json.get("condition") { obj.insert("condition".to_string(), cond_val.clone()); } 
                     else { obj.insert("condition".to_string(), conditions_json); }
                 }
-
-                // crate::models::qwen::generate::wait_for_global_io().await;
-                
-                // 🌟 [신규 추가] GPU 비동기 연산 찌꺼기 강제 동기화
-                if !self.is_cpu_mode {
-                    let dev = self.device_config.device.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if dev.is_cuda() { let _ = dev.synchronize(); }
-                    }).await;
-                }
-
-                #[cfg(target_os = "windows")]
-                unsafe {
-                    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-                    use windows_sys::Win32::System::Memory::{SetProcessWorkingSetSizeEx, QUOTA_LIMITS_HARDWS_MIN_DISABLE, QUOTA_LIMITS_HARDWS_MAX_DISABLE};
-                    let _ = SetProcessWorkingSetSizeEx(GetCurrentProcess(), usize::MAX, usize::MAX, QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE);
-                }
-                #[cfg(target_os = "linux")]
-                unsafe { extern "C" { fn malloc_trim(pad: usize) -> i32; } malloc_trim(0); }
-                #[cfg(target_os = "macos")]
-                unsafe { extern "C" { fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize; } malloc_zone_pressure_relief(std::ptr::null_mut(), 0); }
             }
         }
 
-        if cancel_token.load(std::sync::atomic::Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
+        // 🌟 [CRITICAL FIX] VRAM 플러시 로직을 Stage 1.5 for 루프 바깥으로 안전하게 이동시킵니다.
+        crate::models::qwen::generate::wait_for_global_io().await;
+        
+        if !self.is_cpu_mode {
+            let dev = self.device_config.device.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if dev.is_cuda() { let _ = dev.synchronize(); }
+            }).await;
+        }
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            use windows_sys::Win32::System::Memory::{SetProcessWorkingSetSizeEx, QUOTA_LIMITS_HARDWS_MIN_DISABLE, QUOTA_LIMITS_HARDWS_MAX_DISABLE};
+            let _ = SetProcessWorkingSetSizeEx(GetCurrentProcess(), usize::MAX, usize::MAX, QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE);
+        }
+        #[cfg(target_os = "linux")]
+        unsafe { extern "C" { fn malloc_trim(pad: usize) -> i32; } malloc_trim(0); }
+        #[cfg(target_os = "macos")]
+        unsafe { extern "C" { fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize; } malloc_zone_pressure_relief(std::ptr::null_mut(), 0); }
+
+        let payload = json!({ "task_id": task_id, "category": "Done", "summary": "Analysis complete.", "spinner": "✅" });
 
         // ----------------------------------------------------
         // Stage 2: 조건 최종 병합 추출 (graph2contexts) - Qwen 3.5 (0.8B) 사용
@@ -1968,9 +2019,13 @@ impl LogisModel {
             }
         }]);
 
-        let prompt_granite = format!(
-            "<|start_of_role|>system<|end_of_role|>Extract shipping conditions.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
-            serde_json::to_string_pretty(&tools_json).unwrap_or_default(),
+        let system_prompt_baked = format!(
+            "<|start_of_role|>system<|end_of_role|>Extract shipping conditions.\n\n<tools>\n{}\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>.<|end_of_text|>\n",
+            serde_json::to_string_pretty(&tools_json).unwrap_or_default()
+        );
+
+        let user_prompt = format!(
+            "<|start_of_role|>user<|end_of_role|>{}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
             prompt
         );
 
@@ -1979,9 +2034,13 @@ impl LogisModel {
         let cancel_clone = cancel_token.clone();
         
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            let gen_guard = gen_arc.blocking_lock();
-            if let Some((model, tokenizer)) = gen_guard.as_ref() {
-                crate::models::granite::generate::generate(model, tokenizer, &prompt_granite, 256, &dev, Some(cancel_clone))
+            let mut gen_guard = gen_arc.blocking_lock();
+            if let Some(gen) = gen_guard.as_mut() {
+                // 🌟 [캐시 베이킹 적용] 무거운 시스템 프롬프트 사전 연산
+                gen.clear_kv_cache();
+                gen.prefill(&system_prompt_baked, &dev).map_err(|e| anyhow::anyhow!("Prefill failed: {}", e))?;
+                
+                gen.generate(&user_prompt, 256, &dev, Some(cancel_clone))
                     .map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e))
             } else {
                 Err(anyhow::anyhow!("Granite Generator is missing"))

@@ -1831,12 +1831,15 @@ async fn process_task(
                             let dev = model.device_config.device.clone();
 
                             let res_mask = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-                                let gen_guard = gen_arc.blocking_lock();
-                                if let Some((granite_model, tokenizer)) = gen_guard.as_ref() {
+                                let mut gen_guard = gen_arc.blocking_lock();
+                                if let Some(gen) = gen_guard.as_mut() {
+                                    // 🌟 [CRITICAL FIX] Mamba의 상태(Cache) 오염을 막기 위해 각 타겟 추출 전 반드시 캐시를 초기화합니다.
+                                    gen.clear_kv_cache();
+                                    
                                     // 🌟 [CRITICAL FIX] Candle/CUDA 내부 가중치 연산 중 아키텍처 불일치로 터질 수 있는 네이티브 패닉을 
                                     // catch_unwind로 완벽히 격리 포획하여 프로세스가 하드 어보트(Abort)되어 웹뷰가 강제 폭파되는 현상을 차단합니다.
                                     let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        crate::models::granite::generate::generate(granite_model, tokenizer, &prompt_text, 1024, &dev, Some(cancel_clone))
+                                        gen.generate(&prompt_text, 1024, &dev, Some(cancel_clone))
                                     }));
                                     
                                     match panic_res {
