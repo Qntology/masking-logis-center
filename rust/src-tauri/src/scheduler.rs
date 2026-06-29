@@ -43,7 +43,9 @@ use onnxruntime::GraphOptimizationLevel;
 #[derive(Debug, Clone)]
 pub struct StanzaPreprocessor {
     pub word_vocab: HashMap<String, i64>,
-    pub unk_id: i64,
+    pub char_vocab: HashMap<char, i64>,
+    pub word_unk_id: i64,
+    pub char_unk_id: i64,
 }
 
 impl StanzaPreprocessor {
@@ -55,33 +57,68 @@ impl StanzaPreprocessor {
             .map_err(|e| anyhow::anyhow!("Failed to parse vocab.json as JSON: {}", e))?;
             
         let mut word_vocab: HashMap<String, i64> = HashMap::new();
+        let mut char_vocab: HashMap<char, i64> = HashMap::new();
         
-        // 최상위 분기 이전에 Stanza ko 패키지 특유의 중첩 구조인 {"tokenize": {"main": [...]}} 구조를 먼저 확인하고 임포트합니다.
-        let target_value = if let Some(tokenize) = json_val.get("tokenize") {
+        // 🌟 1. Word Vocab 파싱 (기존 로직 보존 및 통합)
+        let word_target = if let Some(pos) = json_val.get("pos") {
+            pos.get("word").unwrap_or(&json_val)
+        } else if let Some(tokenize) = json_val.get("tokenize") {
             tokenize.get("main").unwrap_or(&json_val)
-        } else if let Some(pos) = json_val.get("pos") {
-            pos.get("word").or_else(|| pos.get("char")).unwrap_or(&json_val)
         } else {
             &json_val
         };
 
+        Self::extract_vocab_from_node(word_target, &mut word_vocab);
+
+        // 🌟 2. Char Vocab 파싱 (Stanza OOV 극복의 핵심)
+        let char_target = if let Some(pos) = json_val.get("pos") {
+            pos.get("char").unwrap_or(&serde_json::Value::Null)
+        } else if let Some(ner) = json_val.get("ner") {
+            ner.get("char").unwrap_or(&serde_json::Value::Null)
+        } else {
+            &serde_json::Value::Null
+        };
+
+        let mut temp_char_vocab: HashMap<String, i64> = HashMap::new();
+        Self::extract_vocab_from_node(char_target, &mut temp_char_vocab);
+        
+        for (k, v) in temp_char_vocab {
+            if let Some(c) = k.chars().next() {
+                char_vocab.insert(c, v);
+            }
+        }
+
+        if word_vocab.is_empty() {
+            return Err(anyhow::anyhow!("vocab.json 내부에서 단어 매핑(Vocab) 구조를 찾을 수 없습니다."));
+        }
+        
+        let word_unk_id = *word_vocab.get("<unk>")
+            .or_else(|| word_vocab.get("<UNK>"))
+            .or_else(|| word_vocab.get("[UNK]"))
+            .unwrap_or(&0);
+            
+        let char_unk_id = *char_vocab.get(&'<').unwrap_or(&0); // '<unk>' 처리용
+        
+        Ok(Self { word_vocab, char_vocab, word_unk_id, char_unk_id })
+    }
+
+    // 🌟 중복된 JSON 파싱 로직을 공통 헬퍼 함수로 분리
+    fn extract_vocab_from_node(target_value: &serde_json::Value, vocab: &mut HashMap<String, i64>) {
         if let Some(arr) = target_value.as_array() {
             for (i, v) in arr.iter().enumerate() {
                 if let Some(s) = v.as_str() {
-                    word_vocab.insert(s.to_string(), i as i64);
+                    vocab.insert(s.to_string(), i as i64);
                 } else if let Some(obj) = v.as_object() {
-                    // [{ "word": "토큰", "id": 0 }] 또는 [{ "단어": { "id": 0 } }] 형태의 복합 구조 대응
                     let word_opt = obj.get("word").and_then(|w| w.as_str());
                     let id_opt = obj.get("id").and_then(|id| id.as_i64()).unwrap_or(i as i64);
                     if let Some(w) = word_opt {
-                        word_vocab.insert(w.to_string(), id_opt);
+                        vocab.insert(w.to_string(), id_opt);
                     } else {
-                        // 키 자체가 단어이고 내부 객체에 id 정보가 매핑된 변종 구조 파싱
                         for (k, val) in obj {
                             if let Some(id_val) = val.get("id").and_then(|id| id.as_i64()) {
-                                word_vocab.insert(k.clone(), id_val);
+                                vocab.insert(k.clone(), id_val);
                             } else if let Some(id_val) = val.as_i64() {
-                                word_vocab.insert(k.clone(), id_val);
+                                vocab.insert(k.clone(), id_val);
                             }
                         }
                     }
@@ -90,14 +127,13 @@ impl StanzaPreprocessor {
         } else {
             let target_obj = if let Some(model) = target_value.get("model") {
                 model.get("vocab").and_then(|v| v.as_object())
-            } else if let Some(vocab) = target_value.get("vocab") {
-                vocab.as_object()
+            } else if let Some(vocab_node) = target_value.get("vocab") {
+                vocab_node.as_object()
             } else if let Some(id_to_string) = target_value.get("id_to_string") {
-                // {"id_to_string": {"0": "단어"}} 형태 구조 대응을 위해 역산 처리 추가
                 if let Some(obj) = id_to_string.as_object() {
                     for (id_str, word_val) in obj {
                         if let (Ok(parsed_id), Some(w)) = (id_str.parse::<i64>(), word_val.as_str()) {
-                            word_vocab.insert(w.to_string(), parsed_id);
+                            vocab.insert(w.to_string(), parsed_id);
                         }
                     }
                 }
@@ -109,55 +145,47 @@ impl StanzaPreprocessor {
             if let Some(obj) = target_obj {
                 for (k, v) in obj {
                     if let Some(id) = v.as_i64() {
-                        word_vocab.insert(k.clone(), id);
+                        vocab.insert(k.clone(), id);
                     } else if let Some(s) = v.as_str() {
-                        // {"단어": "0"} 형태의 문자열화된 ID 대응
                         if let Ok(parsed_id) = s.parse::<i64>() {
-                            word_vocab.insert(k.clone(), parsed_id);
+                            vocab.insert(k.clone(), parsed_id);
                         }
                     } else if let Some(id_val) = v.get("id").and_then(|i| i.as_i64()) {
-                        // 복합 토큰 메타데이터 내부 객체 {"id": 0} 형태 대응
-                        word_vocab.insert(k.clone(), id_val);
+                        vocab.insert(k.clone(), id_val);
                     } else if v.is_object() || v.is_array() {
-                        // 기타 내부 깊은 스캔 구조 대응
                         if let Some(id_val) = v.get("id").and_then(|i| i.as_i64()) {
-                            word_vocab.insert(k.clone(), id_val);
+                            vocab.insert(k.clone(), id_val);
                         }
                     }
                 }
             }
         }
-        
-        if word_vocab.is_empty() {
-            return Err(anyhow::anyhow!("vocab.json 내부에서 단어 매핑(Vocab) 구조를 찾을 수 없습니다."));
-        }
-        
-        let unk_id = *word_vocab.get("<unk>")
-            .or_else(|| word_vocab.get("<UNK>"))
-            .or_else(|| word_vocab.get("[UNK]"))
-            .unwrap_or(&0);
-        
-        Ok(Self { word_vocab, unk_id })
     }
 
-    /// 품사 태깅(pos.onnx) 및 의존 구문 분석(depparse.onnx)을 위해 
-    /// 분할된 단어(어절) 배열을 ndarray 텐서(Array2)로 변환합니다.
-    pub fn encode_to_tensor(&self, words: &[&str]) -> Result<Array2<i64>, anyhow::Error> {
-        let mut ids = Vec::with_capacity(words.len());
-        for w in words {
-            // Stanza는 다국어 소문자화 등 자체 전처리가 필요할 수 있으나 기본적으로 일치하는 토큰을 찾습니다.
+    /// 품사 태깅(pos.onnx)을 위해 분할된 단어 배열을 Word 텐서와 Wordchar(길이) 텐서로 변환합니다.
+    pub fn encode_to_tensor(&self, words: &[&str]) -> Result<(ndarray::ArrayD<i64>, ndarray::ArrayD<i64>), anyhow::Error> {
+        let seq_len = words.len();
+        let mut word_ids = Vec::with_capacity(seq_len);
+        let mut wordchars_raw = ndarray::Array2::<i64>::zeros((1, seq_len));
+
+        for (w_idx, w) in words.iter().enumerate() {
             let token_id = *self.word_vocab.get(*w)
                 .or_else(|| self.word_vocab.get(&w.to_lowercase()))
-                .unwrap_or(&self.unk_id);
-            ids.push(token_id);
+                .unwrap_or(&self.word_unk_id);
+            word_ids.push(token_id);
+            
+            // ONNX 모델이 기대하는 두 번째 입력은 2D 텐서 형태의 '단어 글자 수(Length)' 입니다.
+            wordchars_raw[[0, w_idx]] = w.chars().count() as i64;
         }
         
-        // ONNX Runtime(ort)에 주입할 Shape: [batch_size=1, sequence_length]
-        let seq_len = words.len();
-        let tensor = Array2::from_shape_vec((1, seq_len), ids)
-            .map_err(|e| anyhow::anyhow!("Failed to build ndarray tensor for Stanza: {}", e))?;
+        // 1. Word ID 텐서 (Shape: [1, seq_len])
+        let word_tensor = ndarray::Array2::from_shape_vec((1, seq_len), word_ids)
+            .map_err(|e| anyhow::anyhow!("Failed to build word tensor: {}", e))?;
+
+        // 2. Wordchar 텐서 (Shape: [1, seq_len])
+        let wordchars_tensor = wordchars_raw;
         
-        Ok(tensor)
+        Ok((word_tensor.into_dyn(), wordchars_tensor.into_dyn()))
     }
 }
 
@@ -1581,30 +1609,31 @@ async fn process_task(
                         let (target_name, base_target, target_item, target_bias, target_prejudice, is_phase2, specific_line, mut specific_candidate) = valid_targets[p_idx].clone();
                         p_idx += 1;
 
-                        // 🌟 [STAGE 2.5] Stanza 정제 (Post-NMS Trimming - 미시적 정밀 타격)
+                        // 🌟 [STAGE 2.5] Stanza 정제 및 전처리 (Post-NMS Trimming - 미시적 정밀 타격)
                         if let Some(stanza) = &mut stanza_pipeline {
                             if !specific_candidate.is_empty() {
-                                let words: Vec<&str> = specific_candidate.split_whitespace().collect();
-                                if let Ok(input_tensor) = stanza.preprocessor.encode_to_tensor(&words) {
-                                    let seq_len = words.len();
-                                    
-                                    // 🌟 [FINAL FIX] Python 검증 코드 명세와 100% 일치하는 순정 차원 구조로 복구합니다.
-                                    // word_ids는 문장 내부 단어 배열 구조인 [1, seq_len] 형태의 2차원 동적 텐서입니다.
-                                    let word_ids = input_tensor.into_dyn();
-                                    
-                                    // 🌟 [DYN-REMAP FIX] 2차원 [1, seq_len] 제약을 유지하되, 내부 원소 값을 실제 단어의 글자 수(chars count)로 정밀 사상합니다.
-                                    // 단순 1로 채워진 가짜 행렬 대신 각 단어의 고유 글자 길이를 주입해 주어야 내부 글자 임베딩 레이어가 
-                                    // 훼손 없이 맥락을 인지하여 고유명사(PROPN) 및 명사(NOUN)를 오탐지 없이 완벽하게 판별해 냅니다.
-                                    let mut wordchars_raw = ndarray::Array2::<i64>::zeros((1, seq_len));
-                                    for (w_idx, word) in words.iter().enumerate() {
-                                        if w_idx < seq_len {
-                                            wordchars_raw[[0, w_idx]] = word.chars().count() as i64;
-                                        }
+                                // 🌟 [Plan C] 1. 구두점 및 명백한 한국어 조사 사전 절단 (Stanza의 품사 오독 방지)
+                                let mut eval_target = specific_candidate.clone();
+                                
+                                // 후행 구두점 제거
+                                eval_target = eval_target.trim_end_matches(&['.', ',', '?', '!', '"', '\'', ':', ';', ']', ')', '}', '>', ' '][..]).to_string();
+                                
+                                // 2음절 이상의 단어에 붙은 안전한 조사(은,는,을,를,에,에게,에서,으로,까지,부터,의) 제거
+                                // (이/가/로는 이름 일부일 수 있어 제외하여 안전성 확보)
+                                if let Ok(josa_re) = regex::Regex::new(r"^(?P<root>.*?[가-힣a-zA-Z0-9])(은|는|을|를|에|에게|에서|으로|까지|부터|의)$") {
+                                    if let Some(caps) = josa_re.captures(&eval_target) {
+                                        eval_target = caps.name("root").unwrap().as_str().to_string();
+                                        emit_term(&format!("[STANZA] 🧹 조사 1차 절단 (Plan C): '{}' -> '{}'", specific_candidate, eval_target));
                                     }
-                                    let wordchars = wordchars_raw.into_dyn();
-                                    
-                                    // 🌟 Stanza 파이토치 forward 및 공식 ONNX 모델 규격 순서인 [word, wordchars] 정방향으로 재정렬합니다.
-                                    // 단어 차원과 글자 차원이 내부 임베딩 레이어를 거쳐 동일한 축 스케일로 압축되므로 Concat 데드락이 완벽히 청소됩니다.
+                                }
+
+                                let words: Vec<&str> = eval_target.split_whitespace().collect();
+
+                                if let Ok((word_ids, wordchars)) = stanza.preprocessor.encode_to_tensor(&words) {
+                                    // 🌟 [CRITICAL FIX] Stanza ONNX 모델 입력 차원(Dimension) 불일치 해결
+                                    // Stanza의 ONNX Export 버전은 내부적으로 Char-level 임베딩을 병합하여 
+                                    // 두 번째 입력으로 3D(Char IDs)가 아닌 2D(Word Lengths) 텐서를 요구합니다. ([1, seq_len])
+                                    // 앞서 확장한 Vocab 파서를 통해 OOV 문제가 해결되었으므로 형태를 2D로 복원하여 추론을 정상화합니다.
                                     let inputs = vec![word_ids, wordchars];
                                     
                                     match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
@@ -1627,34 +1656,47 @@ async fn process_task(
                                                     }
                                                 }
                                                 
-                                                // Universal POS tags 맵핑 (Stanza UPOS 기준)
                                                 let upos = ["ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"];
                                                 let tag_names: Vec<&str> = tags.into_iter()
                                                     .map(|id| *upos.get(id).unwrap_or(&"X"))
                                                     .collect();
                                                     
-                                                emit_term(&format!("[STANZA] '{}' -> {:?}", specific_candidate, tag_names));
+                                                emit_term(&format!("[STANZA] '{}' -> {:?}", eval_target, tag_names));
 
-                                                // [Rule 1] 할루시네이션 원천 차단: 단어들이 모두 동사(VERB), 형용사(ADJ), 부사(ADV), 조사(ADP), 구두점(PUNCT)이라면 강제 기각
-                                                let all_invalid = tag_names.iter().all(|&t| t == "VERB" || t == "ADJ" || t == "ADV" || t == "ADP" || t == "PUNCT");
-                                                if all_invalid {
-                                                    emit_term(&format!("[STANZA] 💀 순수 동사/수식어/조사 감지. 강제 기각: '{}'", specific_candidate));
+                                                // 🌟 [Plan B] Rule 1: 할루시네이션 원천 차단 (블랙리스트 대폭 확대)
+                                                // 동사, 형용사, 부사, 전치사(조사), 구두점 + 관형사(DET), 감탄사(INTJ), 대명사(PRON), 접속사(CCONJ, SCONJ), 조동사(AUX), 불변화사/조사/어미(PART), 기호(SYM), 기타(X)
+                                                let invalid_tags = ["VERB", "ADJ", "ADV", "ADP", "PUNCT", "DET", "PRON", "INTJ", "CCONJ", "SCONJ", "AUX", "PART", "SYM", "X"];
+                                                
+                                                let all_invalid = tag_names.iter().all(|&t| invalid_tags.contains(&t));
+                                                
+                                                // 🌟 [Plan B] Rule 1-2: 명사 필수 포함 (화이트리스트 방식 도입)
+                                                // 타겟(이름, 회사, 주소 등)은 본질적으로 명사이므로, 명사(NOUN), 고유명사(PROPN), 수사(NUM) 중 하나라도 없으면 기각
+                                                let has_noun = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM");
+                                                
+                                                if all_invalid || !has_noun {
+                                                    emit_term(&format!("[STANZA] 💀 순수 동사/수식어/조사/관형사 또는 명사 누락 감지 (Plan B). 강제 기각: '{}'", specific_candidate));
                                                     hallucinated_candidates.insert(specific_candidate.clone());
                                                 } else {
-                                                    // [Rule 2] 꼬리 자르기: 마지막 단어가 조사(ADP)나 구두점(PUNCT)이면 잘라냄
+                                                    // 🌟 [Plan B] Rule 2: 스마트 꼬리 자르기 (다국어 범용 UPOS 기반)
+                                                    // 마지막 단어가 구두점(PUNCT), 조사/전치사(ADP), 불변화사/기능어(PART), 종속접속사(SCONJ), 등위접속사(CCONJ)로 판별되면 잘라냄
                                                     if let Some(last_tag) = tag_names.last() {
-                                                        if *last_tag == "ADP" || *last_tag == "PUNCT" {
+                                                        let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ"];
+                                                        if tail_drop_tags.contains(last_tag) {
                                                             let mut trimmed_words = words.clone();
                                                             trimmed_words.pop();
                                                             let trimmed_candidate = trimmed_words.join(" ");
-                                                            emit_term(&format!("[STANZA] ✂️ 조사/구두점 절단: '{}' -> '{}'", specific_candidate, trimmed_candidate));
+                                                            emit_term(&format!("[STANZA] ✂️ 스마트 꼬리 절단 (다국어): '{}' -> '{}'", specific_candidate, trimmed_candidate));
                                                             specific_candidate = trimmed_candidate;
+                                                        } else {
+                                                            // 🌟 통과 시, Plan C에서 1차 절단한 텍스트를 최종 후보로 확정 (원본 덮어쓰기)
+                                                            if specific_candidate != eval_target {
+                                                                specific_candidate = eval_target;
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         },
-                                        // 🌟 [안전망 추가] 추론 연산 실패 시 무음 처리를 해제하고 터미널에 명확한 C++ 에러 사유를 로깅합니다.
                                         Err(e) => {
                                             emit_term(&format!("[STANZA] ⚠️ POS ONNX 추론 연산 실패 원인: {:?}", e));
                                         }
