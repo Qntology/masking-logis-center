@@ -1612,11 +1612,17 @@ async fn process_task(
                         // 🌟 [STAGE 2.5] Stanza 정제 및 전처리 (Post-NMS Trimming - 미시적 정밀 타격)
                         if let Some(stanza) = &mut stanza_pipeline {
                             if !specific_candidate.is_empty() {
-                                // 🌟 [Plan C] 1. 구두점 사전 절단 (다국어 공통)
+                                // 🌟 [Plan C] 1. 괄호 및 특수문자 사전 완벽 제거 (다국어 공통)
                                 let mut eval_target = specific_candidate.clone();
                                 
-                                // 후행 구두점 제거
-                                eval_target = eval_target.trim_end_matches(&['.', ',', '?', '!', '"', '\'', ':', ';', ']', ')', '}', '>', ' '][..]).to_string();
+                                // 괄호, 따옴표 등 검색에 방해되는 특수문자를 문자열에서 완전히 제거
+                                eval_target = eval_target.replace(&['(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '“', '”', '‘', '’'][..], "");
+                                
+                                // 양끝 구두점 및 기호 완벽 제거
+                                eval_target = eval_target.trim_matches(&['.', ',', '?', '!', ':', ';', '-', '_', '~', ' '][..]).to_string();
+
+                                // 🌟 정제된 텍스트를 specific_candidate에 다시 덮어씌워 LLM 프롬프트에도 깨끗한 값을 전달합니다.
+                                specific_candidate = eval_target.clone();
 
                                 let words: Vec<&str> = eval_target.split_whitespace().collect();
 
@@ -1931,8 +1937,14 @@ async fn process_task(
                                 if !extracted_val.is_empty() {
                                     let mut eval_ext = extracted_val.clone();
                                     
-                                    // 1차 절단: 구두점 제거 (다국어 공통)
-                                    eval_ext = eval_ext.trim_end_matches(&['.', ',', '?', '!', '"', '\'', ':', ';', ']', ')', '}', '>', ' '][..]).to_string();
+                                    // 1차 절단: 괄호 및 특수문자 사전 완벽 제거 (다국어 공통)
+                                    eval_ext = eval_ext.replace(&['(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '“', '”', '‘', '’'][..], "");
+                                    
+                                    // 양끝 구두점 및 기호 완벽 제거
+                                    eval_ext = eval_ext.trim_matches(&['.', ',', '?', '!', ':', ';', '-', '_', '~', ' '][..]).to_string();
+
+                                    // 🌟 정제된 텍스트를 extracted_val에 덮어씌워 오탐률을 줄입니다.
+                                    extracted_val = eval_ext.clone();
 
                                     let ext_words: Vec<&str> = eval_ext.split_whitespace().collect();
                                     if let Ok((word_ids, wordchars)) = stanza.preprocessor.encode_to_tensor(&ext_words) {
