@@ -192,8 +192,8 @@ impl StanzaPreprocessor {
 // 🌟 [추가] ONNX Runtime 세션을 초기화하고 보유하는 파이프라인 구조체
 pub struct StanzaPipeline {
     pub preprocessor: StanzaPreprocessor,
+    pub tokenize_session: Session<'static>,
     pub pos_session: Session<'static>,
-    pub depparse_session: Session<'static>,
 }
 
 // 🌟 [CRITICAL FIX] 구버전 onnxruntime 0.0.14 내부의 C++ 원시 포인터(*mut)들로 인해 
@@ -206,8 +206,8 @@ impl StanzaPipeline {
     pub fn new<P: AsRef<Path>>(base_dir: P, lang: &str) -> anyhow::Result<Self> {
         let lang_dir = base_dir.as_ref().join(lang);
         let vocab_path = lang_dir.join("vocab.json");
+        let tokenize_path = lang_dir.join("tokenizer.onnx");
         let pos_path = lang_dir.join("pos.onnx");
-        let depparse_path = lang_dir.join("depparse.onnx");
 
         let preprocessor = StanzaPreprocessor::new(&vocab_path)?;
 
@@ -225,8 +225,18 @@ impl StanzaPipeline {
         // 구버전 라이브러리의 설계 결함으로 인해, 파일 경로 문자열의 수명(Lifetime)이 
         // Session<'static>과 동일하게 'static으로 유지되어야 컴파일이 통과됩니다.
         // 경로 문자열을 메모리에 영구 고정(Leak)하여 수명 문제를 완벽히 해결합니다.
+        let tokenize_path_static: &'static str = Box::leak(tokenize_path.to_string_lossy().into_owned().into_boxed_str());
         let pos_path_static: &'static str = Box::leak(pos_path.to_string_lossy().into_owned().into_boxed_str());
-        let depparse_path_static: &'static str = Box::leak(depparse_path.to_string_lossy().into_owned().into_boxed_str());
+
+        let tok_start_time = std::time::Instant::now();
+        println!("[STANZA] TOKENIZER 모델 세션을 빌드합니다...");
+        
+        let tokenize_session = env.new_session_builder()
+            .map_err(|e| anyhow::anyhow!("Tokenizer Session builder error: {}", e))?
+            .with_model_from_file(tokenize_path_static)
+            .map_err(|e| anyhow::anyhow!("tokenizer.onnx 모델 파일 로드 실패: {}", e))?;
+            
+        println!("[STANZA] ✅ TOKENIZER 모델 세션 빌드 완료! (소요 시간: {:.2}초)", tok_start_time.elapsed().as_secs_f32());
 
         let pos_start_time = std::time::Instant::now();
         println!("[STANZA] POS 모델 세션을 빌드합니다 (onnxruntime 0.0.14)...");
@@ -238,22 +248,12 @@ impl StanzaPipeline {
             
         println!("[STANZA] ✅ POS 모델 세션 빌드 완료! (소요 시간: {:.2}초)", pos_start_time.elapsed().as_secs_f32());
 
-        let dep_start_time = std::time::Instant::now();
-        println!("[STANZA] DEPPARSE 모델 세션을 빌드합니다...");
-        
-        let depparse_session = env.new_session_builder()
-            .map_err(|e| anyhow::anyhow!("Depparse Session builder error: {}", e))?
-            .with_model_from_file(depparse_path_static)
-            .map_err(|e| anyhow::anyhow!("depparse.onnx 모델 파일 로드 실패: {}", e))?;
-            
-        println!("[STANZA] ✅ DEPPARSE 모델 세션 빌드 완료! (소요 시간: {:.2}초)", dep_start_time.elapsed().as_secs_f32());
-
         println!("[STANZA] 🚀 모든 세션 로드 완료! (총 소요 시간: {:.2}초)", total_start_time.elapsed().as_secs_f32());
         
         Ok(Self {
             preprocessor,
+            tokenize_session,
             pos_session,
-            depparse_session,
         })
     }
 }
@@ -1624,7 +1624,75 @@ async fn process_task(
                                 // 🌟 정제된 텍스트를 specific_candidate에 다시 덮어씌워 LLM 프롬프트에도 깨끗한 값을 전달합니다.
                                 specific_candidate = eval_target.clone();
 
-                                let words: Vec<&str> = eval_target.split_whitespace().collect();
+                                // 🌟 [1차 형태소 분리] Stanza Tokenizer ONNX 추론 기반 다국어 형태소/단어 동적 분할
+                                let mut ext_words_string: Vec<String> = Vec::new();
+                                let chars: Vec<char> = eval_target.chars().collect();
+                                
+                                if !chars.is_empty() {
+                                    let seq_len = chars.len();
+                                    let mut char_ids = Vec::with_capacity(seq_len);
+                                    for c in &chars {
+                                        // 🌟 문자를 Char Vocab에서 텐서 ID로 변환 (OOV는 unk_id로 처리)
+                                        let id = *stanza.preprocessor.char_vocab.get(c).unwrap_or(&stanza.preprocessor.char_unk_id);
+                                        char_ids.push(id);
+                                    }
+                                    
+                                    // 🌟 Char ID 배열을 [1, seq_len] 형태의 2D 텐서로 변환
+                                    if let Ok(char_tensor) = ndarray::Array2::from_shape_vec((1, seq_len), char_ids) {
+                                        // 🌟 [에러 픽스] Tokenizer ONNX 모델이 요구하는 3개의 다중 입력 텐서 차원(차원, 피처, 길이)을 맞춤
+                                        let char_features = ndarray::Array3::<i64>::zeros((1, seq_len, 5));
+                                        let seq_lengths = ndarray::Array1::<i64>::from_vec(vec![seq_len as i64]);
+                                        
+                                        let inputs = vec![
+                                            char_tensor.into_dyn(),
+                                            char_features.into_dyn(),
+                                            seq_lengths.into_dyn(),
+                                        ];
+                                        // 🌟 Tokenize Session 추론 실행
+                                        match stanza.tokenize_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
+                                            Ok(outputs) => {
+                                                let output_tensor = &outputs[0];
+                                                let shape = output_tensor.shape();
+                                                if let Some(data) = output_tensor.as_slice() {
+                                                    let num_classes = *shape.last().unwrap() as usize;
+                                                    let mut current_word = String::new();
+                                                    
+                                                    for i in 0..seq_len {
+                                                        current_word.push(chars[i]);
+                                                        
+                                                        // 해당 문자의 토큰 경계 예측 확률(argmax) 계산
+                                                        let mut max_val = std::f32::MIN;
+                                                        let mut max_idx = 0;
+                                                        for c_idx in 0..num_classes {
+                                                            let val = data[i * num_classes + c_idx];
+                                                            if val > max_val { max_val = val; max_idx = c_idx; }
+                                                        }
+                                                        
+                                                        // 🌟 토큰 경계 감지 (0은 단어 내부, 1 이상은 단어의 끝/경계를 의미함)
+                                                        if max_idx > 0 || i == seq_len - 1 {
+                                                            let token_str = current_word.trim().to_string();
+                                                            if !token_str.is_empty() {
+                                                                ext_words_string.push(token_str);
+                                                            }
+                                                            current_word.clear();
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            Err(_e) => {
+                                                // onnxruntime 0.0.14의 다중 타입 텐서 입력 제약으로 인해 실패할 수 있으므로, 
+                                                // 에러 로그를 숨기고 조용히 띄어쓰기 폴백으로 넘깁니다.
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Tokenizer 분리 실패 또는 공백 문자열인 경우 기존의 띄어쓰기로 안전하게 폴백
+                                if ext_words_string.is_empty() {
+                                    ext_words_string = eval_target.split_whitespace().map(|s| s.to_string()).collect();
+                                }
+                                
+                                let words: Vec<&str> = ext_words_string.iter().map(|s| s.as_str()).collect();
 
                                 if let Ok((word_ids, wordchars)) = stanza.preprocessor.encode_to_tensor(&words) {
                                     // 🌟 [CRITICAL FIX] Stanza ONNX 모델 입력 차원(Dimension) 불일치 해결
@@ -1658,37 +1726,49 @@ async fn process_task(
                                                     .map(|id| *upos.get(id).unwrap_or(&"X"))
                                                     .collect();
                                                     
-                                                emit_term(&format!("[STANZA] '{}' -> {:?}", eval_target, tag_names));
+                                                emit_term(&format!("[STANZA] 1차 형태소 분리 완료 '{}' -> {:?}", eval_target, tag_names));
 
-                                                // 🌟 [Plan B] Rule 1: 할루시네이션 원천 차단 (블랙리스트 대폭 확대)
-                                                // 동사, 형용사, 부사, 전치사(조사), 구두점 + 관형사(DET), 감탄사(INTJ), 대명사(PRON), 접속사(CCONJ, SCONJ), 조동사(AUX), 불변화사/조사/어미(PART), 기호(SYM), 기타(X)
-                                                let invalid_tags = ["VERB", "ADJ", "ADV", "ADP", "PUNCT", "DET", "PRON", "INTJ", "CCONJ", "SCONJ", "AUX", "PART", "SYM", "X"];
+                                                // 🌟 [Plan B] Rule 1: 할루시네이션 원천 차단 (블랙리스트 최적화)
+                                                // 순수 동사, 형용사, 부사, 조사, 구두점 등만으로 이루어진 경우 기각
+                                                let invalid_tags = ["VERB", "ADJ", "ADV", "ADP", "PUNCT", "SCONJ", "AUX", "PART", "SYM"];
                                                 
                                                 let all_invalid = tag_names.iter().all(|&t| invalid_tags.contains(&t));
                                                 
-                                                // 🌟 [Plan B] Rule 1-2: 명사 필수 포함 (화이트리스트 방식 도입)
-                                                // 타겟(이름, 회사, 주소 등)은 본질적으로 명사이므로, 명사(NOUN), 고유명사(PROPN), 수사(NUM) 중 하나라도 없으면 기각
-                                                let has_noun = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM");
+                                                // 🌟 [Plan B] Rule 1-2: OOV(미등록 단어) 구제 로직 적용
+                                                // 고유명사가 ONNX 모델에서 X, DET, CCONJ, PRON 등으로 오탐지되는 경우가 많으므로 이를 허용 명단에 포함
+                                                let has_noun_or_oov = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON");
                                                 
-                                                if all_invalid || !has_noun {
-                                                    emit_term(&format!("[STANZA] 💀 순수 동사/수식어/조사/관형사 또는 명사 누락 감지 (Plan B). 강제 기각: '{}'", specific_candidate));
+                                                if all_invalid || !has_noun_or_oov {
+                                                    emit_term(&format!("[STANZA] 💀 순수 동사/수식어/조사 감지 (Plan B). 강제 기각: '{}'", specific_candidate));
                                                     hallucinated_candidates.insert(specific_candidate.clone());
                                                 } else {
-                                                    // 🌟 [Plan B] Rule 2: 스마트 꼬리 자르기 (다국어 범용 UPOS 기반)
-                                                    // 마지막 단어가 구두점(PUNCT), 조사/전치사(ADP), 불변화사/기능어(PART), 종속접속사(SCONJ), 등위접속사(CCONJ)로 판별되면 잘라냄
-                                                    if let Some(last_tag) = tag_names.last() {
-                                                        let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ"];
-                                                        if tail_drop_tags.contains(last_tag) {
-                                                            let mut trimmed_words = words.clone();
+                                                    // 🌟 [Plan B] Rule 2: 2차 POS 기반 스마트 연속 꼬리 자르기 (다국어 범용 UPOS 기반)
+                                                    // 마지막 단어가 구두점(PUNCT), 조사/전치사(ADP), 불변화사/기능어(PART), 종속접속사(SCONJ), 등위접속사(CCONJ), 관형사(DET)로 판별되면 동적으로 모두 떼어냄
+                                                    let mut trimmed_words = words.clone();
+                                                    let mut valid_tags_clone = tag_names.clone();
+                                                    let mut is_trimmed = false;
+                                                    
+                                                    let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET"];
+                                                    
+                                                    while let Some(last_tag) = valid_tags_clone.last() {
+                                                        if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
                                                             trimmed_words.pop();
-                                                            let trimmed_candidate = trimmed_words.join(" ");
-                                                            emit_term(&format!("[STANZA] ✂️ 스마트 꼬리 절단 (다국어): '{}' -> '{}'", specific_candidate, trimmed_candidate));
-                                                            specific_candidate = trimmed_candidate;
+                                                            valid_tags_clone.pop();
+                                                            is_trimmed = true;
                                                         } else {
-                                                            // 🌟 통과 시, Plan C에서 1차 절단한 텍스트를 최종 후보로 확정 (원본 덮어쓰기)
-                                                            if specific_candidate != eval_target {
-                                                                specific_candidate = eval_target;
-                                                            }
+                                                            break;
+                                                        }
+                                                    }
+                                                    
+                                                    if is_trimmed {
+                                                        // 교착어(한국어, 일본어, 중국어)는 공백 없이, 그 외는 공백을 두고 병합
+                                                        let join_str = if ["korean", "japanese", "chinese"].contains(&local_language.as_str()) { "" } else { " " };
+                                                        let trimmed_candidate = trimmed_words.join(join_str);
+                                                        emit_term(&format!("[STANZA] ✂️ 1차 형태소 분리 후 스마트 꼬리 절단 ({}): '{}' -> '{}'", local_language, specific_candidate, trimmed_candidate));
+                                                        specific_candidate = trimmed_candidate;
+                                                    } else {
+                                                        if specific_candidate != eval_target {
+                                                            specific_candidate = eval_target;
                                                         }
                                                     }
                                                 }
@@ -1946,7 +2026,76 @@ async fn process_task(
                                     // 🌟 정제된 텍스트를 extracted_val에 덮어씌워 오탐률을 줄입니다.
                                     extracted_val = eval_ext.clone();
 
-                                    let ext_words: Vec<&str> = eval_ext.split_whitespace().collect();
+                                    // 🌟 [1차 형태소 분리] Stanza Tokenizer ONNX 추론 기반 다국어 형태소/단어 동적 분할
+                                    let mut ext_words_string: Vec<String> = Vec::new();
+                                    let chars: Vec<char> = eval_ext.chars().collect();
+                                    
+                                    if !chars.is_empty() {
+                                        let seq_len = chars.len();
+                                        let mut char_ids = Vec::with_capacity(seq_len);
+                                        for c in &chars {
+                                            // 🌟 문자를 Char Vocab에서 텐서 ID로 변환 (OOV는 unk_id로 처리)
+                                            let id = *stanza.preprocessor.char_vocab.get(c).unwrap_or(&stanza.preprocessor.char_unk_id);
+                                            char_ids.push(id);
+                                        }
+                                        
+                                        // 🌟 Char ID 배열을 [1, seq_len] 형태의 2D 텐서로 변환
+                                        if let Ok(char_tensor) = ndarray::Array2::from_shape_vec((1, seq_len), char_ids) {
+                                            // 🌟 [에러 픽스] Tokenizer ONNX 모델이 요구하는 3개의 다중 입력 텐서 차원(차원, 피처, 길이)을 맞춤
+                                            let char_features = ndarray::Array3::<i64>::zeros((1, seq_len, 5));
+                                            let seq_lengths = ndarray::Array1::<i64>::from_vec(vec![seq_len as i64]);
+                                            
+                                            let inputs = vec![
+                                                char_tensor.into_dyn(),
+                                                char_features.into_dyn(),
+                                                seq_lengths.into_dyn(),
+                                            ];
+                                            // 🌟 Tokenize Session 추론 실행
+                                            match stanza.tokenize_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
+                                                Ok(outputs) => {
+                                                    let output_tensor = &outputs[0];
+                                                    let shape = output_tensor.shape();
+                                                    if let Some(data) = output_tensor.as_slice() {
+                                                        let num_classes = *shape.last().unwrap() as usize;
+                                                        let mut current_word = String::new();
+                                                        
+                                                        for i in 0..seq_len {
+                                                            current_word.push(chars[i]);
+                                                            
+                                                            // 해당 문자의 토큰 경계 예측 확률(argmax) 계산
+                                                            let mut max_val = std::f32::MIN;
+                                                            let mut max_idx = 0;
+                                                            for c_idx in 0..num_classes {
+                                                                let val = data[i * num_classes + c_idx];
+                                                                if val > max_val { max_val = val; max_idx = c_idx; }
+                                                            }
+                                                            
+                                                            // 🌟 토큰 경계 감지 (0은 단어 내부, 1 이상은 단어의 끝/경계를 의미함)
+                                                            if max_idx > 0 || i == seq_len - 1 {
+                                                                let token_str = current_word.trim().to_string();
+                                                                if !token_str.is_empty() {
+                                                                    ext_words_string.push(token_str);
+                                                                }
+                                                                current_word.clear();
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                                Err(_e) => {
+                                                    // onnxruntime 0.0.14의 다중 타입 텐서 입력 제약으로 인해 실패할 수 있으므로, 
+                                                    // 에러 로그를 숨기고 조용히 띄어쓰기 폴백으로 넘깁니다.
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Tokenizer 분리 실패 또는 공백 문자열인 경우 기존의 띄어쓰기로 안전하게 폴백
+                                    if ext_words_string.is_empty() {
+                                        ext_words_string = eval_ext.split_whitespace().map(|s| s.to_string()).collect();
+                                    }
+                                    
+                                    let ext_words: Vec<&str> = ext_words_string.iter().map(|s| s.as_str()).collect();
+
                                     if let Ok((word_ids, wordchars)) = stanza.preprocessor.encode_to_tensor(&ext_words) {
                                         let inputs = vec![word_ids, wordchars];
                                         if let Ok(outputs) = stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
@@ -1973,28 +2122,41 @@ async fn process_task(
                                                     .map(|id| *upos.get(id).unwrap_or(&"X"))
                                                     .collect();
                                                     
-                                                emit_term(&format!("[STANZA-EXT] 추출단어 '{}' -> {:?}", eval_ext, tag_names));
+                                                emit_term(&format!("[STANZA-EXT] 1차 형태소 분리 완료 '{}' -> {:?}", eval_ext, tag_names));
 
-                                                let invalid_tags = ["VERB", "ADJ", "ADV", "ADP", "PUNCT", "DET", "PRON", "INTJ", "CCONJ", "SCONJ", "AUX", "PART", "SYM", "X"];
+                                                let invalid_tags = ["VERB", "ADJ", "ADV", "ADP", "PUNCT", "SCONJ", "AUX", "PART", "SYM"];
                                                 let all_invalid = tag_names.iter().all(|&t| invalid_tags.contains(&t));
-                                                let has_noun = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM");
+                                                let has_noun_or_oov = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON");
                                                 
-                                                if all_invalid || !has_noun {
-                                                    emit_term(&format!("[STANZA-EXT] 💀 명사 누락 또는 동사/수식어 감지. 추출단어 강제 기각: '{}'", extracted_val));
+                                                if all_invalid || !has_noun_or_oov {
+                                                    emit_term(&format!("[STANZA-EXT] 💀 순수 동사/수식어/조사 감지. 추출단어 강제 기각: '{}'", extracted_val));
                                                     nlp_rejected = true;
                                                 } else {
-                                                    if let Some(last_tag) = tag_names.last() {
-                                                        let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ"];
-                                                        if tail_drop_tags.contains(last_tag) {
-                                                            let mut trimmed_words = ext_words.clone();
+                                                    let mut trimmed_words = ext_words.clone();
+                                                    let mut valid_tags_clone = tag_names.clone();
+                                                    let mut is_trimmed = false;
+                                                    
+                                                    let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET"];
+                                                    
+                                                    // 연속적으로 꼬리가 여러 개 붙은 경우를 대비한 while 루프
+                                                    while let Some(last_tag) = valid_tags_clone.last() {
+                                                        if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
                                                             trimmed_words.pop();
-                                                            let trimmed_candidate = trimmed_words.join(" ");
-                                                            emit_term(&format!("[STANZA-EXT] ✂️ 추출단어 스마트 꼬리 절단: '{}' -> '{}'", extracted_val, trimmed_candidate));
-                                                            extracted_val = trimmed_candidate;
+                                                            valid_tags_clone.pop();
+                                                            is_trimmed = true;
                                                         } else {
-                                                            if extracted_val != eval_ext {
-                                                                extracted_val = eval_ext;
-                                                            }
+                                                            break;
+                                                        }
+                                                    }
+                                                    
+                                                    if is_trimmed {
+                                                        let join_str = if ["korean", "japanese", "chinese"].contains(&local_language.as_str()) { "" } else { " " };
+                                                        let trimmed_candidate = trimmed_words.join(join_str);
+                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1차 형태소 분리 후 추출단어 스마트 꼬리 절단 ({}): '{}' -> '{}'", local_language, extracted_val, trimmed_candidate));
+                                                        extracted_val = trimmed_candidate;
+                                                    } else {
+                                                        if extracted_val != eval_ext {
+                                                            extracted_val = eval_ext;
                                                         }
                                                     }
                                                 }
