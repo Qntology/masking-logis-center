@@ -1906,9 +1906,7 @@ async fn process_task(
                             let mut extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
 
                             // 🌟 [CRITICAL FIX] 요청하신 대로, 배열이 아닌 1:1 매칭된 NMS 단일값을 출력하며 로그 디자인을 명시적으로 반영합니다!
-                            // emit_term(&format!("시작 시간: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")));
                             emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 (NMS 👑 [WINNER/EXPANDED]: '{}', 추출단어: '{}') - 응답 길이: {}, 결과: {}", base_target, input_keyword, extracted_val, res_mask.len(), res_mask));
-                            // emit_term(&format!("종료 시간: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")));
 
                             // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
@@ -1929,9 +1927,7 @@ async fn process_task(
 
                             // 🌟 [추가] 할루시네이션(환각)으로 이미 판명된 단어라면 즉시 스킵 (동의어 트랙 등에서 재등장 방지)
                             if hallucinated_candidates.contains(&extracted_val) {
-                                emit_term(&format!("시작 시간: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")));
                                 emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 할루시네이션으로 판명된 단어입니다. 스킵합니다: '{}'\n{}", extracted_val, res_mask));
-                                emit_term(&format!("종료 시간: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")));
                                 miss_counter += 1;
                                 current_temperature += 0.2;
                                 ignore_list.push(extracted_val.clone());
@@ -2179,160 +2175,14 @@ async fn process_task(
                             }
 
                             // 🌟 [STAGE 3] 추출 단어 다국어 순차 검증 (Sequential CoT Evaluation with Early Exit)
+                            // NLP Stanza 검증이 앞서 완벽히 필터링하므로, LLM의 is_target_mismatch만 체크하고 넘어갑니다.
                             let is_mismatch = parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
-
-                            emit_term(&format!("\n======================================="));
-                            emit_term(&format!("[DEBUG-EXTRACTION-STAGE3] 🎯 추출 단어 다국어 순차 검증 시작 🎯"));
-                            emit_term(&format!("- 추출 단어: '{}'", extracted_val));
-                            emit_term(&format!("- is_target_mismatch: {}", is_mismatch));
-                            emit_term(&format!("=======================================\n"));
 
                             let mut is_hallucination = false;
                             
                             if is_mismatch {
                                 emit_term(&format!("    💀 [REJECT] 타겟 미스매치 (is_target_mismatch=true)"));
                                 is_hallucination = true;
-                            } else {
-                                // 🌟 다국어 전체를 순회하며 모두 0점을 초과할 때만 할루시네이션으로 판단
-                                let mut hallucination_count = 0;
-                                let total_langs = detected_languages_vec.len();
-
-                                for lang in &detected_languages_vec {
-                                    if cancellation_token.load(Ordering::Relaxed) { break; }
-
-                                    let verb_hint = bias_json.get("verb").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Does the word represent an action, state, or predicate (e.g., ends with a verb conjugation)?");
-                                    let expr_hint = bias_json.get("expression").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Is it an idiom, conversational phrase, or full sentence?");
-
-                                    // --- 1. Verb Score Check ---
-                                    let (v_sys, v_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, "verb, predicate", verb_hint);
-                                    let cancel_clone_v = cancellation_token.clone();
-                                    
-                                    let v_res = if is_large_context {
-                                        let gen_arc = model.generator.clone();
-                                        let mut gen_guard = gen_arc.lock().await;
-                                        if let Some(gen) = gen_guard.as_mut() {
-                                            let params = crate::openai_types::ChatCompletionParameters {
-                                                messages: vec![
-                                                    crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: v_sys, name: None }),
-                                                    crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user), name: None })
-                                                ],
-                                                model: "qwen".to_string(), max_tokens: Some(64), temperature: Some(0.1), top_p: Some(0.1), ..Default::default()
-                                            };
-                                            gen.clear_kv_cache();
-                                            let res = gen.generate(params, Some(cancel_clone_v), None, None, None).await.unwrap_or("{}".to_string());
-                                            gen.clear_kv_cache();
-                                            res
-                                        } else { "{}".to_string() }
-                                    } else {
-                                        let gen_arc = model.qwen3_generator.clone();
-                                        tokio::task::spawn_blocking(move || -> String {
-                                            let mut gen_guard = gen_arc.blocking_lock();
-                                            if let Some(gen) = gen_guard.as_mut() {
-                                                let params = crate::openai_types::ChatCompletionParameters {
-                                                    messages: vec![
-                                                        crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: v_sys, name: None }),
-                                                        crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(v_user), name: None })
-                                                    ],
-                                                    model: "qwen3".to_string(), max_tokens: Some(64), temperature: Some(0.1), top_p: Some(0.1), ..Default::default()
-                                                };
-                                                gen.clear_kv_cache();
-                                                let res = gen.generate(params, Some(cancel_clone_v), None, None).unwrap_or("{}".to_string());
-                                                gen.clear_kv_cache();
-                                                res
-                                            } else { "{}".to_string() }
-                                        }).await.unwrap_or("{}".to_string())
-                                    };
-
-                                    if !model.is_cpu_mode {
-                                        let dev = model.device_config.device.clone();
-                                        let _ = tokio::task::spawn_blocking(move || { if dev.is_cuda() { let _ = dev.synchronize(); } }).await;
-                                    }
-
-                                    let v_json = crate::parsing::parse_json_from_llm(&v_res);
-                                    let verb_score = v_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                    
-                                    emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {}", lang, verb_score));
-
-                                    // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
-                                    if verb_score >= 7.0 {
-                                        emit_term(&format!("    💀 [REJECT] {} Verb Score 7.0 이상 (Fatal Early Exit)", lang));
-                                        is_hallucination = true;
-                                        break;
-                                    }
-
-                                    // --- 2. Expression Score Check ---
-                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, "idiom, phrase, full sentence", expr_hint);
-                                    let cancel_clone_e = cancellation_token.clone();
-                                    
-                                    let e_res = if is_large_context {
-                                        let gen_arc = model.generator.clone();
-                                        let mut gen_guard = gen_arc.lock().await;
-                                        if let Some(gen) = gen_guard.as_mut() {
-                                            let params = crate::openai_types::ChatCompletionParameters {
-                                                messages: vec![
-                                                    crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: e_sys, name: None }),
-                                                    crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(e_user), name: None })
-                                                ],
-                                                model: "qwen".to_string(), max_tokens: Some(64), temperature: Some(0.1), top_p: Some(0.1), ..Default::default()
-                                            };
-                                            gen.clear_kv_cache();
-                                            let res = gen.generate(params, Some(cancel_clone_e), None, None, None).await.unwrap_or("{}".to_string());
-                                            gen.clear_kv_cache();
-                                            res
-                                        } else { "{}".to_string() }
-                                    } else {
-                                        let gen_arc = model.qwen3_generator.clone();
-                                        tokio::task::spawn_blocking(move || -> String {
-                                            let mut gen_guard = gen_arc.blocking_lock();
-                                            if let Some(gen) = gen_guard.as_mut() {
-                                                let params = crate::openai_types::ChatCompletionParameters {
-                                                    messages: vec![
-                                                        crate::openai_types::ChatCompletionRequestMessage::System(crate::openai_types::ChatCompletionRequestSystemMessage { content: e_sys, name: None }),
-                                                        crate::openai_types::ChatCompletionRequestMessage::User(crate::openai_types::ChatCompletionRequestUserMessage { content: crate::openai_types::ChatCompletionRequestUserMessageContent::Text(e_user), name: None })
-                                                    ],
-                                                    model: "qwen3".to_string(), max_tokens: Some(64), temperature: Some(0.1), top_p: Some(0.1), ..Default::default()
-                                                };
-                                                gen.clear_kv_cache();
-                                                let res = gen.generate(params, Some(cancel_clone_e), None, None).unwrap_or("{}".to_string());
-                                                gen.clear_kv_cache();
-                                                res
-                                            } else { "{}".to_string() }
-                                        }).await.unwrap_or("{}".to_string())
-                                    };
-
-                                    if !model.is_cpu_mode {
-                                        let dev = model.device_config.device.clone();
-                                        let _ = tokio::task::spawn_blocking(move || { if dev.is_cuda() { let _ = dev.synchronize(); } }).await;
-                                    }
-
-                                    let e_json = crate::parsing::parse_json_from_llm(&e_res);
-                                    let expr_score = e_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                    
-                                    emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {}", lang, expr_score));
-
-                                    // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
-                                    if expr_score >= 7.0 {
-                                        emit_term(&format!("    💀 [REJECT] {} Expr Score 7.0 이상 (Fatal Early Exit)", lang));
-                                        is_hallucination = true;
-                                        break;
-                                    }
-
-                                    // 🌟 [수정] 해당 언어에서 Verb와 Expr 점수가 '전부(둘 다)' 0을 초과할 때만 애매한 오답으로 간주하여 카운트 증가
-                                    if verb_score > 0.0 && expr_score > 0.0 {
-                                        emit_term(&format!("    ⚠️ [WARNING] {} 검증에서 전부 0점 초과 (Verb: {}, Expr: {})", lang, verb_score, expr_score));
-                                        hallucination_count += 1;
-                                    } else {
-                                        // 🌟 하나라도 0점(또는 0 이하)인 값이 발견되면 완벽한 명사(타겟)로 간주하여 즉시 조기 종료(Early Exit) 허용!
-                                        emit_term(&format!("    ✅ [PASS] {} 검증 통과 (0점 포함). 완벽한 타겟으로 간주하여 나머지 검증 스킵", lang));
-                                        break; 
-                                    }
-                                }
-
-                                // 🌟 Fatal(>= 7.0)로 강제 종료되지 않고 끝까지 돌았을 때, 모든 다국어가 전부 0점을 초과했다면 최종 할루시네이션으로 판정
-                                if !is_hallucination && hallucination_count == total_langs && total_langs > 0 {
-                                    emit_term(&format!("    💀 [REJECT] 모든 다국어 검증에서 전부 0점 초과. 할루시네이션으로 최종 차단"));
-                                    is_hallucination = true;
-                                }
                             }
 
                             // 🌟 [CRITICAL FIX] 서술어/표현 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.

@@ -919,30 +919,7 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 //     template.replace("{TARGET_ITEM}", target_item)
 // }
 
-pub fn build_single_property_verification_prompt(word: &str, language: &str, property: &str, hint: &str) -> (String, String) {
-    let system_prompt = format!("You are a strict linguistic verification assistant for {}.", language);
-    let user_template = r###"[TASK] Analyze the word '{WORD}' and score its linguistic property.
 
-[CRITERIA]
-Property: {PROPERTY}
-Hint: {HINT}
-
-[OUTPUT FORMAT]
-{
-  "score": Integer(0 to 10)
-}
-
-[ACTION] RETURN JSON ONLY. NO EXPLANATION.
-    "###.to_string();
-    
-     let user_prompt = user_template
-        .replace("{WORD}", word)
-        .replace("{PROPERTY}", property)
-        .replace("{HINT}", hint);
-
-
-    (system_prompt, user_prompt)
-}
 
 
 
