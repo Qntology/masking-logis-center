@@ -1612,20 +1612,11 @@ async fn process_task(
                         // 🌟 [STAGE 2.5] Stanza 정제 및 전처리 (Post-NMS Trimming - 미시적 정밀 타격)
                         if let Some(stanza) = &mut stanza_pipeline {
                             if !specific_candidate.is_empty() {
-                                // 🌟 [Plan C] 1. 구두점 및 명백한 한국어 조사 사전 절단 (Stanza의 품사 오독 방지)
+                                // 🌟 [Plan C] 1. 구두점 사전 절단 (다국어 공통)
                                 let mut eval_target = specific_candidate.clone();
                                 
                                 // 후행 구두점 제거
                                 eval_target = eval_target.trim_end_matches(&['.', ',', '?', '!', '"', '\'', ':', ';', ']', ')', '}', '>', ' '][..]).to_string();
-                                
-                                // 2음절 이상의 단어에 붙은 안전한 조사(은,는,을,를,에,에게,에서,으로,까지,부터,의) 제거
-                                // (이/가/로는 이름 일부일 수 있어 제외하여 안전성 확보)
-                                if let Ok(josa_re) = regex::Regex::new(r"^(?P<root>.*?[가-힣a-zA-Z0-9])(은|는|을|를|에|에게|에서|으로|까지|부터|의)$") {
-                                    if let Some(caps) = josa_re.captures(&eval_target) {
-                                        eval_target = caps.name("root").unwrap().as_str().to_string();
-                                        emit_term(&format!("[STANZA] 🧹 조사 1차 절단 (Plan C): '{}' -> '{}'", specific_candidate, eval_target));
-                                    }
-                                }
 
                                 let words: Vec<&str> = eval_target.split_whitespace().collect();
 
@@ -1940,15 +1931,8 @@ async fn process_task(
                                 if !extracted_val.is_empty() {
                                     let mut eval_ext = extracted_val.clone();
                                     
-                                    // 1차 절단: 구두점 및 명백한 조사 제거
+                                    // 1차 절단: 구두점 제거 (다국어 공통)
                                     eval_ext = eval_ext.trim_end_matches(&['.', ',', '?', '!', '"', '\'', ':', ';', ']', ')', '}', '>', ' '][..]).to_string();
-                                    
-                                    if let Ok(josa_re) = regex::Regex::new(r"^(?P<root>.*?[가-힣a-zA-Z0-9])(은|는|을|를|에|에게|에서|으로|까지|부터|의)$") {
-                                        if let Some(caps) = josa_re.captures(&eval_ext) {
-                                            eval_ext = caps.name("root").unwrap().as_str().to_string();
-                                            emit_term(&format!("[STANZA-EXT] 🧹 추출단어 조사 1차 절단: '{}' -> '{}'", extracted_val, eval_ext));
-                                        }
-                                    }
 
                                     let ext_words: Vec<&str> = eval_ext.split_whitespace().collect();
                                     if let Ok((word_ids, wordchars)) = stanza.preprocessor.encode_to_tensor(&ext_words) {
