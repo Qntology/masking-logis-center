@@ -1863,7 +1863,8 @@ async fn process_task(
                                     
                                     let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         // 전체 프롬프트가 아닌, 꼬리표(variable_suffix)만 넘깁니다!
-                                        gen.generate(&variable_suffix, 1024, &dev, Some(cancel_clone))
+                                        // 🌟 [개선] 추출 단어 길이를 고려하여 max_tokens를 1024에서 256으로 축소하여 오버헤드를 방지합니다.
+                                        gen.generate(&variable_suffix, 128, &dev, Some(cancel_clone))
                                     }));
                                     
                                     match panic_res {
@@ -1905,7 +1906,9 @@ async fn process_task(
                             let mut extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
 
                             // 🌟 [CRITICAL FIX] 요청하신 대로, 배열이 아닌 1:1 매칭된 NMS 단일값을 출력하며 로그 디자인을 명시적으로 반영합니다!
+                            // emit_term(&format!("시작 시간: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")));
                             emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 (NMS 👑 [WINNER/EXPANDED]: '{}', 추출단어: '{}') - 응답 길이: {}, 결과: {}", base_target, input_keyword, extracted_val, res_mask.len(), res_mask));
+                            // emit_term(&format!("종료 시간: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")));
 
                             // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
@@ -1926,10 +1929,104 @@ async fn process_task(
 
                             // 🌟 [추가] 할루시네이션(환각)으로 이미 판명된 단어라면 즉시 스킵 (동의어 트랙 등에서 재등장 방지)
                             if hallucinated_candidates.contains(&extracted_val) {
-                                emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 할루시네이션으로 판명된 단어입니다. 스킵합니다: '{}'", extracted_val));
+                                emit_term(&format!("시작 시간: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")));
+                                emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 할루시네이션으로 판명된 단어입니다. 스킵합니다: '{}'\n{}", extracted_val, res_mask));
+                                emit_term(&format!("종료 시간: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")));
                                 miss_counter += 1;
                                 current_temperature += 0.2;
                                 ignore_list.push(extracted_val.clone());
+                                continue;
+                            }
+
+                            // 🌟 [추가] 추출된 단어(extracted_val)에 대해 한 번 더 NLP(Stanza) 검증 및 정제를 수행하여 꼬리(조사)를 자르거나 명사가 아닌 경우 기각합니다.
+                            let mut nlp_rejected = false;
+                            if let Some(stanza) = &mut stanza_pipeline {
+                                if !extracted_val.is_empty() {
+                                    let mut eval_ext = extracted_val.clone();
+                                    
+                                    // 1차 절단: 구두점 및 명백한 조사 제거
+                                    eval_ext = eval_ext.trim_end_matches(&['.', ',', '?', '!', '"', '\'', ':', ';', ']', ')', '}', '>', ' '][..]).to_string();
+                                    
+                                    if let Ok(josa_re) = regex::Regex::new(r"^(?P<root>.*?[가-힣a-zA-Z0-9])(은|는|을|를|에|에게|에서|으로|까지|부터|의)$") {
+                                        if let Some(caps) = josa_re.captures(&eval_ext) {
+                                            eval_ext = caps.name("root").unwrap().as_str().to_string();
+                                            emit_term(&format!("[STANZA-EXT] 🧹 추출단어 조사 1차 절단: '{}' -> '{}'", extracted_val, eval_ext));
+                                        }
+                                    }
+
+                                    let ext_words: Vec<&str> = eval_ext.split_whitespace().collect();
+                                    if let Ok((word_ids, wordchars)) = stanza.preprocessor.encode_to_tensor(&ext_words) {
+                                        let inputs = vec![word_ids, wordchars];
+                                        if let Ok(outputs) = stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
+                                            let output_tensor = &outputs[0];
+                                            let shape = output_tensor.shape();
+                                            if let Some(data) = output_tensor.as_slice() {
+                                                let mut tags = Vec::new();
+                                                if shape.len() == 3 {
+                                                    let seq_len = shape[1] as usize;
+                                                    let num_classes = shape[2] as usize;
+                                                    for i in 0..seq_len {
+                                                        let mut max_val = std::f32::MIN;
+                                                        let mut max_idx = 0;
+                                                        for c in 0..num_classes {
+                                                            let val = data[i * num_classes + c];
+                                                            if val > max_val { max_val = val; max_idx = c; }
+                                                        }
+                                                        tags.push(max_idx);
+                                                    }
+                                                }
+                                                
+                                                let upos = ["ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"];
+                                                let tag_names: Vec<&str> = tags.into_iter()
+                                                    .map(|id| *upos.get(id).unwrap_or(&"X"))
+                                                    .collect();
+                                                    
+                                                emit_term(&format!("[STANZA-EXT] 추출단어 '{}' -> {:?}", eval_ext, tag_names));
+
+                                                let invalid_tags = ["VERB", "ADJ", "ADV", "ADP", "PUNCT", "DET", "PRON", "INTJ", "CCONJ", "SCONJ", "AUX", "PART", "SYM", "X"];
+                                                let all_invalid = tag_names.iter().all(|&t| invalid_tags.contains(&t));
+                                                let has_noun = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM");
+                                                
+                                                if all_invalid || !has_noun {
+                                                    emit_term(&format!("[STANZA-EXT] 💀 명사 누락 또는 동사/수식어 감지. 추출단어 강제 기각: '{}'", extracted_val));
+                                                    nlp_rejected = true;
+                                                } else {
+                                                    if let Some(last_tag) = tag_names.last() {
+                                                        let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ"];
+                                                        if tail_drop_tags.contains(last_tag) {
+                                                            let mut trimmed_words = ext_words.clone();
+                                                            trimmed_words.pop();
+                                                            let trimmed_candidate = trimmed_words.join(" ");
+                                                            emit_term(&format!("[STANZA-EXT] ✂️ 추출단어 스마트 꼬리 절단: '{}' -> '{}'", extracted_val, trimmed_candidate));
+                                                            extracted_val = trimmed_candidate;
+                                                        } else {
+                                                            if extracted_val != eval_ext {
+                                                                extracted_val = eval_ext;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // NLP 검증에서 완전히 탈락한 경우(환각 등) 강제 스킵 처리
+                            if nlp_rejected {
+                                hallucinated_candidates.insert(extracted_val.clone());
+                                if !specific_candidate.is_empty() && specific_candidate == extracted_val {
+                                    hallucinated_candidates.insert(specific_candidate.clone());
+                                }
+                                miss_counter += 1;
+                                current_temperature += 0.2;
+                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
+                                *count += 1;
+                                ignore_list.push(extracted_val.clone());
+                                if current_temperature > 0.6 || *count >= 3 {
+                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값 3회 누적 또는 온도 1.0 도달로 강제 종료."));
+                                    break;
+                                }
                                 continue;
                             }
 
@@ -1946,8 +2043,38 @@ async fn process_task(
                                 } 
                                 // 2. 입력 단어(specific_candidate)와 추출 단어 간에 포함 관계가 전혀 없는 경우 기각
                                 else if !no_space_input.contains(&no_space_ext) && !no_space_ext.contains(&no_space_input) {
-                                    nms_valid = false;
-                                    emit_term(&format!("[DEBUG] NMS 후보 단어와 교집합 없음. 강제 기각 (입력: '{}', 추출: '{}')", specific_candidate, extracted_val));
+                                    let mut found_in_pug_loop = false;
+                                    let mut corrected_val = extracted_val.clone();
+                                    
+                                    // 🌟 [추가 깊이] NMS 교집합이 없더라도, PUG 전체 라인을 루프 돌며 실제 존재하는지 교차 검증합니다.
+                                    for line in &lines {
+                                        if line.contains(&extracted_val) {
+                                            found_in_pug_loop = true;
+                                            break;
+                                        }
+                                        
+                                        // 띄어쓰기 변형을 고려한 정규식 루프 검색
+                                        if no_space_ext.len() >= 2 && no_space_ext.len() <= 100 {
+                                            let escaped_chars: Vec<String> = no_space_ext.chars().map(|c| regex::escape(&c.to_string())).collect();
+                                            let regex_pattern = escaped_chars.join(r"\s*");
+                                            if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                                if let Some(mat) = re.find(line) {
+                                                    found_in_pug_loop = true;
+                                                    corrected_val = mat.as_str().to_string();
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    if found_in_pug_loop {
+                                        emit_term(&format!("[DEBUG] NMS 후보와 교집합은 없으나 PUG 본문 전체 루프 검색에서 발견됨. 마스킹 진행 허용: '{}'", corrected_val));
+                                        extracted_val = corrected_val;
+                                        nms_valid = true;
+                                    } else {
+                                        nms_valid = false;
+                                        emit_term(&format!("[DEBUG] NMS 후보 단어와 교집합 없음. 강제 기각 (입력: '{}', 추출: '{}')", specific_candidate, extracted_val));
+                                    }
                                 }
                             }
 
@@ -1988,7 +2115,8 @@ async fn process_task(
                                 if is_zombie {
                                     emit_term(&format!("[DEBUG] 🧟 좀비 단어(이미 마스킹 완료) 추출 감지. 연쇄 파기(Cascade Cancellation) 발동: '{}'", extracted_val));
                                     hallucinated_candidates.insert(extracted_val.clone());
-                                    if !specific_candidate.is_empty() {
+                                    // 🌟 [Part 3 개선] 추출 단어와 힌트 단어가 동일할 때만 연대 책임 부과
+                                    if !specific_candidate.is_empty() && specific_candidate == extracted_val {
                                         hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 연쇄 파기 명부 등재
                                     }
                                 } else if is_spoiler {
@@ -2030,7 +2158,8 @@ async fn process_task(
                             if !early_exists {
                                 emit_term(&format!("[DEBUG] 추출단어가 PUG CONTENT에 존재하지 않습니다(contains 실패). 할루시네이션으로 즉시 차단: '{}'", extracted_val));
                                 hallucinated_candidates.insert(extracted_val.clone());
-                                if !specific_candidate.is_empty() {
+                                // 🌟 [Part 3 개선] 추출 단어와 힌트 단어가 동일할 때만 연대 책임 부과
+                                if !specific_candidate.is_empty() && specific_candidate == extracted_val {
                                     hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 연쇄 파기 명부 등재
                                 }
                                 
@@ -2209,7 +2338,8 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 서술어/표현 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.
                             if is_hallucination {
                                 hallucinated_candidates.insert(extracted_val.clone()); // 🌟 이후 트랙 스킵을 위해 장부에 등록
-                                if !specific_candidate.is_empty() {
+                                // 🌟 [Part 3 개선] 추출 단어와 힌트 단어가 동일할 때만 연대 책임 부과
+                                if !specific_candidate.is_empty() && specific_candidate == extracted_val {
                                     hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 동사/오답 판정 시 남은 파생 트랙 일괄 취소(연쇄 파기)를 위해 등록
                                 }
                                 
@@ -2493,11 +2623,21 @@ async fn process_task(
                                     current_temperature = 0.0;
                                     item_extract_count += 1;
                                     
-                                    fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 완료된 후보 장부 등록
+                                    // 🌟 [Part 1 개선] 마스킹 완료 장부 등록 기준 분리
+                                    fully_masked_candidates.insert(extracted_val.clone());
+                                    if specific_candidate == extracted_val {
+                                        fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 두 단어가 일치할 때만 힌트 단어 장부 등록
+                                    }
 
-                                    // 🌟 [CRITICAL FIX] 마스킹 성공 시 무한 루프를 방지하고 다음 트랙으로 넘어가기 위해 break를 호출합니다.
-                                    emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (부분 치환). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
-                                    break;
+                                    // 🌟 [Part 2 개선] 트랙 조기 종료(break) 조건 세분화
+                                    if !specific_candidate.is_empty() && !fully_masked_candidates.contains(&specific_candidate) && masked_text.contains(&specific_candidate) {
+                                        emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (부분 치환). 하지만 힌트 단어('{}')가 본문에 남아있어 트랙을 연장(continue)합니다.", specific_candidate));
+                                        continue;
+                                    } else {
+                                        // 🌟 [CRITICAL FIX] 마스킹 성공 시 무한 루프를 방지하고 다음 트랙으로 넘어가기 위해 break를 호출합니다.
+                                        emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (부분 치환). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
+                                        break;
+                                    }
                                 }
 
                                 // 🌟 [전략 D 적용] 무작정 ignore_list에 넣기 전에 로깅하여 어떤 값이 날아갔는지 파악합니다.
@@ -2547,11 +2687,21 @@ async fn process_task(
                                     current_target_found.push(extracted_val.clone());
                                     domain_history.push((target_name.to_string(), extracted_val.clone()));
                                     
-                                    fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 완료된 후보 장부 등록
+                                    // 🌟 [Part 1 개선] 마스킹 완료 장부 등록 기준 분리
+                                    fully_masked_candidates.insert(extracted_val.clone());
+                                    if specific_candidate == extracted_val {
+                                        fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 두 단어가 일치할 때만 힌트 단어 장부 등록
+                                    }
 
-                                    // 🌟 [CRITICAL FIX] 성공적으로 덮어썼으므로 루프를 종료하고 다음 트랙으로 넘어갑니다.
-                                    emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (Phase 2 병합). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
-                                    break;
+                                    // 🌟 [Part 2 개선] 트랙 조기 종료(break) 조건 세분화
+                                    if !specific_candidate.is_empty() && !fully_masked_candidates.contains(&specific_candidate) && masked_text.contains(&specific_candidate) {
+                                        emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (Phase 2 병합). 하지만 힌트 단어('{}')가 본문에 남아있어 트랙을 연장(continue)합니다.", specific_candidate));
+                                        continue;
+                                    } else {
+                                        // 🌟 [CRITICAL FIX] 성공적으로 덮어썼으므로 루프를 종료하고 다음 트랙으로 넘어갑니다.
+                                        emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (Phase 2 병합). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
+                                        break;
+                                    }
                                 }
                             }
 
@@ -2638,11 +2788,21 @@ async fn process_task(
                                 "mnemonic": mnemonic
                             }));
                             
-                            fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 완료된 후보 장부 등록
+                            // 🌟 [Part 1 개선] 마스킹 완료 장부 등록 기준 분리
+                            fully_masked_candidates.insert(extracted_val.clone());
+                            if specific_candidate == extracted_val {
+                                fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 두 단어가 일치할 때만 힌트 단어 장부 등록
+                            }
 
-                            // 🌟 [CRITICAL FIX] 정상적으로 마스킹을 성공했으므로 무한 루프(continue)를 돌지 않고 즉시 탈출(break)하여 다음 트랙으로 이동합니다.
-                            emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (전체 치환). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
-                            break;
+                            // 🌟 [Part 2 개선] 트랙 조기 종료(break) 조건 세분화
+                            if !specific_candidate.is_empty() && !fully_masked_candidates.contains(&specific_candidate) && masked_text.contains(&specific_candidate) {
+                                emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (전체 치환). 하지만 힌트 단어('{}')가 본문에 남아있어 트랙을 연장(continue)합니다.", specific_candidate));
+                                continue;
+                            } else {
+                                // 🌟 [CRITICAL FIX] 정상적으로 마스킹을 성공했으므로 무한 루프(continue)를 돌지 않고 즉시 탈출(break)하여 다음 트랙으로 이동합니다.
+                                emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (전체 치환). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
+                                break;
+                            }
                         }
                     }
 
