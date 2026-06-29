@@ -1618,8 +1618,8 @@ async fn process_task(
                                 // 괄호, 따옴표 등 검색에 방해되는 특수문자를 문자열에서 완전히 제거
                                 eval_target = eval_target.replace(&['(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '“', '”', '‘', '’'][..], "");
                                 
-                                // 양끝 구두점 및 기호 완벽 제거
-                                eval_target = eval_target.trim_matches(&['.', ',', '?', '!', ':', ';', '-', '_', '~', ' '][..]).to_string();
+                                // 양끝 구두점 및 기호 완벽 제거 ('|' 기호 포함)
+                                eval_target = eval_target.trim_matches(&['.', ',', '?', '!', ':', ';', '-', '_', '~', ' ', '|'][..]).to_string();
 
                                 // 🌟 정제된 텍스트를 specific_candidate에 다시 덮어씌워 LLM 프롬프트에도 깨끗한 값을 전달합니다.
                                 specific_candidate = eval_target.clone();
@@ -1981,6 +1981,11 @@ async fn process_task(
                             let parsed = raw_parsed.get("arguments").cloned().unwrap_or(raw_parsed);
                             
                             let mut extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                            
+                            // 🌟 [추가] LLM이 target_name(예: korean_inc) 키에 빈 값을 주고 base_target(예: company) 키에만 정답을 담아 반환하는 경우를 방어하기 위한 Fallback 로직
+                            if extracted_val.is_empty() {
+                                extracted_val = parsed.get(&base_target.to_lowercase()).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                            }
 
                             // 🌟 [CRITICAL FIX] 요청하신 대로, 배열이 아닌 1:1 매칭된 NMS 단일값을 출력하며 로그 디자인을 명시적으로 반영합니다!
                             emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 (NMS 👑 [WINNER/EXPANDED]: '{}', 추출단어: '{}') - 응답 길이: {}, 결과: {}", base_target, input_keyword, extracted_val, res_mask.len(), res_mask));
@@ -2020,8 +2025,8 @@ async fn process_task(
                                     // 1차 절단: 괄호 및 특수문자 사전 완벽 제거 (다국어 공통)
                                     eval_ext = eval_ext.replace(&['(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '“', '”', '‘', '’'][..], "");
                                     
-                                    // 양끝 구두점 및 기호 완벽 제거
-                                    eval_ext = eval_ext.trim_matches(&['.', ',', '?', '!', ':', ';', '-', '_', '~', ' '][..]).to_string();
+                                    // 양끝 구두점 및 기호 완벽 제거 ('|' 기호 포함)
+                                    eval_ext = eval_ext.trim_matches(&['.', ',', '?', '!', ':', ';', '-', '_', '~', ' ', '|'][..]).to_string();
 
                                     // 🌟 정제된 텍스트를 extracted_val에 덮어씌워 오탐률을 줄입니다.
                                     extracted_val = eval_ext.clone();
