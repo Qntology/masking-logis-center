@@ -3010,7 +3010,17 @@ async fn process_task(
 
     let clean_html_content = parsing::pre_clean_html(&raw_html_content);
     
-    let raw_pug = parsing::convert_to_clean_pug(&clean_html_content, PugMode::NoAttributesMode, Some(&url));
+    let mut raw_pug = parsing::convert_to_clean_pug(&clean_html_content, PugMode::NoAttributesMode, Some(&url));
+
+    // 🌟 Python 패리티: [preprocess_text] 기호와 명사가 떡칠되어 Stanza 가 OOV 대참사를 내는 현상을 예방하기 위해 PUG 줄 단위 분리 전 공백 전사 레이어 장전
+    if !raw_pug.is_empty() {
+        if let Ok(re_space) = regex::Regex::new(r"([.,!?()\[\]{}|/\\<>])") {
+            let space_applied = re_space.replace_all(&raw_pug, " $1 ").to_string();
+            if let Ok(re_multi_space) = regex::Regex::new(r" +") {
+                raw_pug = re_multi_space.replace_all(&space_applied, " ").to_string();
+            }
+        }
+    }
 
     // 🌟 [추가된 로직] 무거운 LLM을 VRAM에 올리기 전에 draft 타입이면 html과 yaml(PUG)을 저장하고 즉시 종료합니다.
     if task.r#type == "draft" {
