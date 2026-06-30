@@ -1722,121 +1722,99 @@ async fn process_task(
                                                 }
                                                 
 
-                                                // 한국어(ko)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "VERB", "ADV", "PUNCT", 
-                                                //     "CCONJ", "SCONJ", "ADJ", "PROPN", 
-                                                //     "AUX", "PRON", "NUM", "DET", 
-                                                //     "ADP", "X", "SYM", "INTJ", "PART"
-                                                // ];
-
-
-                                                // 일본어(ja)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "ADP", "VERB", "AUX", 
-                                                //     "PUNCT", "SCONJ", "PROPN", "NUM", 
-                                                //     "ADJ", "ADV", "PRON", "PART", 
-                                                //     "SYM", "DET", "CCONJ", "INTJ"
-                                                // ];
-
-                                                // 아랍어(ar)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "ADP", "ADJ", "PUNCT", 
-                                                //     "VERB", "CCONJ", "X", "PRON", 
-                                                //     "NUM", "DET", "SCONJ", "PART", 
-                                                //     "AUX", "ADV", "SYM", "PROPN", "INTJ"
-                                                // ];
-
-                                                // 체코어(cs)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "PUNCT", "ADJ", "ADP", 
-                                                //     "VERB", "PROPN", "ADV", "CCONJ", 
-                                                //     "DET", "AUX", "NUM", "PRON", 
-                                                //     "SCONJ", "PART", "X", "SYM", "INTJ"
-                                                // ];
-
-
-                                                // 독일어(de)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "DET", "PUNCT", "ADP", 
-                                                //     "PROPN", "ADJ", "VERB", "ADV", 
-                                                //     "PRON", "AUX", "CCONJ", "NUM", 
-                                                //     "PART", "SCONJ", "X", "SYM", "INTJ"
-                                                // ];
-
-
-
-                                                // 영어(en)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "PUNCT", "VERB", "ADP", 
-                                                //     "PRON", "DET", "ADJ", "PROPN", 
-                                                //     "AUX", "ADV", "CCONJ", "PART", 
-                                                //     "NUM", "SCONJ", "INTJ", "SYM", "X"
-                                                // ];
-
-
-                                                // 스페인어(es)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "ADP", "DET", "PUNCT", 
-                                                //     "VERB", "PROPN", "ADJ", "PRON", 
-                                                //     "ADV", "CCONJ", "AUX", "SCONJ", 
-                                                //     "NUM", "SYM", "X", "INTJ", "PART"
-                                                // ];
-
-                                                // 프랑스어(fr)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "ADP", "DET", "PUNCT", 
-                                                //     "VERB", "PROPN", "ADJ", "PRON", 
-                                                //     "ADV", "AUX", "CCONJ", "NUM", 
-                                                //     "SCONJ", "X", "INTJ", "SYM"
-                                                // ];
-
-
-                                                // 이탈리아어(it)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "DET", "ADP", "PUNCT", 
-                                                //     "VERB", "PRON", "ADJ", "PROPN", 
-                                                //     "ADV", "AUX", "CCONJ", "SYM", 
-                                                //     "NUM", "SCONJ", "X", "INTJ", "PART"
-                                                // ];
-
-                                                // 네덜란드어(nl)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "ADP", "DET", "PUNCT", 
-                                                //     "VERB", "PROPN", "ADJ", "PRON", 
-                                                //     "ADV", "AUX", "CCONJ", "NUM", 
-                                                //     "SCONJ", "X", "SYM", "INTJ"
-                                                // ];
-
-                                                // 포르투갈어(pt)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "DET", "ADP", "PUNCT", 
-                                                //     "VERB", "PROPN", "ADJ", "ADV", 
-                                                //     "PRON", "SCONJ", "CCONJ", "AUX", 
-                                                //     "NUM", "SYM", "X", "INTJ", "PART"
-                                                // ];
-
-
-                                                // 중국어 간체(zh-hans)
-                                                // let upos = [
-                                                //     "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
-                                                //     "NOUN", "VERB", "PUNCT", "PROPN", 
-                                                //     "PART", "NUM", "ADP", "SCONJ", 
-                                                //     "AUX", "ADV", "ADJ", "PRON", 
-                                                //     "CCONJ", "DET", "X", "SYM"
-                                                // ];
-
+                                                let upos: &[&str] = match stanza_lang_code {
+                                                    "ko" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "VERB", "ADV", "PUNCT", 
+                                                        "CCONJ", "SCONJ", "ADJ", "PROPN", 
+                                                        "AUX", "PRON", "NUM", "DET", 
+                                                        "ADP", "X", "SYM", "INTJ", "PART"
+                                                    ],
+                                                    "ja" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "ADP", "VERB", "AUX", 
+                                                        "PUNCT", "SCONJ", "PROPN", "NUM", 
+                                                        "ADJ", "ADV", "PRON", "PART", 
+                                                        "SYM", "DET", "CCONJ", "INTJ"
+                                                    ],
+                                                    "ar" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "ADP", "ADJ", "PUNCT", 
+                                                        "VERB", "CCONJ", "X", "PRON", 
+                                                        "NUM", "DET", "SCONJ", "PART", 
+                                                        "AUX", "ADV", "SYM", "PROPN", "INTJ"
+                                                    ],
+                                                    "cs" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "PUNCT", "ADJ", "ADP", 
+                                                        "VERB", "PROPN", "ADV", "CCONJ", 
+                                                        "DET", "AUX", "NUM", "PRON", 
+                                                        "SCONJ", "PART", "X", "SYM", "INTJ"
+                                                    ],
+                                                    "de" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "DET", "PUNCT", "ADP", 
+                                                        "PROPN", "ADJ", "VERB", "ADV", 
+                                                        "PRON", "AUX", "CCONJ", "NUM", 
+                                                        "PART", "SCONJ", "X", "SYM", "INTJ"
+                                                    ],
+                                                    "en" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "PUNCT", "VERB", "ADP", 
+                                                        "PRON", "DET", "ADJ", "PROPN", 
+                                                        "AUX", "ADV", "CCONJ", "PART", 
+                                                        "NUM", "SCONJ", "INTJ", "SYM", "X"
+                                                    ],
+                                                    "es" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "ADP", "DET", "PUNCT", 
+                                                        "VERB", "PROPN", "ADJ", "PRON", 
+                                                        "ADV", "CCONJ", "AUX", "SCONJ", 
+                                                        "NUM", "SYM", "X", "INTJ", "PART"
+                                                    ],
+                                                    "fr" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "ADP", "DET", "PUNCT", 
+                                                        "VERB", "PROPN", "ADJ", "PRON", 
+                                                        "ADV", "AUX", "CCONJ", "NUM", 
+                                                        "SCONJ", "X", "INTJ", "SYM"
+                                                    ],
+                                                    "it" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "DET", "ADP", "PUNCT", 
+                                                        "VERB", "PRON", "ADJ", "PROPN", 
+                                                        "ADV", "AUX", "CCONJ", "SYM", 
+                                                        "NUM", "SCONJ", "X", "INTJ", "PART"
+                                                    ],
+                                                    "nl" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "ADP", "DET", "PUNCT", 
+                                                        "VERB", "PROPN", "ADJ", "PRON", 
+                                                        "ADV", "AUX", "CCONJ", "NUM", 
+                                                        "SCONJ", "X", "SYM", "INTJ"
+                                                    ],
+                                                    "pt" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "DET", "ADP", "PUNCT", 
+                                                        "VERB", "PROPN", "ADJ", "ADV", 
+                                                        "PRON", "SCONJ", "CCONJ", "AUX", 
+                                                        "NUM", "SYM", "X", "INTJ", "PART"
+                                                    ],
+                                                    "zh-hans" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "VERB", "PUNCT", "PROPN", 
+                                                        "PART", "NUM", "ADP", "SCONJ", 
+                                                        "AUX", "ADV", "ADJ", "PRON", 
+                                                        "CCONJ", "DET", "X", "SYM"
+                                                    ],
+                                                    _ => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "PUNCT", "VERB", "ADP", 
+                                                        "PRON", "DET", "ADJ", "PROPN", 
+                                                        "AUX", "ADV", "CCONJ", "PART", 
+                                                        "NUM", "SCONJ", "INTJ", "SYM", "X"
+                                                    ],
+                                                };
 
                                                 let tag_names: Vec<&str> = tags.into_iter()
                                                     .map(|id| *upos.get(id).unwrap_or(&"X"))
@@ -2238,7 +2216,100 @@ async fn process_task(
                                                     }
                                                 }
                                                 
-                                                let upos = ["ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"];
+                                                let upos: &[&str] = match stanza_lang_code {
+                                                    "ko" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "VERB", "ADV", "PUNCT", 
+                                                        "CCONJ", "SCONJ", "ADJ", "PROPN", 
+                                                        "AUX", "PRON", "NUM", "DET", 
+                                                        "ADP", "X", "SYM", "INTJ", "PART"
+                                                    ],
+                                                    "ja" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "ADP", "VERB", "AUX", 
+                                                        "PUNCT", "SCONJ", "PROPN", "NUM", 
+                                                        "ADJ", "ADV", "PRON", "PART", 
+                                                        "SYM", "DET", "CCONJ", "INTJ"
+                                                    ],
+                                                    "ar" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "ADP", "ADJ", "PUNCT", 
+                                                        "VERB", "CCONJ", "X", "PRON", 
+                                                        "NUM", "DET", "SCONJ", "PART", 
+                                                        "AUX", "ADV", "SYM", "PROPN", "INTJ"
+                                                    ],
+                                                    "cs" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "PUNCT", "ADJ", "ADP", 
+                                                        "VERB", "PROPN", "ADV", "CCONJ", 
+                                                        "DET", "AUX", "NUM", "PRON", 
+                                                        "SCONJ", "PART", "X", "SYM", "INTJ"
+                                                    ],
+                                                    "de" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "DET", "PUNCT", "ADP", 
+                                                        "PROPN", "ADJ", "VERB", "ADV", 
+                                                        "PRON", "AUX", "CCONJ", "NUM", 
+                                                        "PART", "SCONJ", "X", "SYM", "INTJ"
+                                                    ],
+                                                    "en" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "PUNCT", "VERB", "ADP", 
+                                                        "PRON", "DET", "ADJ", "PROPN", 
+                                                        "AUX", "ADV", "CCONJ", "PART", 
+                                                        "NUM", "SCONJ", "INTJ", "SYM", "X"
+                                                    ],
+                                                    "es" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "ADP", "DET", "PUNCT", 
+                                                        "VERB", "PROPN", "ADJ", "PRON", 
+                                                        "ADV", "CCONJ", "AUX", "SCONJ", 
+                                                        "NUM", "SYM", "X", "INTJ", "PART"
+                                                    ],
+                                                    "fr" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "ADP", "DET", "PUNCT", 
+                                                        "VERB", "PROPN", "ADJ", "PRON", 
+                                                        "ADV", "AUX", "CCONJ", "NUM", 
+                                                        "SCONJ", "X", "INTJ", "SYM"
+                                                    ],
+                                                    "it" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "DET", "ADP", "PUNCT", 
+                                                        "VERB", "PRON", "ADJ", "PROPN", 
+                                                        "ADV", "AUX", "CCONJ", "SYM", 
+                                                        "NUM", "SCONJ", "X", "INTJ", "PART"
+                                                    ],
+                                                    "nl" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "ADP", "DET", "PUNCT", 
+                                                        "VERB", "PROPN", "ADJ", "PRON", 
+                                                        "ADV", "AUX", "CCONJ", "NUM", 
+                                                        "SCONJ", "X", "SYM", "INTJ"
+                                                    ],
+                                                    "pt" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "DET", "ADP", "PUNCT", 
+                                                        "VERB", "PROPN", "ADJ", "ADV", 
+                                                        "PRON", "SCONJ", "CCONJ", "AUX", 
+                                                        "NUM", "SYM", "X", "INTJ", "PART"
+                                                    ],
+                                                    "zh-hans" => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "VERB", "PUNCT", "PROPN", 
+                                                        "PART", "NUM", "ADP", "SCONJ", 
+                                                        "AUX", "ADV", "ADJ", "PRON", 
+                                                        "CCONJ", "DET", "X", "SYM"
+                                                    ],
+                                                    _ => &[
+                                                        "<PAD>", "<UNK>", "<EMPTY>", "<ROOT>", 
+                                                        "NOUN", "PUNCT", "VERB", "ADP", 
+                                                        "PRON", "DET", "ADJ", "PROPN", 
+                                                        "AUX", "ADV", "CCONJ", "PART", 
+                                                        "NUM", "SCONJ", "INTJ", "SYM", "X"
+                                                    ],
+                                                };
+
                                                 let tag_names: Vec<&str> = tags.into_iter()
                                                     .map(|id| *upos.get(id).unwrap_or(&"X"))
                                                     .collect();
