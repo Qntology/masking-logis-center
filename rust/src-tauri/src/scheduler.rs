@@ -1823,17 +1823,17 @@ async fn process_task(
                                                 emit_term(&format!("[STANZA] 1차 형태소 분리 완료 '{}' -> {:?}", eval_target, tag_names));
 
                                                 // 🌟 [Plan B] Rule 1: 할루시네이션 원천 차단 (블랙리스트 최적화)
-                                                // 순수 동사, 형용사, 부사, 조사, 구두점 등만으로 이루어진 경우 기각
-                                                let invalid_tags = ["VERB", "ADJ", "ADV", "ADP", "PUNCT", "SCONJ", "AUX", "PART", "SYM"];
+                                                // 형용사, 부사, 조사, 구두점 등만으로 이루어진 경우 기각 (단독 명사가 VERB로 오탐지되는 경우가 많아 VERB는 제외)
+                                                let invalid_tags = ["ADJ", "ADV", "ADP", "PUNCT", "SCONJ", "AUX", "PART", "SYM"];
                                                 
                                                 let all_invalid = tag_names.iter().all(|&t| invalid_tags.contains(&t));
                                                 
                                                 // 🌟 [Plan B] Rule 1-2: OOV(미등록 단어) 구제 로직 적용
-                                                // 고유명사가 ONNX 모델에서 X, DET, CCONJ, PRON 등으로 오탐지되는 경우가 많으므로 이를 허용 명단에 포함
-                                                let has_noun_or_oov = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON");
+                                                // 고유명사가 ONNX 모델에서 VERB, X, DET, CCONJ, PRON 등으로 오탐지되는 경우가 많으므로 이를 허용 명단에 포함
+                                                let has_noun_or_oov = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON" || t == "VERB");
                                                 
                                                 if all_invalid || !has_noun_or_oov {
-                                                    emit_term(&format!("[STANZA] 💀 순수 동사/수식어/조사 감지 (Plan B). 강제 기각: '{}'", specific_candidate));
+                                                    emit_term(&format!("[STANZA] 💀 순수 수식어/조사/기호 감지 (Plan B). 강제 기각: '{}'", specific_candidate));
                                                     hallucinated_candidates.insert(specific_candidate.clone());
                                                 } else {
                                                     // 🌟 [Plan B] Rule 2: 2차 POS 기반 스마트 연속 꼬리 자르기 (다국어 범용 UPOS 기반)
@@ -2316,12 +2316,12 @@ async fn process_task(
                                                     
                                                 emit_term(&format!("[STANZA-EXT] 1차 형태소 분리 완료 '{}' -> {:?}", eval_ext, tag_names));
 
-                                                let invalid_tags = ["VERB", "ADJ", "ADV", "ADP", "PUNCT", "SCONJ", "AUX", "PART", "SYM"];
+                                                let invalid_tags = ["ADJ", "ADV", "ADP", "PUNCT", "SCONJ", "AUX", "PART", "SYM"];
                                                 let all_invalid = tag_names.iter().all(|&t| invalid_tags.contains(&t));
-                                                let has_noun_or_oov = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON");
+                                                let has_noun_or_oov = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON" || t == "VERB");
                                                 
                                                 if all_invalid || !has_noun_or_oov {
-                                                    emit_term(&format!("[STANZA-EXT] 💀 순수 동사/수식어/조사 감지. 추출단어 강제 기각: '{}'", extracted_val));
+                                                    emit_term(&format!("[STANZA-EXT] 💀 순수 수식어/조사/기호 감지. 추출단어 강제 기각: '{}'", extracted_val));
                                                     nlp_rejected = true;
                                                 } else {
                                                     let mut trimmed_words = ext_words.clone();
