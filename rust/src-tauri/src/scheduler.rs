@@ -2515,6 +2515,13 @@ async fn process_task(
                             let re_check_desc = doc_desc.contains(&extracted_val);
 
                             if !re_check_context && !re_check_body && !re_check_title && !re_check_desc {
+                                // 🌟 [CRITICAL FIX] 원본(target_text)에는 존재하나 마스킹된 텍스트(masked_text/matched_context)에는 없는 경우,
+                                // 이미 다른 트랙에 의해 부분 마스킹되어 텍스트가 훼손된 상태이므로 환각이 아닌 트랙 포화로 간주하고 조기 종료합니다.
+                                if early_exists {
+                                    emit_term(&format!("[DEBUG] 원본에는 존재하나 마스킹 과정에서 훼손됨. 파생어/중복 마스킹으로 간주하여 트랙 조기 종료: '{}'", extracted_val));
+                                    break;
+                                }
+
                                 miss_counter += 1;
                                 current_temperature += 0.2; // 🌟 못 찾았으므로 온도를 높여 다음 턴에 변형을 유도
                                 
