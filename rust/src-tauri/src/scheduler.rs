@@ -2551,14 +2551,120 @@ async fn process_task(
                             }
 
                             // 🌟 [STAGE 3] 추출 단어 다국어 순차 검증 (Sequential CoT Evaluation with Early Exit)
-                            // NLP Stanza 검증이 앞서 완벽히 필터링하므로, LLM의 is_target_mismatch만 체크하고 넘어갑니다.
                             let is_mismatch = parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                            emit_term(&format!("\n======================================="));
+                            emit_term(&format!("[DEBUG-EXTRACTION-STAGE3] 🎯 추출 단어 다국어 순차 검증 시작 🎯"));
+                            emit_term(&format!("- 추출 단어: '{}'", extracted_val));
+                            emit_term(&format!("- is_target_mismatch: {}", is_mismatch));
+                            emit_term(&format!("=======================================\n"));
 
                             let mut is_hallucination = false;
                             
                             if is_mismatch {
                                 emit_term(&format!("    💀 [REJECT] 타겟 미스매치 (is_target_mismatch=true)"));
                                 is_hallucination = true;
+                            } else {
+                                // 🌟 다국어 전체를 순회하며 모두 0점을 초과할 때만 할루시네이션으로 판단
+                                let mut hallucination_count = 0;
+                                let total_langs = detected_languages_vec.len();
+
+                                for lang in &detected_languages_vec {
+                                    if cancellation_token.load(Ordering::Relaxed) { break; }
+
+                                    let verb_hint = bias_json.get("verb").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Does the word represent an action, state, or predicate (e.g., ends with a verb conjugation)?");
+                                    let expr_hint = bias_json.get("expression").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Is it an idiom, conversational phrase, or full sentence?");
+
+                                    // --- 1. Verb Score Check ---
+                                    let (v_sys, v_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, "verb, predicate", verb_hint);
+                                    let cancel_clone_v = cancellation_token.clone();
+                                    
+                                    let gen_arc_v = model.granite_generator.clone();
+                                    let dev_v = model.device_config.device.clone();
+                                    let v_prompt_text = format!("<|start_of_role|>system<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>", v_sys, v_user);
+
+                                    let v_res = tokio::task::spawn_blocking(move || -> String {
+                                        let mut gen_guard = gen_arc_v.blocking_lock();
+                                        if let Some(gen) = gen_guard.as_mut() {
+                                            gen.clear_kv_cache();
+                                            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                                gen.generate(&v_prompt_text, 64, &dev_v, Some(cancel_clone_v))
+                                            })).unwrap_or_else(|_| Ok("{}".to_string())).unwrap_or_else(|_| "{}".to_string());
+                                            gen.clear_kv_cache();
+                                            res
+                                        } else { "{}".to_string() }
+                                    }).await.unwrap_or_else(|_| "{}".to_string());
+
+                                    if !model.is_cpu_mode {
+                                        let dev = model.device_config.device.clone();
+                                        let _ = tokio::task::spawn_blocking(move || { if dev.is_cuda() { let _ = dev.synchronize(); } }).await;
+                                    }
+
+                                    let v_json = crate::parsing::parse_json_from_llm(&v_res);
+                                    let verb_score = v_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    
+                                    emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {}", lang, verb_score));
+
+                                    // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
+                                    if verb_score >= 7.0 {
+                                        emit_term(&format!("    💀 [REJECT] {} Verb Score 7.0 이상 (Fatal Early Exit)", lang));
+                                        is_hallucination = true;
+                                        break;
+                                    }
+
+                                    // --- 2. Expression Score Check ---
+                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, "idiom, phrase, full sentence", expr_hint);
+                                    let cancel_clone_e = cancellation_token.clone();
+                                    
+                                    let gen_arc_e = model.granite_generator.clone();
+                                    let dev_e = model.device_config.device.clone();
+                                    let e_prompt_text = format!("<|start_of_role|>system<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>", e_sys, e_user);
+
+                                    let e_res = tokio::task::spawn_blocking(move || -> String {
+                                        let mut gen_guard = gen_arc_e.blocking_lock();
+                                        if let Some(gen) = gen_guard.as_mut() {
+                                            gen.clear_kv_cache();
+                                            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                                gen.generate(&e_prompt_text, 64, &dev_e, Some(cancel_clone_e))
+                                            })).unwrap_or_else(|_| Ok("{}".to_string())).unwrap_or_else(|_| "{}".to_string());
+                                            gen.clear_kv_cache();
+                                            res
+                                        } else { "{}".to_string() }
+                                    }).await.unwrap_or_else(|_| "{}".to_string());
+
+                                    if !model.is_cpu_mode {
+                                        let dev = model.device_config.device.clone();
+                                        let _ = tokio::task::spawn_blocking(move || { if dev.is_cuda() { let _ = dev.synchronize(); } }).await;
+                                    }
+
+                                    let e_json = crate::parsing::parse_json_from_llm(&e_res);
+                                    let expr_score = e_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    
+                                    emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {}", lang, expr_score));
+
+                                    // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
+                                    if expr_score >= 7.0 {
+                                        emit_term(&format!("    💀 [REJECT] {} Expr Score 7.0 이상 (Fatal Early Exit)", lang));
+                                        is_hallucination = true;
+                                        break;
+                                    }
+
+                                    // 🌟 [수정] 해당 언어에서 Verb와 Expr 점수가 '전부(둘 다)' 0을 초과할 때만 애매한 오답으로 간주하여 카운트 증가
+                                    if verb_score > 0.0 && expr_score > 0.0 {
+                                        emit_term(&format!("    ⚠️ [WARNING] {} 검증에서 전부 0점 초과 (Verb: {}, Expr: {})", lang, verb_score, expr_score));
+                                        hallucination_count += 1;
+                                    } else {
+                                        // 🌟 하나라도 0점(또는 0 이하)인 값이 발견되면 완벽한 명사(타겟)로 간주하여 즉시 조기 종료(Early Exit) 허용!
+                                        emit_term(&format!("    ✅ [PASS] {} 검증 통과 (0점 포함). 완벽한 타겟으로 간주하여 나머지 검증 스킵", lang));
+                                        break; 
+                                    }
+                                }
+
+                                // 🌟 Fatal(>= 7.0)로 강제 종료되지 않고 끝까지 돌았을 때, 모든 다국어가 전부 0점을 초과했다면 최종 할루시네이션으로 판정
+                                if !is_hallucination && hallucination_count == total_langs && total_langs > 0 {
+                                    emit_term(&format!("    💀 [REJECT] 모든 다국어 검증에서 전부 0점 초과. 할루시네이션으로 최종 차단"));
+                                    is_hallucination = true;
+                                }
                             }
 
                             // 🌟 [CRITICAL FIX] 서술어/표현 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.
