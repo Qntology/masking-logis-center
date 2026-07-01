@@ -1632,8 +1632,8 @@ async fn process_task(
                                 // 🌟 [Plan C] 1. 괄호 및 특수문자 사전 완벽 제거 (다국어 공통)
                                 let mut eval_target = specific_candidate.clone();
                                 
-                                // 괄호, 따옴표 등 검색에 방해되는 특수문자를 문자열에서 완전히 제거
-                                eval_target = eval_target.replace(&['(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '“', '”', '‘', '’'][..], "");
+                                // 괄호, 따옴표 등 검색에 방해되는 특수문자를 문자열에서 공백으로 치환하여 단어 결합 방지 (따로따로 진행)
+                                eval_target = eval_target.replace(&['(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '“', '”', '‘', '’'][..], " ");
                                 
                                 // 양끝 구두점 및 기호 완벽 제거 ('|' 기호 포함)
                                 eval_target = eval_target.trim_matches(&['.', ',', '?', '!', ':', ';', '-', '_', '~', ' ', '|'][..]).to_string();
@@ -1786,8 +1786,8 @@ async fn process_task(
                                                     }
                                                     
                                                     if is_trimmed {
-                                                        // 교착어(한국어, 일본어, 중국어)는 공백 없이, 그 외는 공백을 두고 병합
-                                                        let join_str = if ["korean", "japanese", "chinese"].contains(&local_language.as_str()) { "" } else { " " };
+                                                        // 모든 언어(한국어, 일본어, 중국어 포함)에서 어절 단위(공백)를 유지하여 따로따로 진행되도록 분리
+                                                        let join_str = " ";
                                                         let trimmed_candidate = trimmed_words.join(join_str);
                                                         emit_term(&format!("[STANZA] ✂️ 1차 형태소 분리 후 스마트 꼬리 절단 ({}): '{}' -> '{}'", local_language, specific_candidate, trimmed_candidate));
                                                         specific_candidate = trimmed_candidate;
@@ -2073,8 +2073,8 @@ async fn process_task(
                                 if !extracted_val.is_empty() {
                                     let mut eval_ext = extracted_val.clone();
                                     
-                                    // 1차 절단: 괄호 및 특수문자 사전 완벽 제거 (다국어 공통)
-                                    eval_ext = eval_ext.replace(&['(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '“', '”', '‘', '’'][..], "");
+                                    // 1차 절단: 괄호 및 특수문자 사전 공백 치환 (다국어 공통, 따로따로 진행)
+                                    eval_ext = eval_ext.replace(&['(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '“', '”', '‘', '’'][..], " ");
                                     
                                     // 양끝 구두점 및 기호 완벽 제거 ('|' 기호 포함)
                                     eval_ext = eval_ext.trim_matches(&['.', ',', '?', '!', ':', ';', '-', '_', '~', ' ', '|'][..]).to_string();
@@ -2213,7 +2213,8 @@ async fn process_task(
                                                     }
                                                     
                                                     if is_trimmed {
-                                                        let join_str = if ["korean", "japanese", "chinese"].contains(&local_language.as_str()) { "" } else { " " };
+                                                        // 모든 언어(한국어, 일본어, 중국어 포함)에서 어절 단위(공백)를 유지하여 따로따로 진행되도록 분리
+                                                        let join_str = " ";
                                                         let trimmed_candidate = trimmed_words.join(join_str);
                                                         emit_term(&format!("[STANZA-EXT] ✂️ 1차 형태소 분리 후 추출단어 스마트 꼬리 절단 ({}): '{}' -> '{}'", local_language, extracted_val, trimmed_candidate));
                                                         extracted_val = trimmed_candidate;
