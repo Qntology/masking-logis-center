@@ -1921,6 +1921,32 @@ async fn process_task(
                             matched_context = matched_context.replace(original_val, marker);
                         }
 
+                        // 🌟 [추가] Granite 추론 전, 힌트 단어(specific_candidate)가 PUG 컨텍스트(matched_context 또는 masked_text)에 남아있는지 사전 검증합니다.
+                        // '조세 무리뉴'가 마스킹된 후 '조세'가 남지 않은 경우처럼, 이미 치환되어 사라진 단어에 대한 무의미한 LLM 추론을 원천 차단합니다.
+                        if !specific_candidate.is_empty() {
+                            let mut cand_exists = matched_context.contains(&specific_candidate) || masked_text.contains(&specific_candidate) || doc_title.contains(&specific_candidate) || doc_desc.contains(&specific_candidate);
+                            
+                            // 띄어쓰기 변형을 고려한 교차 검증
+                            if !cand_exists && specific_candidate.chars().count() >= 2 {
+                                let no_space_cand: String = specific_candidate.chars().filter(|c| !c.is_whitespace()).collect();
+                                if no_space_cand.len() >= 2 && no_space_cand.len() <= 100 {
+                                    let escaped_chars: Vec<String> = no_space_cand.chars().map(|c| regex::escape(&c.to_string())).collect();
+                                    let regex_pattern = escaped_chars.join(r"\s*");
+                                    if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                        if re.is_match(&matched_context) || re.is_match(&masked_text) || re.is_match(&doc_title) || re.is_match(&doc_desc) {
+                                            cand_exists = true;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !cand_exists {
+                                emit_term(&format!("[DEBUG] ⚠️ 힌트 단어('{}')가 현재 마스킹된 PUG 본문/문맥에 더 이상 존재하지 않습니다(이미 다른 마커로 치환됨). 불필요한 LLM 추론을 스킵합니다.", specific_candidate));
+                                fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 이미 마스킹된 것으로 간주하여 이후 동의어 트랙에서도 스킵 유도
+                                continue;
+                            }
+                        }
+
                         // 🌟 [PREFIX CACHING] Mamba State 유지를 위해 루프 진입 전 공통 프롬프트를 1회 사전 연산(Prefill)합니다.
                         let already_found_str = if current_target_found.is_empty() { "".to_string() } else { current_target_found.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ") };
                         let candidates_str = if specific_candidate.is_empty() { "".to_string() } else { format!("\"{}\"", specific_candidate.replace("\"", "\\\"")) };
