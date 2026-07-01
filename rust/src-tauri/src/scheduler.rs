@@ -1791,30 +1791,24 @@ async fn process_task(
                                                         }
                                                     }
                                                     
-                                                    // 🌟 [추가 로직] 형태소가 2개로 분리되었을 때, 한쪽이 1글자짜리 단어라면 버리지 않고 각각 분리하여 LLM 추론 큐에 독립적으로 추가합니다.
+                                                    // 🌟 [추가 로직] 형태소가 여러 개(3개, 4개 이상 포함)로 분리되었을 때, 길이가 1인 잉여 단어가 포함되어 있다면 
+                                                    // 형태소들을 다시 합치지 않고 각각 독립적인 단어로 분할하여 LLM 추론 큐(valid_targets)에 추가합니다.
                                                     let mut queue_split = false;
-                                                    if trimmed_words.len() == 2 {
-                                                        let len0 = trimmed_words[0].chars().filter(|c| !c.is_whitespace()).count();
-                                                        let len1 = trimmed_words[1].chars().filter(|c| !c.is_whitespace()).count();
-                                                        if (len0 == 1 && len1 > 1) || (len1 == 1 && len0 > 1) {
+                                                    if trimmed_words.len() >= 2 {
+                                                        if trimmed_words.iter().any(|w| w.chars().filter(|c| !c.is_whitespace()).count() == 1) {
                                                             queue_split = true;
                                                         }
                                                     }
 
                                                     if queue_split {
-                                                        let part1 = trimmed_words[0].to_string();
-                                                        let part2 = trimmed_words[1].to_string();
-                                                        emit_term(&format!("[STANZA] ✂️ 1글자 단어 포함 감지. '{}' 와 '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", part1, part2));
+                                                        let parts_display = trimmed_words.join("', '");
+                                                        emit_term(&format!("[STANZA] ✂️ 1글자 단어 포함 감지. '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", parts_display));
                                                         
-                                                        // 첫 번째 단어 트랙 추가
-                                                        let mut clone1 = valid_targets[p_idx - 1].clone();
-                                                        clone1.7 = part1;
-                                                        valid_targets.push(clone1);
-                                                        
-                                                        // 두 번째 단어 트랙 추가
-                                                        let mut clone2 = valid_targets[p_idx - 1].clone();
-                                                        clone2.7 = part2;
-                                                        valid_targets.push(clone2);
+                                                        for part in &trimmed_words {
+                                                            let mut clone = valid_targets[p_idx - 1].clone();
+                                                            clone.7 = part.to_string();
+                                                            valid_targets.push(clone);
+                                                        }
                                                         
                                                         // 병합된 원본 트랙은 무효화하고 다음 큐로 넘어갑니다.
                                                         continue;
@@ -2245,31 +2239,24 @@ async fn process_task(
                                                         }
                                                     }
                                                     
-                                                    // 🌟 [추가 로직] 추출 단어의 형태소가 2개로 분리되었을 때, 한쪽이 1글자짜리 단어라면 버리지 않고 
+                                                    // 🌟 [추가 로직] 추출 단어의 형태소가 여러 개(3개, 4개 이상 포함)로 분리되었을 때, 길이가 1인 잉여 단어가 포함되어 있다면 
                                                     // 각각 분리하여 LLM 추론 큐(valid_targets)에 새롭게 편입시킵니다.
                                                     let mut queue_split = false;
-                                                    if trimmed_words.len() == 2 {
-                                                        let len0 = trimmed_words[0].chars().filter(|c| !c.is_whitespace()).count();
-                                                        let len1 = trimmed_words[1].chars().filter(|c| !c.is_whitespace()).count();
-                                                        if (len0 == 1 && len1 > 1) || (len1 == 1 && len0 > 1) {
+                                                    if trimmed_words.len() >= 2 {
+                                                        if trimmed_words.iter().any(|w| w.chars().filter(|c| !c.is_whitespace()).count() == 1) {
                                                             queue_split = true;
                                                         }
                                                     }
 
                                                     if queue_split {
-                                                        let part1 = trimmed_words[0].to_string();
-                                                        let part2 = trimmed_words[1].to_string();
-                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 와 '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", part1, part2));
+                                                        let parts_display = trimmed_words.join("', '");
+                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", parts_display));
                                                         
-                                                        // 첫 번째 단어 트랙 추가
-                                                        let mut clone1 = valid_targets[p_idx - 1].clone();
-                                                        clone1.7 = part1;
-                                                        valid_targets.push(clone1);
-                                                        
-                                                        // 두 번째 단어 트랙 추가
-                                                        let mut clone2 = valid_targets[p_idx - 1].clone();
-                                                        clone2.7 = part2;
-                                                        valid_targets.push(clone2);
+                                                        for part in &trimmed_words {
+                                                            let mut clone = valid_targets[p_idx - 1].clone();
+                                                            clone.7 = part.to_string();
+                                                            valid_targets.push(clone);
+                                                        }
                                                         
                                                         // 병합된 원본 트랙은 무효화하고 다음 큐로 넘어갑니다.
                                                         continue;
@@ -2499,12 +2486,15 @@ async fn process_task(
                                 
                                 let mut current_word_langs = detected_languages_vec.clone();
                                 if let Some((best_lang, _)) = local_lang_counts.into_iter().max_by_key(|&(_, count)| count) {
+                                    emit_term(&format!("    🌐 [언어 동적 매핑] 추출 단어 '{}' 분석 결과: 최우선 언어 -> {}", extracted_val, best_lang));
                                     if let Some(pos) = current_word_langs.iter().position(|l| l == best_lang) {
                                         let local = current_word_langs.remove(pos);
                                         current_word_langs.insert(0, local);
                                     } else {
                                         current_word_langs.insert(0, best_lang.to_string());
                                     }
+                                } else {
+                                    emit_term(&format!("    🌐 [언어 동적 매핑] 추출 단어에서 특정 유니코드 특징을 찾지 못해 기본 언어를 유지합니다."));
                                 }
 
                                 // 🌟 다국어 전체를 순회하며 모두 0점을 초과할 때만 할루시네이션으로 판단
