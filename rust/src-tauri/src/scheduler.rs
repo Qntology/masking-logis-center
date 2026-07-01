@@ -1747,7 +1747,7 @@ async fn process_task(
 
                                                 // 🌟 [Plan B] Rule 1: 할루시네이션 원천 차단 (블랙리스트 최적화)
                                                 // 형용사, 부사, 조사, 구두점 등만으로 이루어진 경우 기각 (단독 명사가 VERB로 오탐지되는 경우가 많아 VERB는 제외)
-                                                let invalid_tags = ["ADJ", "ADV", "ADP", "PUNCT", "SCONJ", "AUX", "PART", "SYM"];
+                                                let invalid_tags = ["PUNCT"];
                                                 
                                                 let all_invalid = tag_names.iter().all(|&t| invalid_tags.contains(&t));
                                                 
@@ -2179,7 +2179,7 @@ async fn process_task(
                                                     
                                                 emit_term(&format!("[STANZA-EXT] 1차 형태소 분리 완료 '{}' -> {:?}", eval_ext, tag_names));
 
-                                                let invalid_tags = ["ADJ", "ADV", "ADP", "PUNCT", "SCONJ", "AUX", "PART", "SYM"];
+                                                let invalid_tags = ["PUNCT"];
                                                 let all_invalid = tag_names.iter().all(|&t| invalid_tags.contains(&t));
                                                 let has_noun_or_oov = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON" || t == "VERB");
                                                 
