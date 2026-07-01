@@ -178,6 +178,12 @@ impl StanzaPreprocessor {
     /// 품사 태깅(pos.onnx)을 위해 분할된 단어 배열을 Word 텐서와 Wordchar(길이) 텐서로 변환합니다.
     pub fn encode_to_tensor(&self, words: &[&str]) -> Result<(ndarray::ArrayD<i64>, ndarray::ArrayD<i64>), anyhow::Error> {
         let seq_len = words.len();
+        
+        // 🌟 [CRITICAL FIX] 빈 배열(seq_len == 0)이 주어지면 ONNX LSTM Reshape 노드에서 치명적인 에러가 발생하므로 사전에 차단합니다.
+        if seq_len == 0 {
+            return Err(anyhow::anyhow!("입력된 단어 배열이 비어있어 ONNX 텐서 변환을 수행할 수 없습니다."));
+        }
+
         let mut word_ids = Vec::with_capacity(seq_len);
         let mut wordchars_raw = ndarray::Array2::<i64>::zeros((1, seq_len));
 
@@ -1647,6 +1653,12 @@ async fn process_task(
                                 // 🌟 정제된 텍스트를 specific_candidate에 다시 덮어씌워 LLM 프롬프트에도 깨끗한 값을 전달합니다.
                                 specific_candidate = eval_target.clone();
 
+                                // 🌟 [CRITICAL FIX] 특수문자 제거 후 힌트 단어가 완전히 사라진 경우 (예: "."), 무의미한 LLM 추론 및 ONNX 에러를 방지하기 위해 트랙을 즉시 스킵합니다.
+                                if specific_candidate.trim().is_empty() {
+                                    emit_term("[STANZA] ⚠️ 특수문자 정제 후 힌트 단어가 완전히 사라졌습니다. 트랙을 스킵합니다.");
+                                    continue;
+                                }
+
                                 // 🌟 [1차 형태소 분리] Stanza Tokenizer ONNX 추론 기반 다국어 형태소/단어 동적 분할
                                 let mut ext_words_string: Vec<String> = Vec::new();
                                 let chars: Vec<char> = eval_target.chars().collect();
@@ -2109,6 +2121,12 @@ async fn process_task(
                                     // 🌟 정제된 텍스트를 extracted_val에 덮어씌워 오탐률을 줄입니다.
                                     extracted_val = eval_ext.clone();
 
+                                    // 🌟 [CRITICAL FIX] 특수문자 제거 후 추출 단어가 완전히 사라진 경우, NLP 검증을 우회하고 강제로 기각 상태를 활성화합니다.
+                                    if extracted_val.trim().is_empty() {
+                                        emit_term("[STANZA-EXT] ⚠️ 특수문자 정제 후 추출 단어가 완전히 사라졌습니다. 강제 기각 처리합니다.");
+                                        nlp_rejected = true;
+                                    }
+
                                     // 🌟 [1차 형태소 분리] Stanza Tokenizer ONNX 추론 기반 다국어 형태소/단어 동적 분할
                                     let mut ext_words_string: Vec<String> = Vec::new();
                                     let chars: Vec<char> = eval_ext.chars().collect();
@@ -2508,7 +2526,9 @@ async fn process_task(
                                     let expr_hint = bias_json.get("expression").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Is it an idiom, conversational phrase, or full sentence?");
 
                                     // --- 1. Verb Score Check ---
-                                    let (v_sys, v_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, "verb, predicate", verb_hint);
+                                    // 🌟 문서에서 감지된 언어 중 현재 검증 언어(lang)가 아닌 2차 언어를 찾아 foreign으로 설정 (없을 경우 기본값 "english")
+                                    let foreign_lang = detected_languages_vec.iter().find(|&l| l != lang).cloned().unwrap_or_else(|| "english".to_string());
+                                    let (v_sys, v_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, &foreign_lang, "verb, predicate", verb_hint);
                                     let cancel_clone_v = cancellation_token.clone();
                                     
                                     let gen_arc_v = model.granite_generator.clone();
@@ -2533,9 +2553,15 @@ async fn process_task(
                                     }
 
                                     let v_json = crate::parsing::parse_json_from_llm(&v_res);
-                                    let verb_score = v_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let mut verb_score = v_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let v_loanword = v_json.get("loanword").and_then(|v| v.as_bool()).unwrap_or(false);
                                     
-                                    emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {}", lang, verb_score));
+                                    if v_loanword {
+                                        emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {} (Loanword: true) -> 🛡️ 차용어 감지. 강제 통과(0.0) 처리", lang, verb_score));
+                                        verb_score = 0.0;
+                                    } else {
+                                        emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {}", lang, verb_score));
+                                    }
 
                                     // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
                                     if verb_score >= 7.0 {
@@ -2545,7 +2571,9 @@ async fn process_task(
                                     }
 
                                     // --- 2. Expression Score Check ---
-                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, "idiom, phrase, full sentence", expr_hint);
+                                    // 🌟 문서에서 감지된 언어 중 현재 검증 언어(lang)가 아닌 2차 언어를 찾아 foreign으로 설정 (없을 경우 기본값 "english")
+                                    let foreign_lang = detected_languages_vec.iter().find(|&l| l != lang).cloned().unwrap_or_else(|| "english".to_string());
+                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, &foreign_lang, "idiom, phrase, full sentence", expr_hint);
                                     let cancel_clone_e = cancellation_token.clone();
                                     
                                     let gen_arc_e = model.granite_generator.clone();
@@ -2570,9 +2598,15 @@ async fn process_task(
                                     }
 
                                     let e_json = crate::parsing::parse_json_from_llm(&e_res);
-                                    let expr_score = e_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let mut expr_score = e_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let e_loanword = e_json.get("loanword").and_then(|v| v.as_bool()).unwrap_or(false);
                                     
-                                    emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {}", lang, expr_score));
+                                    if e_loanword {
+                                        emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {} (Loanword: true) -> 🛡️ 차용어 감지. 강제 통과(0.0) 처리", lang, expr_score));
+                                        expr_score = 0.0;
+                                    } else {
+                                        emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {}", lang, expr_score));
+                                    }
 
                                     // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
                                     if expr_score >= 7.0 {
