@@ -1297,6 +1297,10 @@ async fn process_task(
                                 // 특수기호만 존재하는 무의미한 텍스트 스킵
                                 if chunk_text.trim().chars().all(|c| !c.is_alphanumeric()) { continue; }
 
+                                // 🌟 [CRITICAL FIX] 1음절(글자 수 1개) 쓰레기 단어('와', '가', '의' 등)의 NMS 우승 원천 차단
+                                let char_count = chunk_text.chars().filter(|c| !c.is_whitespace()).count();
+                                if char_count <= 1 { continue; }
+
                                 let chunk_emb = model.get_embedding(chunk_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                 let word_count = end - start;
                                 let length_weight = 1.0; // 단어 개수 가중치 제거 (길이 무관 동등 점수)
@@ -1832,10 +1836,18 @@ async fn process_task(
                                                 // 고유명사가 ONNX 모델에서 VERB, X, DET, CCONJ, PRON 등으로 오탐지되는 경우가 많으므로 이를 허용 명단에 포함
                                                 let has_noun_or_oov = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON" || t == "VERB");
                                                 
-                                                if all_invalid || !has_noun_or_oov {
+                                                // 🌟 [CRITICAL FIX] 고유명사 OOV(미등록 단어) 구제: 
+                                                // 추출 타겟의 종류(name, company 등)와 무관하게 2글자 이상인데 순수 구두점/수식어로 오탐지되는 경우 Stanza를 무시하고 LLM 검증으로 넘김
+                                                let cand_char_count = specific_candidate.chars().filter(|c| !c.is_whitespace()).count();
+                                                let rescue_oov = cand_char_count >= 2 && all_invalid;
+
+                                                if !rescue_oov && (all_invalid || !has_noun_or_oov) {
                                                     emit_term(&format!("[STANZA] 💀 순수 수식어/조사/기호 감지 (Plan B). 강제 기각: '{}'", specific_candidate));
                                                     hallucinated_candidates.insert(specific_candidate.clone());
                                                 } else {
+                                                    if rescue_oov {
+                                                        emit_term(&format!("[STANZA] 🚑 OOV 구제 발동 (Plan B 우회): '{}' ({} 항목). 강제 기각을 면제하고 LLM 교차 검증으로 넘깁니다.", specific_candidate, base_target));
+                                                    }
                                                     // 🌟 [Plan B] Rule 2: 2차 POS 기반 스마트 연속 꼬리 자르기 (다국어 범용 UPOS 기반)
                                                     // 마지막 단어가 구두점(PUNCT), 조사/전치사(ADP), 불변화사/기능어(PART), 종속접속사(SCONJ), 등위접속사(CCONJ), 관형사(DET)로 판별되면 동적으로 모두 떼어냄
                                                     let mut trimmed_words = words.clone();
@@ -2346,10 +2358,18 @@ async fn process_task(
                                                 let all_invalid = tag_names.iter().all(|&t| invalid_tags.contains(&t));
                                                 let has_noun_or_oov = tag_names.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON" || t == "VERB");
                                                 
-                                                if all_invalid || !has_noun_or_oov {
+                                                // 🌟 [CRITICAL FIX] 고유명사 OOV(미등록 단어) 구제: 
+                                                // 추출 타겟의 종류와 무관하게 2글자 이상인데 순수 구두점/수식어로 오탐지되는 경우 구제
+                                                let ext_char_count = extracted_val.chars().filter(|c| !c.is_whitespace()).count();
+                                                let rescue_oov = ext_char_count >= 2 && all_invalid;
+
+                                                if !rescue_oov && (all_invalid || !has_noun_or_oov) {
                                                     emit_term(&format!("[STANZA-EXT] 💀 순수 수식어/조사/기호 감지. 추출단어 강제 기각: '{}'", extracted_val));
                                                     nlp_rejected = true;
                                                 } else {
+                                                    if rescue_oov {
+                                                        emit_term(&format!("[STANZA-EXT] 🚑 OOV 구제 발동 (Plan B 우회): '{}'. 강제 기각을 면제합니다.", extracted_val));
+                                                    }
                                                     let mut trimmed_words = ext_words.clone();
                                                     let mut valid_tags_clone = tag_names.clone();
                                                     let mut is_trimmed = false;
