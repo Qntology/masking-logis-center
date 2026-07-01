@@ -1041,6 +1041,12 @@ async fn process_task(
                         .map(|(lang, _)| lang.to_string())
                         .unwrap_or_else(|| "english".to_string());
 
+                    // 🌟 [CRITICAL FIX] 다국어 검증(Stage 3) 시 local_language를 무조건 가장 먼저(0번 인덱스) 검증하도록 재배열하여 불필요한 타언어(English 등) LLM 추론을 최소화합니다.
+                    if let Some(pos) = detected_languages_vec.iter().position(|l| l == &local_language) {
+                        let local = detected_languages_vec.remove(pos);
+                        detected_languages_vec.insert(0, local);
+                    }
+
                     emit_term(&format!("[EXTRACTION] 🌐 Detected Languages: {:?} (Local: {})", detected_languages_vec, local_language));
 
                     // 🌟 [추가] Stanza Pipeline 동적 로드 (로컬 언어 기준)
@@ -1785,7 +1791,34 @@ async fn process_task(
                                                         }
                                                     }
                                                     
-                                                    if is_trimmed {
+                                                    // 🌟 [추가 로직] 형태소가 2개로 분리되었을 때, 한쪽이 1글자짜리 단어라면 버리지 않고 각각 분리하여 LLM 추론 큐에 독립적으로 추가합니다.
+                                                    let mut queue_split = false;
+                                                    if trimmed_words.len() == 2 {
+                                                        let len0 = trimmed_words[0].chars().filter(|c| !c.is_whitespace()).count();
+                                                        let len1 = trimmed_words[1].chars().filter(|c| !c.is_whitespace()).count();
+                                                        if (len0 == 1 && len1 > 1) || (len1 == 1 && len0 > 1) {
+                                                            queue_split = true;
+                                                        }
+                                                    }
+
+                                                    if queue_split {
+                                                        let part1 = trimmed_words[0].to_string();
+                                                        let part2 = trimmed_words[1].to_string();
+                                                        emit_term(&format!("[STANZA] ✂️ 1글자 단어 포함 감지. '{}' 와 '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", part1, part2));
+                                                        
+                                                        // 첫 번째 단어 트랙 추가
+                                                        let mut clone1 = valid_targets[p_idx - 1].clone();
+                                                        clone1.7 = part1;
+                                                        valid_targets.push(clone1);
+                                                        
+                                                        // 두 번째 단어 트랙 추가
+                                                        let mut clone2 = valid_targets[p_idx - 1].clone();
+                                                        clone2.7 = part2;
+                                                        valid_targets.push(clone2);
+                                                        
+                                                        // 병합된 원본 트랙은 무효화하고 다음 큐로 넘어갑니다.
+                                                        continue;
+                                                    } else if is_trimmed {
                                                         // 모든 언어(한국어, 일본어, 중국어 포함)에서 어절 단위(공백)를 유지하여 따로따로 진행되도록 분리
                                                         let join_str = " ";
                                                         let trimmed_candidate = trimmed_words.join(join_str);
@@ -2212,7 +2245,35 @@ async fn process_task(
                                                         }
                                                     }
                                                     
-                                                    if is_trimmed {
+                                                    // 🌟 [추가 로직] 추출 단어의 형태소가 2개로 분리되었을 때, 한쪽이 1글자짜리 단어라면 버리지 않고 
+                                                    // 각각 분리하여 LLM 추론 큐(valid_targets)에 새롭게 편입시킵니다.
+                                                    let mut queue_split = false;
+                                                    if trimmed_words.len() == 2 {
+                                                        let len0 = trimmed_words[0].chars().filter(|c| !c.is_whitespace()).count();
+                                                        let len1 = trimmed_words[1].chars().filter(|c| !c.is_whitespace()).count();
+                                                        if (len0 == 1 && len1 > 1) || (len1 == 1 && len0 > 1) {
+                                                            queue_split = true;
+                                                        }
+                                                    }
+
+                                                    if queue_split {
+                                                        let part1 = trimmed_words[0].to_string();
+                                                        let part2 = trimmed_words[1].to_string();
+                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 와 '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", part1, part2));
+                                                        
+                                                        // 첫 번째 단어 트랙 추가
+                                                        let mut clone1 = valid_targets[p_idx - 1].clone();
+                                                        clone1.7 = part1;
+                                                        valid_targets.push(clone1);
+                                                        
+                                                        // 두 번째 단어 트랙 추가
+                                                        let mut clone2 = valid_targets[p_idx - 1].clone();
+                                                        clone2.7 = part2;
+                                                        valid_targets.push(clone2);
+                                                        
+                                                        // 병합된 원본 트랙은 무효화하고 다음 큐로 넘어갑니다.
+                                                        continue;
+                                                    } else if is_trimmed {
                                                         // 모든 언어(한국어, 일본어, 중국어 포함)에서 어절 단위(공백)를 유지하여 따로따로 진행되도록 분리
                                                         let join_str = " ";
                                                         let trimmed_candidate = trimmed_words.join(join_str);
@@ -2411,11 +2472,46 @@ async fn process_task(
                                 emit_term(&format!("    💀 [REJECT] 타겟 미스매치 (is_target_mismatch=true)"));
                                 is_hallucination = true;
                             } else {
+                                // 🌟 [CRITICAL FIX] 추출된 단어(extracted_val) 자체의 유니코드를 분석하여 
+                                // 해당 단어의 실제 언어를 Stage 3 검증의 최우선순위로 동적 재배치합니다.
+                                let mut local_lang_counts = std::collections::HashMap::new();
+                                for c in extracted_val.chars() {
+                                    let u = c as u32;
+                                    let lang = if (u >= 0x0041 && u <= 0x005A) || (u >= 0x0061 && u <= 0x007A) { "english" }
+                                    else if (u >= 0xAC00 && u <= 0xD7A3) || (u >= 0x1100 && u <= 0x11FF) || (u >= 0x3130 && u <= 0x318F) { "korean" }
+                                    else if (u >= 0x3040 && u <= 0x309F) || (u >= 0x30A0 && u <= 0x30FF) { "japanese" }
+                                    else if u >= 0x4E00 && u <= 0x9FFF { "chinese" }
+                                    else if u >= 0x0400 && u <= 0x04FF { "russian" }
+                                    else if u >= 0x0600 && u <= 0x06FF { "arabic" }
+                                    else if u >= 0x0E00 && u <= 0x0E7F { "thai" }
+                                    else if u >= 0x0900 && u <= 0x097F { "hindi" }
+                                    else if u >= 0x0980 && u <= 0x09FF { "bengali" }
+                                    else if u >= 0x0370 && u <= 0x03FF { "greek" }
+                                    else if u >= 0x0590 && u <= 0x05FF { "hebrew" }
+                                    else if u >= 0x1EA0 && u <= 0x1EF9 { "vietnamese" }
+                                    else if u >= 0x00C0 && u <= 0x00FF { "european" }
+                                    else { "" };
+
+                                    if !lang.is_empty() {
+                                        *local_lang_counts.entry(lang).or_insert(0) += 1;
+                                    }
+                                }
+                                
+                                let mut current_word_langs = detected_languages_vec.clone();
+                                if let Some((best_lang, _)) = local_lang_counts.into_iter().max_by_key(|&(_, count)| count) {
+                                    if let Some(pos) = current_word_langs.iter().position(|l| l == best_lang) {
+                                        let local = current_word_langs.remove(pos);
+                                        current_word_langs.insert(0, local);
+                                    } else {
+                                        current_word_langs.insert(0, best_lang.to_string());
+                                    }
+                                }
+
                                 // 🌟 다국어 전체를 순회하며 모두 0점을 초과할 때만 할루시네이션으로 판단
                                 let mut hallucination_count = 0;
-                                let total_langs = detected_languages_vec.len();
+                                let total_langs = current_word_langs.len();
 
-                                for lang in &detected_languages_vec {
+                                for lang in &current_word_langs {
                                     if cancellation_token.load(Ordering::Relaxed) { break; }
 
                                     let verb_hint = bias_json.get("verb").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Does the word represent an action, state, or predicate (e.g., ends with a verb conjugation)?");
