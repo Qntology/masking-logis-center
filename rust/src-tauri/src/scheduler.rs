@@ -176,7 +176,7 @@ impl StanzaPreprocessor {
     }
 
     /// 품사 태깅(pos.onnx)을 위해 분할된 단어 배열을 Word 텐서와 Wordchar(길이) 텐서로 변환합니다.
-    pub fn encode_to_tensor(&self, words: &[&str]) -> Result<Vec<ndarray::ArrayD<i64>>, anyhow::Error> {
+    pub fn encode_to_tensor(&self, words: &[&str], session: &Session<'static>) -> Result<Vec<ndarray::ArrayD<i64>>, anyhow::Error> {
         let seq_len = words.len();
         
         // 🌟 [CRITICAL FIX] 빈 배열(seq_len == 0)이 주어지면 ONNX LSTM Reshape 노드에서 치명적인 에러가 발생하므로 사전에 차단합니다.
@@ -215,24 +215,69 @@ impl StanzaPreprocessor {
         }
         
         let word_tensor = ndarray::Array2::from_shape_vec((1, seq_len), word_ids)
-            .map_err(|e| anyhow::anyhow!("Failed to build word tensor: {}", e))?;
-        let mask_tensor = ndarray::Array2::<i64>::ones((1, seq_len));
-        let pre_tensor = ndarray::Array2::<i64>::zeros((1, seq_len));
-        let oidx_tensor = ndarray::Array1::from_vec(oidx_vec);
-        let slen_tensor = ndarray::Array1::from_vec(vec![seq_len as i64]);
-        let wlen_tensor = ndarray::Array1::from_vec(wlen_vec);
+            .map_err(|e| anyhow::anyhow!("Failed to build word tensor: {}", e))?.into_dyn();
+        let mask_tensor = ndarray::Array2::<i64>::ones((1, seq_len)).into_dyn();
+        let chars_tensor = chars_raw.into_dyn();
+        let chars_mask_tensor = chars_mask_raw.into_dyn();
+        let pre_tensor = ndarray::Array2::<i64>::zeros((1, seq_len)).into_dyn();
+        let oidx_tensor = ndarray::Array1::from_vec(oidx_vec).into_dyn();
+        let slen_tensor = ndarray::Array1::from_vec(vec![seq_len as i64]).into_dyn();
+        let wlen_tensor = ndarray::Array1::from_vec(wlen_vec).into_dyn();
         
-        // 파이썬 Export 스키마 순서와 완벽하게 일치하게 8개 텐서를 반환
-        Ok(vec![
-            word_tensor.into_dyn(),
-            mask_tensor.into_dyn(),
-            chars_raw.into_dyn(),
-            chars_mask_raw.into_dyn(),
-            pre_tensor.into_dyn(),
-            oidx_tensor.into_dyn(),
-            slen_tensor.into_dyn(),
-            wlen_tensor.into_dyn()
-        ])
+        // 🌟 [CRITICAL FIX] PyTorch ONNX Export 과정에서 사용되지 않은 입력(mask, oidx, slen 등)은 
+        // 컴파일 그래프에서 제거됩니다. ONNX Runtime에 고정된 8개 텐서를 무조건 넘기면 Shape Mismatch가 발생하므로,
+        // Session이 실제로 기대하는 입력 차원(Dimensions)을 런타임에 스캔하여 정확한 텐서만 동적으로 조립합니다.
+        let mut final_inputs = Vec::new();
+        let mut word_used = false;
+        let mut chars_used = false;
+        let mut chars_mask_used = false;
+        let mut pre_used = false;
+        let mut wlen_used = false;
+
+        for input_meta in &session.inputs {
+            let dims = &input_meta.dimensions;
+            
+            // 1. [1, seq_len] 형태의 입력 (word, pre, mask)
+            if dims.len() == 2 && dims.get(0) == Some(&Some(1)) {
+                if !word_used {
+                    final_inputs.push(word_tensor.clone());
+                    word_used = true;
+                } else if !pre_used {
+                    final_inputs.push(pre_tensor.clone());
+                    pre_used = true;
+                } else {
+                    final_inputs.push(mask_tensor.clone());
+                }
+            } 
+            // 2. [seq_len, 32] 형태의 입력 (chars, chars_mask)
+            else if dims.len() == 2 && dims.get(1) == Some(&Some(32)) {
+                if !chars_used {
+                    final_inputs.push(chars_tensor.clone());
+                        chars_used = true;
+                } else if !chars_mask_used {
+                    final_inputs.push(chars_mask_tensor.clone());
+                    chars_mask_used = true;
+                }
+            } 
+            // 3. [seq_len] 또는 [1] 형태의 1D 입력 (wlen, slen, oidx)
+            else if dims.len() == 1 {
+                if dims.get(0) == Some(&Some(1)) {
+                    final_inputs.push(slen_tensor.clone());
+                } else {
+                    if !wlen_used {
+                        final_inputs.push(wlen_tensor.clone());
+                        wlen_used = true;
+                    } else {
+                        final_inputs.push(oidx_tensor.clone());
+                    }
+                }
+            } else {
+                // 예외 상황: 구조가 파악되지 않은 경우 안전하게 word_tensor 추가
+                final_inputs.push(word_tensor.clone());
+            }
+        }
+        
+        Ok(final_inputs)
     }
 }
 
@@ -1810,10 +1855,9 @@ async fn process_task(
                                 
                                 let words: Vec<&str> = ext_words_string.iter().map(|s| s.as_str()).collect();
 
-                                if let Ok(inputs) = stanza.preprocessor.encode_to_tensor(&words) {
+                                if let Ok(inputs) = stanza.preprocessor.encode_to_tensor(&words, &stanza.pos_session) {
                                     // 🌟 [CRITICAL FIX] 파이썬 ONNX Export 변경에 대응:
-                                    // 캐릭터 모델 복원으로 인해 모델이 기대하는 8개의 텐서 입력을 전부 주입합니다.
-                                    // (word, mask, chars, chars_mask, pre, oidx, slen, wlen)
+                                    // 캐릭터 모델 복원으로 인해 모델이 기대하는 텐서 입력을 세션(Session)에서 동적으로 스캔하여 주입합니다.
                                     
                                     match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
                                         Ok(outputs) => {
@@ -2282,7 +2326,7 @@ async fn process_task(
                                         
                                         let ext_words: Vec<&str> = ext_words_string.iter().map(|s| s.as_str()).collect();
 
-                                        if let Ok(inputs) = stanza.preprocessor.encode_to_tensor(&ext_words) {
+                                        if let Ok(inputs) = stanza.preprocessor.encode_to_tensor(&ext_words, &stanza.pos_session) {
                                             if let Ok(outputs) = stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
                                                 let output_tensor = &outputs[0];
                                                 let shape = output_tensor.shape();
