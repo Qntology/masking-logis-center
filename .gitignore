@@ -19,8 +19,9 @@ bin/
 _bin/
 
 # Editor directories and files
-cargo/target
-cargo/data
+rust/src-tauri/target
+rust/src-tauri/gen
+
 .vscode/*
 !.vscode/extensions.json
 .idea
