@@ -32,6 +32,214 @@ use tokio::sync::Notify;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 
+// 🌟 [추가] 정규표현식 및 하드코딩 패턴 (Pattern Matching)
+pub static EMAIL_REGEX: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}").unwrap());
+pub static PCC_REGEX: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(?i)\bP\d{12}\b").unwrap());
+pub static TRACKING_REGEX: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{9,14}\b").unwrap());
+
+pub fn get_phone_regex(lang: &str) -> &'static regex::Regex {
+    static PHONE_KO: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+82|0)[1-9]\d{0,2}[-.\s]?\d{3,4}[-.\s]?\d{4}").unwrap());
+    static PHONE_EN: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}|(\+44[-.\s]?)?\(?0?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}").unwrap());
+    static PHONE_JA: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+81|0)\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{4}").unwrap());
+    static PHONE_ZH: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+?86[-.\s]?)?1[3-9]\d{1,2}[-.\s]?\d{3,4}[-.\s]?\d{3,4}|(\+?86[-.\s]?)?(\d{2,4}[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}").unwrap());
+    static PHONE_FR: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+33|0)[1-9]([-.\s]?\d{2}){4}").unwrap());
+    static PHONE_ES: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+34|0)?[6789]\d{2}([-.\s]?\d{3}){2}").unwrap());
+    static PHONE_DE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+49|0)[1-9]\d{1,4}([-.\s]?\d{3,9})").unwrap());
+    static PHONE_PT: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+351|0)[29]\d{8}|(\+55|0)?\s?(\(?\d{2}\)?)\s?9?\d{4}-?\d{4}").unwrap());
+    static PHONE_AR: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+966|0)?5\d{8}|(\+?\d{1,3}[-.\s]?)?\(?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}").unwrap());
+    static PHONE_CS: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+420)?\s?\d{3}\s?\d{3}\s?\d{3}").unwrap());
+    static PHONE_IT: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+39)?\s?3\d{2}\s?\d{6,7}").unwrap());
+    static PHONE_NL: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+31|0)6\d{8}").unwrap());
+    static PHONE_DEFAULT: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(\+?\d{1,3}[-.\s]?)?\(?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{4}").unwrap());
+
+    match lang {
+        "korean" | "ko" => &PHONE_KO,
+        "english" | "en" => &PHONE_EN,
+        "japanese" | "ja" => &PHONE_JA,
+        "chinese" | "zh-hans" | "zh" => &PHONE_ZH,
+        "french" | "fr" => &PHONE_FR,
+        "spanish" | "es" => &PHONE_ES,
+        "german" | "de" => &PHONE_DE,
+        "portuguese" | "pt" => &PHONE_PT,
+        "arabic" | "ar" => &PHONE_AR,
+        "czech" | "cs" => &PHONE_CS,
+        "italian" | "it" => &PHONE_IT,
+        "dutch" | "nl" => &PHONE_NL,
+        _ => &PHONE_DEFAULT,
+    }
+}
+
+// 🌟 [추가] 다국어 운송장/송장 번호 탐지 키워드 사전
+pub fn get_tracking_keywords(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "korean" | "ko" => &["운송장", "송장", "배송번호", "주문번호", "등기번호", "tracking", "waybill"],
+        "english" | "en" => &["tracking", "waybill", "awb", "shipment", "order", "consignment", "reference"],
+        "japanese" | "ja" => &["追跡", "伝票", "問い合わせ", "配送", "送り状", "tracking", "waybill"],
+        "chinese" | "zh-hans" | "zh" => &["运单", "快递", "物流", "追踪", "单号", "tracking", "waybill"],
+        "french" | "fr" => &["suivi", "expédition", "lettre de voiture", "colis", "tracking", "waybill"],
+        "spanish" | "es" => &["seguimiento", "envío", "guía", "albarán", "tracking", "waybill"],
+        "german" | "de" => &["sendungsverfolgung", "tracking", "frachtbrief", "paket", "waybill"],
+        "portuguese" | "pt" => &["rastreamento", "envio", "guia", "remessa", "tracking", "waybill"],
+        "arabic" | "ar" => &["تتبع", "شحنة", "بوليصة", "tracking", "waybill"],
+        "czech" | "cs" => &["sledování", "zásilka", "nákladní", "tracking", "waybill"],
+        "italian" | "it" => &["tracciamento", "spedizione", "vettura", "tracking", "waybill"],
+        "dutch" | "nl" => &["volgen", "zending", "vrachtbrief", "tracking", "waybill"],
+        _ => &["tracking", "waybill", "awb", "shipment", "order", "운송장", "송장"],
+    }
+}
+
+// 🌟 [추가] 다국어 주소 탐지 사전 (Address Anchors)
+pub struct AddressAnchor {
+    pub admin: &'static [&'static str],
+    pub street: &'static [&'static str],
+    pub zipcode_regex: &'static Lazy<regex::Regex>,
+}
+
+pub fn get_address_anchor(lang: &str) -> Option<AddressAnchor> {
+    static ZIP_KO: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{5}\b").unwrap());
+    static ZIP_EN: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{5}(-\d{4})?\b").unwrap());
+    static ZIP_DE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{5}\b").unwrap());
+    static ZIP_ES: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{5}\b").unwrap());
+    static ZIP_FR: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{5}\b").unwrap());
+    static ZIP_JA: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{3}-\d{4}\b").unwrap());
+    static ZIP_ZH: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{6}\b").unwrap());
+    static ZIP_PT: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{4}-\d{3}\b|\b\d{5}-\d{3}\b").unwrap());
+    static ZIP_AR: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{5}(-\d{4})?\b").unwrap());
+    static ZIP_CS: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{3}\s?\d{2}\b").unwrap());
+    static ZIP_IT: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b\d{5}\b").unwrap());
+    static ZIP_NL: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\b[1-9]\d{3}\s?[A-Z]{2}\b").unwrap());
+
+    match lang {
+        "korean" | "ko" => Some(AddressAnchor {
+            admin: &["서울특별시", "특별시", "광역시", "특별자치시", "도", "시", "군", "구", "읍", "면", "동", "리", "가", "나"],
+            street: &["대로", "로", "길", "번길", "단지", "마을"],
+            zipcode_regex: &ZIP_KO,
+        }),
+        "english" | "en" => Some(AddressAnchor {
+            admin: &["State", "City", "County", "Province", "Region", "District", "Territory", "Prefecture"],
+            street: &["Street", "St", "Road", "Rd", "Avenue", "Ave", "Lane", "Ln", "Drive", "Dr", "Boulevard", "Blvd", "Court", "Ct", "Parkway", "Pkwy", "Square", "Sq", "Terrace", "Ter", "Way"],
+            zipcode_regex: &ZIP_EN,
+        }),
+        "german" | "de" => Some(AddressAnchor {
+            admin: &["Bundesland", "Kreis", "Stadt", "Bezirk", "Gemeinde", "Landkreis"],
+            street: &["straße", "str.", "weg", "platz", "gasse", "allee", "ring", "damm", "ufer", "zeile"],
+            zipcode_regex: &ZIP_DE,
+        }),
+        "spanish" | "es" => Some(AddressAnchor {
+            admin: &["Provincia", "Municipio", "Barrio", "Localidad", "Comunidad", "Ciudad", "Región"],
+            street: &["Calle", "C/", "Avenida", "Av.", "Paseo", "Plaza", "Camino", "Ronda", "Estrada", "Travesía", "Via", "Vía"],
+            zipcode_regex: &ZIP_ES,
+        }),
+        "french" | "fr" => Some(AddressAnchor {
+            admin: &["Région", "Département", "Arrondissement", "Commune", "Quartier", "Ville", "Cité"],
+            street: &["Rue", "Avenue", "Av.", "Boulevard", "Bd", "Place", "Chemin", "Route", "Quai", "Allée", "Passage", "Impasse"],
+            zipcode_regex: &ZIP_FR,
+        }),
+        "japanese" | "ja" => Some(AddressAnchor {
+            admin: &["東京都", "道", "府", "県", "市", "区", "郡", "村"],
+            street: &["丁目", "番지", "番", "号", "町", "条", "筋"],
+            zipcode_regex: &ZIP_JA,
+        }),
+        "chinese" | "zh-hans" | "zh" => Some(AddressAnchor {
+            admin: &["省", "直辖市", "市", "区", "县", "镇", "乡", "街道"],
+            street: &["路", "街", "大道", "巷", "弄", "号", "单元", "室"],
+            zipcode_regex: &ZIP_ZH,
+        }),
+        "portuguese" | "pt" => Some(AddressAnchor {
+            admin: &["Distrito", "Concelho", "Estado", "Província", "UF", "Região"],
+            street: &["Rua", "R.", "Avenida", "Av.", "Praça", "Pr.", "Largo", "Lg.", "Travessa", "Tv.", "Estrada"],
+            zipcode_regex: &ZIP_PT,
+        }),
+        "arabic" | "ar" => Some(AddressAnchor {
+            admin: &["منطقة", "محافظة", "مدينة", "بلدية"],
+            street: &["شارع", "طريق", "ميدان", "نهج"],
+            zipcode_regex: &ZIP_AR,
+        }),
+        "czech" | "cs" => Some(AddressAnchor {
+            admin: &["Kraj", "Okres", "Obec", "Město", "Čtvrť"],
+            street: &["ulice", "ul.", "náměstí", "nám.", "třída", "tř.", "nábřeží"],
+            zipcode_regex: &ZIP_CS,
+        }),
+        "italian" | "it" => Some(AddressAnchor {
+            admin: &["Regione", "Provincia", "Comune", "Località", "Quartiere"],
+            street: &["Via", "Viale", "Corso", "Piazza", "Largo", "Vico", "Vicolo", "Strada"],
+            zipcode_regex: &ZIP_IT,
+        }),
+        "dutch" | "nl" => Some(AddressAnchor {
+            admin: &["Provincie", "Gemeente", "Stad", "Wijk"],
+            street: &["Straat", "Laan", "Weg", "Gracht", "Singel", "Plein", "Dijk"],
+            zipcode_regex: &ZIP_NL,
+        }),
+        _ => None,
+    }
+}
+
+pub fn scan_address_candidates(text: &str, lang: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    if let Some(anchor) = get_address_anchor(lang) {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let mut all_anchors = Vec::new();
+        all_anchors.extend_from_slice(anchor.admin);
+        all_anchors.extend_from_slice(anchor.street);
+        
+        for i in 0..words.len() {
+            let word = words[i];
+            let clean_word: String = word.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+            
+            let mut found_anchor = false;
+            for a in &all_anchors {
+                if clean_word.ends_with(a) || (!["korean", "ko", "japanese", "ja", "chinese", "zh-hans", "zh"].contains(&lang) && clean_word == *a) {
+                    found_anchor = true;
+                    break;
+                }
+            }
+            
+            if found_anchor {
+                let mut addr_parts = vec![word];
+                // 뒤쪽 탐색 (최대 5단어) - 상세 주소 (숫자, 번지수 등)
+                let max_end = (i + 6).min(words.len());
+                for j in (i + 1)..max_end {
+                    let next_word = words[j];
+                    let has_digit = next_word.chars().any(|c| c.is_ascii_digit());
+                    let has_anchor = all_anchors.iter().any(|a| next_word.contains(a));
+                    let is_short = next_word.chars().count() <= 2;
+                    if has_digit || has_anchor || is_short {
+                        addr_parts.push(next_word);
+                    } else {
+                        break;
+                    }
+                }
+                
+                // 앞쪽 탐색 (최대 5단어) - 상위 행정구역
+                let min_start = i.saturating_sub(5);
+                for j in (min_start..i).rev() {
+                    let prev_word = words[j];
+                    let has_anchor = all_anchors.iter().any(|a| prev_word.contains(a));
+                    if has_anchor {
+                        addr_parts.insert(0, prev_word);
+                    } else {
+                        break;
+                    }
+                }
+                
+                let full_word = addr_parts.join(" ");
+                if full_word.chars().count() > 2 {
+                    results.push((full_word, "ADDRESS".to_string()));
+                }
+                
+                // 우편번호 탐색
+                let context_start = i.saturating_sub(4);
+                let context_end = (i + 5).min(words.len());
+                let context_str = words[context_start..context_end].join(" ");
+                if let Some(mat) = anchor.zipcode_regex.find(&context_str) {
+                    results.push((mat.as_str().to_string(), "ZIPCODE".to_string()));
+                }
+            }
+        }
+    }
+    results
+}
+
 // 🌟 [추가] Stanza ONNX 모델(pos.onnx, depparse.onnx) 입력용 전처리 모듈 (Vocab -> ndarray Tensor)
 use std::collections::HashMap;
 use std::path::Path;
@@ -621,6 +829,7 @@ async fn process_task(
     
     
     let search_mode = task_data.get("search_mode").and_then(|s| s.as_str()).unwrap_or("commerce").to_string();
+    let minimize_address = task_data.get("minimize_address").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // [FIX] 작업 유형에 따라 파일명을 자동으로 결정합니다.
     let kv_name = if task.r#type == "image_extraction" {
@@ -1042,10 +1251,39 @@ async fn process_task(
                     if detected_languages_vec.is_empty() { detected_languages_vec.push("english".to_string()); }
 
                     // 가장 많이 사용된 언어를 local_language로 확정
-                    let local_language = language_counts.into_iter()
+                    let mut local_language = language_counts.into_iter()
                         .max_by_key(|&(_, count)| count)
                         .map(|(lang, _)| lang.to_string())
                         .unwrap_or_else(|| "english".to_string());
+
+                    // 🌟 [추가] 언어 감지 고도화 (Language Detection Fallback) - Python langdetect 포팅
+                    // 유니코드 스크립트 분석 결과가 'english'나 'european' 등 라틴 기반으로 나왔을 경우,
+                    // whatlang 크레이트를 사용하여 유럽어권(프랑스어, 스페인어, 독일어 등)을 정밀하게 재판별합니다.
+                    if local_language == "english" || local_language == "european" {
+                        if let Some(info) = whatlang::detect(&target_text) {
+                            let detected_code = info.lang().code(); // 예: "es", "fr", "de"
+                            let european_langs = ["es", "fr", "de", "it", "pt", "nl", "cs"];
+                            if european_langs.contains(&detected_code) {
+                                let precise_lang = match detected_code {
+                                    "es" => "spanish",
+                                    "fr" => "french",
+                                    "de" => "german",
+                                    "it" => "italian",
+                                    "pt" => "portuguese",
+                                    "nl" => "dutch",
+                                    "cs" => "czech",
+                                    _ => "english",
+                                };
+                                emit_term(&format!("[EXTRACTION] 🌍 유럽어권 정밀 감지 발동 (whatlang): {} -> {}", local_language, precise_lang));
+                                local_language = precise_lang.to_string();
+                                
+                                // detected_languages_vec 에도 업데이트 (우선순위 편입)
+                                if !detected_languages_vec.contains(&local_language) {
+                                    detected_languages_vec.insert(0, local_language.clone());
+                                }
+                            }
+                        }
+                    }
 
                     // 🌟 [CRITICAL FIX] 다국어 검증(Stage 3) 시 local_language를 무조건 가장 먼저(0번 인덱스) 검증하도록 재배열하여 불필요한 타언어(English 등) LLM 추론을 최소화합니다.
                     if let Some(pos) = detected_languages_vec.iter().position(|l| l == &local_language) {
@@ -1157,25 +1395,108 @@ async fn process_task(
                     let mut domain_history: Vec<(String, String)> = Vec::new(); 
                     let task_marker_hash = crate::utils::hash::crc32(&task.id); // 🌟 [CRITICAL FIX] CRC32 해싱 기반 고유 마커 뼈대 생성
 
-                    // 🌟 [사전 정규식 추출] email 먼저 마스킹 (1차 패스 전)
-                    if let Ok(email_re) = regex::Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}") {
-                        let mut found_emails = std::collections::HashSet::new();
-                        for mat in email_re.find_iter(&masked_text) { found_emails.insert(mat.as_str().to_string()); }
-                        for email_val in found_emails {
-                            let mnemonic = crate::parsing::generate_mnemonic();
-                            let upper_key = "EMAIL".to_string();
-                            let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
-                            masked_text = masked_text.replace(&email_val, &skip_marker);
-                            doc_title = doc_title.replace(&email_val, &skip_marker);
-                            doc_desc = doc_desc.replace(&email_val, &skip_marker);
-                            skip_map.insert(skip_marker.clone(), final_replacement);
-                            replacement_history.push((email_val.clone(), skip_marker.clone()));
-                            domain_history.push(("email".to_string(), email_val.clone()));
-                            skip_counter += 1;
-                            all_matches.push(json!({ "name": upper_key, "value": email_val, "mnemonic": mnemonic }));
-                            emit_term(&format!("[EXTRACTION] 📧 이메일 정규식 사전 추출 성공: {} -> 강제 마스킹 완료", email_val));
+                    // 🌟 [사전 정규식 추출] 이메일, 전화번호, 개인통관고유부호, 운송장번호 마스킹 (1차 패스 전)
+                    let mut pre_match_candidates = Vec::new(); // (value, category_name)
+
+                    // 1. Email
+                    for mat in EMAIL_REGEX.find_iter(&masked_text) { 
+                        pre_match_candidates.push((mat.as_str().to_string(), "EMAIL".to_string())); 
+                    }
+                    
+                    // 2. Phone (로컬 언어 기반 정규식 선택)
+                    let phone_regex = get_phone_regex(&local_language);
+                    for mat in phone_regex.find_iter(&masked_text) {
+                        pre_match_candidates.push((mat.as_str().to_string(), "PHONE".to_string()));
+                    }
+
+                    // 3. PCC (개인통관고유부호)
+                    for mat in PCC_REGEX.find_iter(&masked_text) {
+                        pre_match_candidates.push((mat.as_str().to_string(), "PCC".to_string()));
+                    }
+
+                    // 4. Tracking Number (문맥 기반 주변 키워드 검증 - 다국어 반영)
+                    let tracking_keywords = get_tracking_keywords(&local_language);
+                    for mat in TRACKING_REGEX.find_iter(&masked_text) {
+                        let start = mat.start();
+                        let end = mat.end();
+                        
+                        // Rust String 슬라이싱 패닉(Char boundary error) 방지를 위해 안전한 바이트 경계를 찾습니다.
+                        let mut ctx_start = start.saturating_sub(60); // 한글(3바이트) 고려하여 넉넉히 60바이트 탐색
+                        while ctx_start > 0 && !masked_text.is_char_boundary(ctx_start) {
+                            ctx_start -= 1;
                         }
+                        
+                        let mut ctx_end = (end + 60).min(masked_text.len());
+                        while ctx_end < masked_text.len() && !masked_text.is_char_boundary(ctx_end) {
+                            ctx_end += 1;
+                        }
+                        
+                        // 안전하게 슬라이싱한 후 소문자로 변환하여 주변 문맥을 비교합니다.
+                        let context_area = masked_text[ctx_start..ctx_end].to_lowercase();
+                        
+                        if tracking_keywords.iter().any(|kw| context_area.contains(kw)) {
+                            pre_match_candidates.push((mat.as_str().to_string(), "TRACKING_NUMBER".to_string()));
+                        }
+                    }
+
+                    // 5. 다국어 주소 앵커 및 우편번호 (Sliding Window Grouping)
+                    let address_cands = scan_address_candidates(&masked_text, &local_language);
+                    for (val, cat) in address_cands {
+                        pre_match_candidates.push((val, cat));
+                    }
+
+                    // 🌟 [추가] PII 카테고리 규격화용 언어 접두사 생성
+                    let lang_prefix = match local_language.as_str() {
+                        "korean" | "ko" => "KO",
+                        "english" | "en" => "EN",
+                        "japanese" | "ja" => "JA",
+                        "chinese" | "zh-hans" | "zh" => "ZH",
+                        "french" | "fr" => "FR",
+                        "spanish" | "es" => "ES",
+                        "german" | "de" => "DE",
+                        "portuguese" | "pt" => "PT",
+                        "arabic" | "ar" => "AR",
+                        "czech" | "cs" => "CS",
+                        "italian" | "it" => "IT",
+                        "dutch" | "nl" => "NL",
+                        "russian" | "ru" => "RU",
+                        _ => "UN",
+                    };
+
+                    // 수집된 정규식 후보들을 일괄 마스킹 처리 (중복 제거 적용)
+                    let mut processed_values = std::collections::HashSet::new();
+                    // 길이 순 내림차순 정렬 (긴 값을 먼저 치환하여 부분 치환 방지)
+                    pre_match_candidates.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+                    for (extracted_val, category_name) in pre_match_candidates {
+                        if !processed_values.insert(extracted_val.clone()) { continue; } // 중복 스킵
+                        
+                        let mnemonic = crate::parsing::generate_mnemonic();
+                        let prefixed_category = format!("{}_{}", lang_prefix, category_name);
+                        let mut final_replacement = format!("[{}: {}]", prefixed_category, mnemonic);
+                        
+                        // 🌟 주소 최소화 (minimize_address) 옵션 적용
+                        if minimize_address && category_name == "ADDRESS" {
+                            let parts: Vec<&str> = extracted_val.split_whitespace().collect();
+                            if parts.len() > 2 {
+                                let keep_part = parts[..2].join(" ");
+                                final_replacement = format!("{} {}", keep_part, final_replacement);
+                            }
+                        }
+
+                        let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+                        
+                        masked_text = masked_text.replace(&extracted_val, &skip_marker);
+                        doc_title = doc_title.replace(&extracted_val, &skip_marker);
+                        doc_desc = doc_desc.replace(&extracted_val, &skip_marker);
+                        
+                        skip_map.insert(skip_marker.clone(), final_replacement);
+                        replacement_history.push((extracted_val.clone(), skip_marker.clone()));
+                        domain_history.push((category_name.to_lowercase(), extracted_val.clone()));
+                        skip_counter += 1;
+                        
+                        all_matches.push(json!({ "name": prefixed_category, "value": extracted_val, "mnemonic": mnemonic }));
+                        emit_term(&format!("[EXTRACTION] 🛡️ 정규식 사전 추출 성공: [{}] {} -> 강제 마스킹 완료", prefixed_category, extracted_val));
                     }
 
                     // 🌟 [CRITICAL FIX] 메타데이터 노이즈(/사진=, /AFPBBNews=뉴스1 등)를 해시 마커로 치환하여 외부 장부(Shadow Map)에 격리
@@ -1793,6 +2114,7 @@ async fn process_task(
                                                     
                                                     let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET"];
                                                     
+                                                    // 연속적으로 꼬리가 여러 개 붙은 경우를 대비한 while 루프
                                                     while let Some(last_tag) = valid_tags_clone.last() {
                                                         if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
                                                             trimmed_words.pop();
@@ -1803,20 +2125,37 @@ async fn process_task(
                                                         }
                                                     }
                                                     
-                                                    // 🌟 [추가 로직] 형태소가 여러 개(3개, 4개 이상 포함)로 분리되었을 때, 길이가 1인 잉여 단어가 포함되어 있다면 
-                                                    // 형태소들을 다시 합치지 않고 각각 독립적인 단어로 분할하여 LLM 추론 큐(valid_targets)에 추가합니다.
-                                                    let mut queue_split = false;
-                                                    if trimmed_words.len() >= 2 {
-                                                        if trimmed_words.iter().any(|w| w.chars().filter(|c| !c.is_whitespace()).count() == 1) {
-                                                            queue_split = true;
+                                                    // 🌟 [Plan B] Rule 3: Rule-based NER & Depparse Chunker (Python 포팅)
+                                                    // 기존의 무조건적인 1글자 단어 분할을 제거하고, 의존성 구문 분석(depparse)의 flat/compound 결합을 흉내내어 
+                                                    // 인접한 고유명사(PROPN), 명사(NOUN), 숫자(NUM), 형용사(ADJ)를 하나의 엔티티로 강제 결합합니다.
+                                                    let mut compound_chunks = Vec::new();
+                                                    let mut current_chunk = String::new();
+                                                    let compound_tags = ["PROPN", "NOUN", "NUM", "ADJ", "X"]; 
+                                                    
+                                                    for (w, tag) in trimmed_words.iter().zip(valid_tags_clone.iter()) {
+                                                        if compound_tags.contains(tag) {
+                                                            if !current_chunk.is_empty() { current_chunk.push(' '); }
+                                                            current_chunk.push_str(w);
+                                                        } else {
+                                                            if !current_chunk.is_empty() {
+                                                                compound_chunks.push(current_chunk.clone());
+                                                                current_chunk.clear();
+                                                            }
+                                                            compound_chunks.push(w.to_string());
                                                         }
                                                     }
+                                                    if !current_chunk.is_empty() {
+                                                        compound_chunks.push(current_chunk);
+                                                    }
+                                                    
+                                                    compound_chunks.retain(|c| c.chars().filter(|ch| !ch.is_whitespace()).count() > 0);
 
-                                                    if queue_split {
-                                                        let parts_display = trimmed_words.join("', '");
-                                                        emit_term(&format!("[STANZA] ✂️ 1글자 단어 포함 감지. '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", parts_display));
+                                                    // 결합 후에도 여러 조각으로 나뉘어 있고 원본 형태소 개수와 다르다면(결합이 발생했음을 의미) 추론 큐에 분할하여 추가
+                                                    if compound_chunks.len() >= 2 && compound_chunks.len() != trimmed_words.len() {
+                                                        let parts_display = compound_chunks.join("', '");
+                                                        emit_term(&format!("[STANZA] 🔗 Rule-based NER/Depparse Chunker 발동. '{}' 로 결합하여 추론 큐에 독립적으로 추가합니다.", parts_display));
                                                         
-                                                        for part in &trimmed_words {
+                                                        for part in &compound_chunks {
                                                             let mut clone = valid_targets[p_idx - 1].clone();
                                                             clone.7 = part.to_string();
                                                             valid_targets.push(clone);
@@ -1824,11 +2163,14 @@ async fn process_task(
                                                         
                                                         // 병합된 원본 트랙은 무효화하고 다음 큐로 넘어갑니다.
                                                         continue;
-                                                    } else if is_trimmed {
-                                                        // 모든 언어(한국어, 일본어, 중국어 포함)에서 어절 단위(공백)를 유지하여 따로따로 진행되도록 분리
-                                                        let join_str = " ";
-                                                        let trimmed_candidate = trimmed_words.join(join_str);
-                                                        emit_term(&format!("[STANZA] ✂️ 1차 형태소 분리 후 스마트 꼬리 절단 ({}): '{}' -> '{}'", local_language, specific_candidate, trimmed_candidate));
+                                                    } else if is_trimmed || compound_chunks.len() == 1 {
+                                                        // 모든 언어에서 어절 단위를 유지하며, 결합된 단일 청크가 있으면 그것을 우선 적용
+                                                        let trimmed_candidate = if compound_chunks.len() == 1 { 
+                                                            compound_chunks[0].clone() 
+                                                        } else { 
+                                                            trimmed_words.join(" ") 
+                                                        };
+                                                        emit_term(&format!("[STANZA] ✂️ 형태소 분리 후 Chunker/스마트 꼬리 절단 ({}): '{}' -> '{}'", local_language, specific_candidate, trimmed_candidate));
                                                         specific_candidate = trimmed_candidate;
                                                     } else {
                                                         if specific_candidate != eval_target {
@@ -2257,20 +2599,37 @@ async fn process_task(
                                                         }
                                                     }
                                                     
-                                                    // 🌟 [추가 로직] 추출 단어의 형태소가 여러 개(3개, 4개 이상 포함)로 분리되었을 때, 길이가 1인 잉여 단어가 포함되어 있다면 
-                                                    // 각각 분리하여 LLM 추론 큐(valid_targets)에 새롭게 편입시킵니다.
-                                                    let mut queue_split = false;
-                                                    if trimmed_words.len() >= 2 {
-                                                        if trimmed_words.iter().any(|w| w.chars().filter(|c| !c.is_whitespace()).count() == 1) {
-                                                            queue_split = true;
+                                                    // 🌟 [Plan B] Rule 3: Rule-based NER & Depparse Chunker (Python 포팅)
+                                                    // 추출 단어에 대해서도 무조건적인 1글자 단어 분할을 제거하고, 
+                                                    // 인접한 고유명사(PROPN), 명사(NOUN), 숫자(NUM), 형용사(ADJ)를 하나의 엔티티로 강제 결합합니다.
+                                                    let mut compound_chunks = Vec::new();
+                                                    let mut current_chunk = String::new();
+                                                    let compound_tags = ["PROPN", "NOUN", "NUM", "ADJ", "X"]; 
+                                                    
+                                                    for (w, tag) in trimmed_words.iter().zip(valid_tags_clone.iter()) {
+                                                        if compound_tags.contains(tag) {
+                                                            if !current_chunk.is_empty() { current_chunk.push(' '); }
+                                                            current_chunk.push_str(w);
+                                                        } else {
+                                                            if !current_chunk.is_empty() {
+                                                                compound_chunks.push(current_chunk.clone());
+                                                                current_chunk.clear();
+                                                            }
+                                                            compound_chunks.push(w.to_string());
                                                         }
                                                     }
+                                                    if !current_chunk.is_empty() {
+                                                        compound_chunks.push(current_chunk);
+                                                    }
+                                                    
+                                                    compound_chunks.retain(|c| c.chars().filter(|ch| !ch.is_whitespace()).count() > 0);
 
-                                                    if queue_split {
-                                                        let parts_display = trimmed_words.join("', '");
-                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", parts_display));
+                                                    // 결합 후에도 여러 조각으로 나뉘어 있고 원본 형태소 개수와 다르다면 추론 큐에 분할하여 추가
+                                                    if compound_chunks.len() >= 2 && compound_chunks.len() != trimmed_words.len() {
+                                                        let parts_display = compound_chunks.join("', '");
+                                                        emit_term(&format!("[STANZA-EXT] 🔗 Rule-based NER/Depparse Chunker 발동. 추출단어를 '{}' 로 결합하여 추론 큐에 독립적으로 추가합니다.", parts_display));
                                                         
-                                                        for part in &trimmed_words {
+                                                        for part in &compound_chunks {
                                                             let mut clone = valid_targets[p_idx - 1].clone();
                                                             clone.7 = part.to_string();
                                                             valid_targets.push(clone);
@@ -2278,11 +2637,14 @@ async fn process_task(
                                                         
                                                         // 병합된 원본 트랙은 무효화하고 다음 큐로 넘어갑니다.
                                                         continue;
-                                                    } else if is_trimmed {
-                                                        // 모든 언어(한국어, 일본어, 중국어 포함)에서 어절 단위(공백)를 유지하여 따로따로 진행되도록 분리
-                                                        let join_str = " ";
-                                                        let trimmed_candidate = trimmed_words.join(join_str);
-                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1차 형태소 분리 후 추출단어 스마트 꼬리 절단 ({}): '{}' -> '{}'", local_language, extracted_val, trimmed_candidate));
+                                                    } else if is_trimmed || compound_chunks.len() == 1 {
+                                                        // 모든 언어에서 어절 단위를 유지하며, 결합된 단일 청크가 있으면 그것을 우선 적용
+                                                        let trimmed_candidate = if compound_chunks.len() == 1 { 
+                                                            compound_chunks[0].clone() 
+                                                        } else { 
+                                                            trimmed_words.join(" ") 
+                                                        };
+                                                        emit_term(&format!("[STANZA-EXT] ✂️ 형태소 분리 후 Chunker/스마트 꼬리 절단 ({}): '{}' -> '{}'", local_language, extracted_val, trimmed_candidate));
                                                         extracted_val = trimmed_candidate;
                                                     } else {
                                                         if extracted_val != eval_ext {
@@ -2892,8 +3254,18 @@ async fn process_task(
                                     emit_term(&format!("    👑 [WINNER] 부분 일치(수축 로테이션) 통과: '{}' 중 '{}' (Score: {:.4}) -> 강제 마스킹", extracted_val, text_val, score));
                                     
                                     let mnemonic = crate::parsing::generate_mnemonic();
-                                    let upper_key = base_target.to_uppercase(); 
-                                    let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                                    let upper_key = format!("{}_{}", lang_prefix, base_target.to_uppercase()); 
+                                    let mut final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                                    
+                                    // 🌟 주소 최소화 (minimize_address) 옵션 적용
+                                    if minimize_address && base_target == "address" {
+                                        let parts: Vec<&str> = text_val.split_whitespace().collect();
+                                        if parts.len() > 2 {
+                                            let keep_part = parts[..2].join(" ");
+                                            final_replacement = format!("{} {}", keep_part, final_replacement);
+                                        }
+                                    }
+
                                     let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                                     
                                     masked_text = masked_text.replace(&text_val, &skip_marker);
@@ -2973,9 +3345,18 @@ async fn process_task(
                                     emit_term(&format!("[EXTRACTION] 🔄 Phase 2 Overlap: '{}' is already masked. Upgrading marker...", extracted_val));
                                     
                                     let mnemonic = crate::parsing::generate_mnemonic();
-                                    let upper_key = base_target.to_uppercase(); // ex: "레알 마드리드_KOREAN_NAME"
-                                    let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                                    let upper_key = format!("{}_{}", lang_prefix, base_target.to_uppercase()); // ex: "KO_NAME"
+                                    let mut final_replacement = format!("[{}: {}]", upper_key, mnemonic);
                                     
+                                    // 🌟 주소 최소화 (minimize_address) 옵션 적용
+                                    if minimize_address && base_target == "address" {
+                                        let parts: Vec<&str> = extracted_val.split_whitespace().collect();
+                                        if parts.len() > 2 {
+                                            let keep_part = parts[..2].join(" ");
+                                            final_replacement = format!("{} {}", keep_part, final_replacement);
+                                        }
+                                    }
+
                                     // skip_map 의 최종 치환 문자열을 Phase 2 타겟으로 덮어씁니다!
                                     skip_map.insert(marker.clone(), final_replacement.clone());
                                     
@@ -3012,9 +3393,19 @@ async fn process_task(
 
                             // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 해시 기반 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
-                            let upper_key = base_target.to_uppercase(); 
+                            let upper_key = format!("{}_{}", lang_prefix, base_target.to_uppercase()); 
                             
-                            let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                            let mut final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                            
+                            // 🌟 주소 최소화 (minimize_address) 옵션 적용
+                            if minimize_address && base_target == "address" {
+                                let parts: Vec<&str> = extracted_val.split_whitespace().collect();
+                                if parts.len() > 2 {
+                                    let keep_part = parts[..2].join(" ");
+                                    final_replacement = format!("{} {}", keep_part, final_replacement);
+                                }
+                            }
+
                             let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                             
                             // 🌟 [Subsumption 2단계] 추출된 거대 덩어리 내부에 이미 치환된 소형 마커가 존재하는지 확인하고, 
