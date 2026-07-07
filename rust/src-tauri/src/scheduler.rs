@@ -2013,6 +2013,14 @@ async fn process_task(
                                                 } else if is_trimmed {
                                                     let join_str = " ";
                                                     let trimmed_candidate = trimmed_words.join(join_str);
+                                                    
+                                                    // 🌟 [수정된 로직] 절단 결과가 1글자 이하라면 무의미한 단어로 간주하고 해당 트랙을 즉시 기각(스킵)합니다.
+                                                    let char_count = trimmed_candidate.chars().filter(|c| !c.is_whitespace()).count();
+                                                    if char_count <= 1 {
+                                                        emit_term(&format!("[STANZA] ✂️ 스마트 절단 결과 1글자만 남음 ('{}' -> '{}'). 무의미한 단어로 간주하여 즉시 스킵합니다.", specific_candidate, trimmed_candidate));
+                                                        continue;
+                                                    }
+                                                    
                                                     emit_term(&format!("[STANZA] ✂️ 1차 형태소 분리 후 스마트 머리/꼬리 절단 ({}): '{}' -> '{}'", local_language, specific_candidate, trimmed_candidate));
                                                     specific_candidate = trimmed_candidate;
                                                 } else {
@@ -2545,8 +2553,16 @@ async fn process_task(
                                                     } else if is_trimmed {
                                                         let join_str = " ";
                                                         let trimmed_candidate = trimmed_words.join(join_str);
-                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1차 형태소 분리 후 추출단어 스마트 머리/꼬리 절단 ({}): '{}' -> '{}'", local_language, extracted_val, trimmed_candidate));
-                                                        extracted_val = trimmed_candidate;
+                                                        
+                                                        // 🌟 [수정된 로직] 추출 단어의 사후 절단 결과가 1글자 이하라면 무의미한 단어로 간주하고 강제 기각(nlp_rejected) 처리합니다.
+                                                        let char_count = trimmed_candidate.chars().filter(|c| !c.is_whitespace()).count();
+                                                        if char_count <= 1 {
+                                                            emit_term(&format!("[STANZA-EXT] ✂️ 스마트 절단 결과 1글자만 남음 ('{}' -> '{}'). 무의미한 단어로 간주하여 강제 기각합니다.", extracted_val, trimmed_candidate));
+                                                            nlp_rejected = true;
+                                                        } else {
+                                                            emit_term(&format!("[STANZA-EXT] ✂️ 1차 형태소 분리 후 추출단어 스마트 머리/꼬리 절단 ({}): '{}' -> '{}'", local_language, extracted_val, trimmed_candidate));
+                                                            extracted_val = trimmed_candidate;
+                                                        }
                                                     } else {
                                                         if extracted_val != eval_ext {
                                                             extracted_val = eval_ext;
