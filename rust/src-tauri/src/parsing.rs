@@ -924,16 +924,18 @@ pub fn build_single_property_verification_prompt(word: &str, language: &str, for
     let system_prompt = format!("You are a strict linguistic verification assistant for {}.", language);
     let user_template = r###"[TASK] Analyze the word '{WORD}' and score its linguistic property.
 
-[CRITERIA]
-Language: {LANG}
+[PROPERTY CONTEXT: {PROPERTY}]
+Origin: {LANG}
 Foreign: {FORE}
-Word: {WORD}
-Property: {PROPERTY}
 Hint: {HINT}
+
+[SCHEMA DEFINITIONS]
+- score: Integer. 0 to 10.
+- loanword: Boolean. Set to true ONLY if '{WORD}' is a phonetically transliterated foreign proper noun in {LANG}. For native vocabulary, native verbs, numbers, or standard grammatical phrases, this MUST be false.
 
 [OUTPUT FORMAT]
 {
-  "score": Integer(0 to 10),
+  "score": Integer,
   "loanword": Boolean
 }
 
