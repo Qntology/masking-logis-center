@@ -1690,36 +1690,44 @@ async fn process_task(
                                             let bias_emb_vec = model.get_embedding(b_bias.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                             let prej_emb_vec = model.get_embedding(b_prej.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
 
+                                            let mut best_score = 0.0;
+                                            let mut best_line_idx = None;
+
                                             for (i, line_text) in lines.iter().enumerate() {
                                                 let line_emb = model.get_embedding(line_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                                 let b_score = cosine_similarity(&line_emb, &bias_emb_vec);
                                                 let p_score = cosine_similarity(&line_emb, &prej_emb_vec);
                                                 let score = b_score - (p_score * 0.3);
                                                 
-                                                if score >= 0.10 {
-                                                    emit_term(&format!("[EXTRACTION] ✅ Phase 2 Vector matched for {} in line {}", c_name_desc, i));
-                                                    let specific_line = lines[i].clone();
+                                                if score >= 0.10 && score > best_score {
+                                                    best_score = score;
+                                                    best_line_idx = Some(i);
+                                                }
+                                            }
 
-                                                    let bias_keywords: Vec<&str> = b_bias.split(',')
-                                                        .map(|s| s.trim())
-                                                        .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
-                                                        .collect();
-                                                    
-                                                    for keyword in bias_keywords {
-                                                        let split_target_name = format!("{}_{}", c_name_target, keyword);
-                                                        let split_target_desc = format!("{} associated with '{}'", c_name_desc, keyword);
+                                            if let Some(i) = best_line_idx {
+                                                emit_term(&format!("[EXTRACTION] ✅ Phase 2 Vector matched for {} in line {}", c_name_desc, i));
+                                                let specific_line = lines[i].clone();
 
-                                                        valid_targets.push((
-                                                            split_target_name,
-                                                            c_name_target.clone(), // 🌟 Phase 2에서는 이것을 덮어씀
-                                                            split_target_desc,
-                                                            keyword.to_string(),
-                                                            b_prej.to_string(),
-                                                            true, // 🌟 Phase 2 플래그!
-                                                            specific_line.clone(),
-                                                            String::new() // 🌟 Phase 2는 LLM이 찾도록 단서를 비워둠
-                                                        ));
-                                                    }
+                                                let bias_keywords: Vec<&str> = b_bias.split(',')
+                                                    .map(|s| s.trim())
+                                                    .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
+                                                    .collect();
+                                                
+                                                for keyword in bias_keywords {
+                                                    let split_target_name = format!("{}_{}", c_name_target, keyword);
+                                                    let split_target_desc = format!("{} associated with '{}'", c_name_desc, keyword);
+
+                                                    valid_targets.push((
+                                                        split_target_name,
+                                                        c_name_target.clone(), // 🌟 Phase 2에서는 이것을 덮어씀
+                                                        split_target_desc,
+                                                        keyword.to_string(),
+                                                        b_prej.to_string(),
+                                                        true, // 🌟 Phase 2 플래그!
+                                                        specific_line.clone(),
+                                                        String::new() // 🌟 Phase 2는 LLM이 찾도록 단서를 비워둠
+                                                    ));
                                                 }
                                             }
                                         }
