@@ -1951,6 +1951,18 @@ async fn process_task(
                                                     trimmed_words = clean_words;
                                                     valid_tags_clone = clean_tags;
                                                 }
+
+                                                // 🌟 [CRITICAL FIX] 추출 단어 앞부분에 붙은 수식어(관형사, 부사, 접속사 등)를 잘라내는 머리 절단 로직을 추가합니다. ('전 소속팀' 등 방어)
+                                                let front_drop_tags = ["DET", "ADJ", "ADV", "PUNCT", "CCONJ", "SCONJ", "PART", "ADP"];
+                                                while let Some(first_tag) = valid_tags_clone.first() {
+                                                    if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
+                                                        trimmed_words.remove(0);
+                                                        valid_tags_clone.remove(0);
+                                                        is_trimmed = true;
+                                                    } else {
+                                                        break;
+                                                    }
+                                                }
                                                 
                                                 // 🌟 [CRITICAL FIX] 추출 단어 끝에 꼬리로 잘못 붙은 동사(VERB), 형용사(ADJ), 부사(ADV)도 잘라내도록 꼬리 절단 태그를 대폭 보강합니다.
                                                 let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV"];
@@ -1967,8 +1979,8 @@ async fn process_task(
                                                 
                                                 let mut queue_split = false;
                                                 if trimmed_words.len() >= 2 {
-                                                    // 🌟 [CRITICAL FIX] 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하되, 문맥을 훼손하는 수식어 품사(ADJ, ADV 등)는 분할 금지
-                                                    let protected_tags = ["ADJ", "ADV", "DET", "PART", "PRON"];
+                                                    // 🌟 [CRITICAL FIX] 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하되, 의미 있는 1글자 명사(NOUN, PROPN)나 숫자(NUM), 수식어가 분할 큐를 찢는 현상을 원천 방지합니다.
+                                                    let protected_tags = ["ADJ", "ADV", "DET", "PART", "PRON", "NOUN", "PROPN", "NUM"];
                                                     if trimmed_words.iter().enumerate().any(|(w_idx, w)| {
                                                         let c_count = w.chars().filter(|c| !c.is_whitespace()).count();
                                                         let is_valid_char = w.chars().any(|c| c.is_alphanumeric());
@@ -1993,7 +2005,7 @@ async fn process_task(
                                                 } else if is_trimmed {
                                                     let join_str = " ";
                                                     let trimmed_candidate = trimmed_words.join(join_str);
-                                                    emit_term(&format!("[STANZA] ✂️ 1차 형태소 분리 후 스마트 꼬리 절단 ({}): '{}' -> '{}'", local_language, specific_candidate, trimmed_candidate));
+                                                    emit_term(&format!("[STANZA] ✂️ 1차 형태소 분리 후 스마트 머리/꼬리 절단 ({}): '{}' -> '{}'", local_language, specific_candidate, trimmed_candidate));
                                                     specific_candidate = trimmed_candidate;
                                                 } else {
                                                     if specific_candidate != eval_target {
@@ -2471,6 +2483,18 @@ async fn process_task(
                                                         trimmed_words = clean_words;
                                                         valid_tags_clone = clean_tags;
                                                     }
+
+                                                    // 🌟 [CRITICAL FIX] 추출 단어 앞부분에 붙은 수식어(관형사, 부사, 접속사 등)를 잘라내는 머리 절단 로직을 추가합니다. ('전 소속팀' 등 방어)
+                                                    let front_drop_tags = ["DET", "ADJ", "ADV", "PUNCT", "CCONJ", "SCONJ", "PART", "ADP"];
+                                                    while let Some(first_tag) = valid_tags_clone.first() {
+                                                        if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
+                                                            trimmed_words.remove(0);
+                                                            valid_tags_clone.remove(0);
+                                                            is_trimmed = true;
+                                                        } else {
+                                                            break;
+                                                        }
+                                                    }
                                                     
                                                     // 🌟 [CRITICAL FIX] 추출 단어 끝에 꼬리로 잘못 붙은 동사(VERB), 형용사(ADJ), 부사(ADV)도 잘라내도록 꼬리 절단 태그를 대폭 보강합니다.
                                                     let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV"];
@@ -2487,8 +2511,8 @@ async fn process_task(
                                                     
                                                     let mut queue_split = false;
                                                     if trimmed_words.len() >= 2 {
-                                                        // 🌟 [CRITICAL FIX] 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하되, 문맥을 훼손하는 수식어 품사(ADJ, ADV 등)는 분할 금지
-                                                        let protected_tags = ["ADJ", "ADV", "DET", "PART", "PRON"];
+                                                        // 🌟 [CRITICAL FIX] 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하되, 의미 있는 1글자 명사(NOUN, PROPN)나 숫자(NUM), 수식어가 분할 큐를 찢는 현상을 원천 방지합니다.
+                                                        let protected_tags = ["ADJ", "ADV", "DET", "PART", "PRON", "NOUN", "PROPN", "NUM"];
                                                         if trimmed_words.iter().enumerate().any(|(w_idx, w)| {
                                                             let c_count = w.chars().filter(|c| !c.is_whitespace()).count();
                                                             let is_valid_char = w.chars().any(|c| c.is_alphanumeric());
@@ -2513,7 +2537,7 @@ async fn process_task(
                                                     } else if is_trimmed {
                                                         let join_str = " ";
                                                         let trimmed_candidate = trimmed_words.join(join_str);
-                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1차 형태소 분리 후 추출단어 스마트 꼬리 절단 ({}): '{}' -> '{}'", local_language, extracted_val, trimmed_candidate));
+                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1차 형태소 분리 후 추출단어 스마트 머리/꼬리 절단 ({}): '{}' -> '{}'", local_language, extracted_val, trimmed_candidate));
                                                         extracted_val = trimmed_candidate;
                                                     } else {
                                                         if extracted_val != eval_ext {

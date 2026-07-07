@@ -927,6 +927,9 @@ pub fn build_single_property_verification_prompt(word: &str, language: &str, for
 [CRITERIA]
 Language: {LANG}
 Foreign: {FORE}
+Word: {WORD}
+Property: {PROPERTY}
+Hint: {HINT}
 
 [OUTPUT FORMAT]
 {
@@ -938,6 +941,8 @@ Foreign: {FORE}
     "###.to_string();
     
      let user_prompt = user_template
+        .replace("{PROPERTY}", property)
+        .replace("{HINT}", hint)
         .replace("{LANG}", language)
         .replace("{FORE}", foreign)
         .replace("{WORD}", word);
