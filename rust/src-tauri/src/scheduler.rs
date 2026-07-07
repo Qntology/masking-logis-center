@@ -2818,16 +2818,17 @@ async fn process_task(
                                     let v_json = crate::parsing::parse_json_from_llm(&v_res);
                                     let mut verb_score = v_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     let v_loanword = v_json.get("loanword").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    let original_verb_score = verb_score;
                                     
                                     if v_loanword {
-                                        emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {} (Loanword: true) -> 🛡️ 차용어 감지. 강제 통과(0.0) 처리", lang, verb_score));
-                                        verb_score = 0.0;
+                                        emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {} (Loanword: true)", lang, verb_score));
                                     } else {
                                         emit_term(&format!("    🔍 [VERIFY] {} Verb Score: {}", lang, verb_score));
                                     }
 
                                     // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
-                                    if verb_score >= 7.0 {
+                                    // 단, 차용어(Loanword)인 경우 Expr 점수까지 교차 확인하기 위해 조기 탈출(Early Exit)을 잠시 보류합니다.
+                                    if !v_loanword && verb_score >= 7.0 {
                                         emit_term(&format!("    💀 [REJECT] {} Verb Score 7.0 이상 (Fatal Early Exit)", lang));
                                         is_hallucination = true;
                                         break;
@@ -2863,12 +2864,30 @@ async fn process_task(
                                     let e_json = crate::parsing::parse_json_from_llm(&e_res);
                                     let mut expr_score = e_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     let e_loanword = e_json.get("loanword").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    let original_expr_score = expr_score;
                                     
                                     if e_loanword {
-                                        emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {} (Loanword: true) -> 🛡️ 차용어 감지. 강제 통과(0.0) 처리", lang, expr_score));
                                         expr_score = 0.0;
+                                        emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {} (Loanword: true)", lang, expr_score));
                                     } else {
                                         emit_term(&format!("    🔍 [VERIFY] {} Expr Score: {}", lang, expr_score));
+                                    }
+
+                                    // 🌟 [추가] 차용어(Loanword)라도 둘 다 7.0을 초과하면 맹독성 환각으로 간주하고 즉시 기각 처리!
+                                    if original_verb_score > 7.0 && original_expr_score > 7.0 {
+                                        emit_term(&format!("    💀 [REJECT] 차용어(Loanword)임에도 Verb/Expr 점수가 모두 7.0 초과 -> 맹독성 환각으로 강제 기각"));
+                                        is_hallucination = true;
+                                        break;
+                                    }
+
+                                    // 🌟 맹독성 체크를 무사히 통과한 진짜 차용어들만 0.0으로 면제(구제) 처리합니다.
+                                    if v_loanword {
+                                        emit_term(&format!("    🛡️ {} Verb Score 차용어 감지. 강제 통과(0.0) 처리", lang));
+                                        verb_score = 0.0;
+                                    }
+                                    if e_loanword {
+                                        emit_term(&format!("    🛡️ {} Expr Score 차용어 감지. 강제 통과(0.0) 처리", lang));
+                                        expr_score = 0.0;
                                     }
 
                                     // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
