@@ -1972,11 +1972,13 @@ async fn process_task(
                                                 
                                                 let mut queue_split = false;
                                                 if trimmed_words.len() >= 2 {
-                                                    // 🌟 [CRITICAL FIX] 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하도록 조건 강화
-                                                    if trimmed_words.iter().any(|w| {
+                                                    // 🌟 [CRITICAL FIX] 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하되, 문맥을 훼손하는 수식어 품사(ADJ, ADV 등)는 분할 금지
+                                                    let protected_tags = ["ADJ", "ADV", "DET", "PART", "PRON"];
+                                                    if trimmed_words.iter().enumerate().any(|(w_idx, w)| {
                                                         let c_count = w.chars().filter(|c| !c.is_whitespace()).count();
                                                         let is_valid_char = w.chars().any(|c| c.is_alphanumeric());
-                                                        c_count == 1 && is_valid_char
+                                                        let tag = valid_tags_clone.get(w_idx).copied().unwrap_or("X");
+                                                        c_count == 1 && is_valid_char && !protected_tags.contains(&tag)
                                                     }) {
                                                         queue_split = true;
                                                     }
@@ -2488,10 +2490,13 @@ async fn process_task(
                                                     
                                                     let mut queue_split = false;
                                                     if trimmed_words.len() >= 2 {
-                                                        if trimmed_words.iter().any(|w| {
+                                                        // 🌟 [CRITICAL FIX] 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하되, 문맥을 훼손하는 수식어 품사(ADJ, ADV 등)는 분할 금지
+                                                        let protected_tags = ["ADJ", "ADV", "DET", "PART", "PRON"];
+                                                        if trimmed_words.iter().enumerate().any(|(w_idx, w)| {
                                                             let c_count = w.chars().filter(|c| !c.is_whitespace()).count();
                                                             let is_valid_char = w.chars().any(|c| c.is_alphanumeric());
-                                                            c_count == 1 && is_valid_char
+                                                            let tag = valid_tags_clone.get(w_idx).copied().unwrap_or("X");
+                                                            c_count == 1 && is_valid_char && !protected_tags.contains(&tag)
                                                         }) {
                                                             queue_split = true;
                                                         }
