@@ -224,56 +224,49 @@ impl StanzaPreprocessor {
         let slen_tensor = ndarray::Array1::from_vec(vec![seq_len as i64]).into_dyn();
         let wlen_tensor = ndarray::Array1::from_vec(wlen_vec).into_dyn();
         
-        // 🌟 [CRITICAL FIX] PyTorch ONNX Export 과정에서 사용되지 않은 입력(mask, oidx, slen 등)은 
-        // 컴파일 그래프에서 제거됩니다. ONNX Runtime에 고정된 8개 텐서를 무조건 넘기면 Shape Mismatch가 발생하므로,
-        // Session이 실제로 기대하는 입력 차원(Dimensions)을 런타임에 스캔하여 정확한 텐서만 동적으로 조립합니다.
+        // 🌟 [CRITICAL FIX] PyTorch ONNX Export 과정에서 사용되지 않은 입력이 제거될 수 있으므로 동적 조립하되,
+        // 차원(Shape)만으로 매핑하면 pre_tensor(0)와 mask_tensor(1)가 뒤바뀌어 모든 출력이 PROPN으로 오작동합니다.
+        // 반드시 input_meta.name을 파싱하여 정확한 텐서를 지정해야 문맥이 차단되는 Hallucination을 막을 수 있습니다.
         let mut final_inputs = Vec::new();
-        let mut word_used = false;
-        let mut chars_used = false;
-        let mut chars_mask_used = false;
-        let mut pre_used = false;
-        let mut wlen_used = false;
 
         for input_meta in &session.inputs {
-            let dims = &input_meta.dimensions;
+            let name = input_meta.name.to_lowercase();
             
-            // 1. [1, seq_len] 형태의 입력 (word, pre, mask)
-            if dims.len() == 2 && dims.get(0) == Some(&Some(1)) {
-                if !word_used {
-                    final_inputs.push(word_tensor.clone());
-                    word_used = true;
-                } else if !pre_used {
-                    final_inputs.push(pre_tensor.clone());
-                    pre_used = true;
+            // 🌟 [CRITICAL FIX] 섀도잉(Shadowing) 논리 결함 완벽 수정:
+            // "word_mask"가 "word"에 걸리고, "wordchar_len"이 "char"에 걸려 텐서가 뒤섞이는 현상 차단.
+            // 가장 구체적인 키워드(mask, len)부터 먼저 필터링하도록 계층화했습니다.
+            if name.contains("mask") {
+                if name.contains("char") {
+                    final_inputs.push(chars_mask_tensor.clone());
                 } else {
                     final_inputs.push(mask_tensor.clone());
                 }
-            } 
-            // 2. [seq_len, 32] 형태의 입력 (chars, chars_mask)
-            else if dims.len() == 2 && dims.get(1) == Some(&Some(32)) {
-                if !chars_used {
-                    final_inputs.push(chars_tensor.clone());
-                        chars_used = true;
-                } else if !chars_mask_used {
-                    final_inputs.push(chars_mask_tensor.clone());
-                    chars_mask_used = true;
+            } else if name.contains("len") || name.contains("seq") {
+                if name.contains("word") || name.contains("wlen") || name.contains("char") {
+                    final_inputs.push(wlen_tensor.clone());
+                } else {
+                    final_inputs.push(slen_tensor.clone());
                 }
-            } 
-            // 3. [seq_len] 또는 [1] 형태의 1D 입력 (wlen, slen, oidx)
-            else if dims.len() == 1 {
-                if dims.get(0) == Some(&Some(1)) {
+            } else if name.contains("pre") || name.contains("pretrained") {
+                final_inputs.push(pre_tensor.clone());
+            } else if name.contains("char") {
+                final_inputs.push(chars_tensor.clone());
+            } else if name.contains("word") {
+                final_inputs.push(word_tensor.clone());
+            } else if name.contains("oidx") || name.contains("orig") {
+                final_inputs.push(oidx_tensor.clone());
+            } else {
+                // 예외 상황: 이름 기반 매칭이 불가능할 경우 차원 기반 Fallback 안전장치
+                let dims = &input_meta.dimensions;
+                if dims.len() == 2 && dims.get(0) == Some(&Some(1)) {
+                    final_inputs.push(word_tensor.clone()); 
+                } else if dims.len() == 2 && dims.get(1) == Some(&Some(32)) {
+                    final_inputs.push(chars_tensor.clone());
+                } else if dims.len() == 1 {
                     final_inputs.push(slen_tensor.clone());
                 } else {
-                    if !wlen_used {
-                        final_inputs.push(wlen_tensor.clone());
-                        wlen_used = true;
-                    } else {
-                        final_inputs.push(oidx_tensor.clone());
-                    }
+                    final_inputs.push(word_tensor.clone());
                 }
-            } else {
-                // 예외 상황: 구조가 파악되지 않은 경우 안전하게 word_tensor 추가
-                final_inputs.push(word_tensor.clone());
             }
         }
         
@@ -1923,15 +1916,16 @@ async fn process_task(
 
                                             emit_term(&format!("[STANZA] 문맥 기반 형태소 분리 완료 '{}' -> {:?}", eval_target, candidate_tags));
 
-                                            let invalid_tags = ["PUNCT"];
+                                            let invalid_tags = ["PUNCT", "SYM"];
                                             let all_invalid = candidate_tags.iter().all(|&t| invalid_tags.contains(&t));
-                                            let has_noun_or_oov = candidate_tags.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON" || t == "VERB");
+                                            // 🌟 [CRITICAL FIX] 개체명(Named Entity) 범주에 속할 수 없는 "VERB"를 허용 목록에서 제거하여 순수 동사의 LLM 진입을 원천 차단합니다.
+                                            let has_noun_or_oov = candidate_tags.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON");
                                             
                                             let cand_char_count = specific_candidate.chars().filter(|c| !c.is_whitespace()).count();
                                             let rescue_oov = cand_char_count >= 2 && all_invalid;
 
                                             if !rescue_oov && (all_invalid || !has_noun_or_oov) {
-                                                emit_term(&format!("[STANZA] 💀 순수 수식어/조사/기호 감지 (Plan B). 강제 기각: '{}'", specific_candidate));
+                                                emit_term(&format!("[STANZA] 💀 순수 수식어/조사/동사/기호 감지 (Plan B). 강제 기각: '{}'", specific_candidate));
                                                 hallucinated_candidates.insert(specific_candidate.clone());
                                             } else {
                                                 if rescue_oov {
@@ -1958,7 +1952,8 @@ async fn process_task(
                                                     valid_tags_clone = clean_tags;
                                                 }
                                                 
-                                                let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET"];
+                                                // 🌟 [CRITICAL FIX] 추출 단어 끝에 꼬리로 잘못 붙은 동사(VERB), 형용사(ADJ), 부사(ADV)도 잘라내도록 꼬리 절단 태그를 대폭 보강합니다.
+                                                let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV"];
                                                 
                                                 while let Some(last_tag) = valid_tags_clone.last() {
                                                     if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
@@ -2441,15 +2436,16 @@ async fn process_task(
 
                                                 emit_term(&format!("[STANZA-EXT] 문맥 기반 형태소 분리 완료 '{}' -> {:?}", eval_ext, candidate_tags));
 
-                                                let invalid_tags = ["PUNCT"];
+                                                let invalid_tags = ["PUNCT", "SYM"];
                                                 let all_invalid = candidate_tags.iter().all(|&t| invalid_tags.contains(&t));
-                                                let has_noun_or_oov = candidate_tags.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON" || t == "VERB");
+                                                // 🌟 [CRITICAL FIX] 개체명(Named Entity) 범주에 속할 수 없는 "VERB"를 허용 목록에서 제거하여 순수 동사의 강제 기각을 유도합니다.
+                                                let has_noun_or_oov = candidate_tags.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON");
                                                 
                                                 let ext_char_count = extracted_val.chars().filter(|c| !c.is_whitespace()).count();
                                                 let rescue_oov = ext_char_count >= 2 && all_invalid;
 
                                                 if !rescue_oov && (all_invalid || !has_noun_or_oov) {
-                                                    emit_term(&format!("[STANZA-EXT] 💀 순수 수식어/조사/기호 감지. 추출단어 강제 기각: '{}'", extracted_val));
+                                                    emit_term(&format!("[STANZA-EXT] 💀 순수 수식어/조사/동사/기호 감지. 추출단어 강제 기각: '{}'", extracted_val));
                                                     nlp_rejected = true;
                                                 } else {
                                                     if rescue_oov {
@@ -2476,7 +2472,8 @@ async fn process_task(
                                                         valid_tags_clone = clean_tags;
                                                     }
                                                     
-                                                    let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET"];
+                                                    // 🌟 [CRITICAL FIX] 추출 단어 끝에 꼬리로 잘못 붙은 동사(VERB), 형용사(ADJ), 부사(ADV)도 잘라내도록 꼬리 절단 태그를 대폭 보강합니다.
+                                                    let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV"];
                                                     
                                                     while let Some(last_tag) = valid_tags_clone.last() {
                                                         if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
