@@ -2560,7 +2560,7 @@ async fn process_task(
 
                                                     if queue_split {
                                                         let parts_display = trimmed_words.join("', '");
-                                                        // emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", parts_display));
+                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 로 분할하여 추론 큐에 독립적으로 추가하고 현재 트랙을 종료합니다.", parts_display));
                                                         
                                                         for part in &trimmed_words {
                                                             let mut clone = valid_targets[p_idx - 1].clone();
@@ -2568,7 +2568,10 @@ async fn process_task(
                                                             valid_targets.push(clone);
                                                         }
                                                         
-                                                        continue;
+                                                        // [CRITICAL FIX] LLM 재시도 루프(loop) 내부에서 온도(temperature) 상승이나 무시 리스트(ignore_list) 갱신 없이 
+                                                        // continue를 호출하면 프롬프트가 변하지 않아 영구적인 무한 루프에 빠집니다.
+                                                        // 추론 큐(valid_targets)에 분할된 단어를 이미 밀어넣었으므로, 현재 트랙은 즉시 종료(break)해야 합니다.
+                                                        break;
                                                     } else if is_trimmed {
                                                         let join_str = " ";
                                                         let trimmed_candidate = trimmed_words.join(join_str);
@@ -2800,17 +2803,14 @@ async fn process_task(
                                     }
                                 }
                                 
-                                let mut current_word_langs = detected_languages_vec.clone();
+                                let mut current_word_langs = Vec::new();
                                 if let Some((best_lang, _)) = local_lang_counts.into_iter().max_by_key(|&(_, count)| count) {
-                                    emit_term(&format!("    🌐 [언어 동적 매핑] 추출 단어 '{}' 분석 결과: 최우선 언어 -> {}", extracted_val, best_lang));
-                                    if let Some(pos) = current_word_langs.iter().position(|l| l == best_lang) {
-                                        let local = current_word_langs.remove(pos);
-                                        current_word_langs.insert(0, local);
-                                    } else {
-                                        current_word_langs.insert(0, best_lang.to_string());
-                                    }
+                                    emit_term(&format!("    🌐 [언어 동적 매핑] 추출 단어 '{}' 분석 결과: 단일 언어({})로 검증을 제한합니다.", extracted_val, best_lang));
+                                    current_word_langs.push(best_lang.to_string());
                                 } else {
-                                    emit_term(&format!("    🌐 [언어 동적 매핑] 추출 단어에서 특정 유니코드 특징을 찾지 못해 기본 언어를 유지합니다."));
+                                    let fallback_lang = detected_languages_vec.first().cloned().unwrap_or_else(|| "english".to_string());
+                                    emit_term(&format!("    🌐 [언어 동적 매핑] 추출 단어에서 특정 유니코드 특징을 찾지 못해 단일 기본 언어({})로 검증을 제한합니다.", fallback_lang));
+                                    current_word_langs.push(fallback_lang);
                                 }
 
                                 // 🌟 다국어 전체를 순회하며 모두 0점을 초과할 때만 할루시네이션으로 판단
@@ -2857,7 +2857,7 @@ async fn process_task(
                                     // --- 2. Expression Score Check ---
                                     // 🌟 문서에서 감지된 언어 중 현재 검증 언어(lang)가 아닌 2차 언어를 찾아 foreign으로 설정 (없을 경우 기본값 "english")
                                     let foreign_lang = detected_languages_vec.iter().find(|&l| l != lang).cloned().unwrap_or_else(|| "english".to_string());
-                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt("EXPRESSION", &matched_context, &extracted_val, lang, &foreign_lang, "idiom, phrase", expr_hint);
+                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt("EXPRESSION", &matched_context, &extracted_val, lang, &foreign_lang, "expression, idiom, phrase", expr_hint);
                                     let cancel_clone_e = cancellation_token.clone();
                                     
                                     let gen_arc_e = model.granite_generator.clone();
