@@ -2857,7 +2857,7 @@ async fn process_task(
                                     // --- 2. Expression Score Check ---
                                     // 🌟 문서에서 감지된 언어 중 현재 검증 언어(lang)가 아닌 2차 언어를 찾아 foreign으로 설정 (없을 경우 기본값 "english")
                                     let foreign_lang = detected_languages_vec.iter().find(|&l| l != lang).cloned().unwrap_or_else(|| "english".to_string());
-                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt("EXPRESSION", &matched_context, &extracted_val, lang, &foreign_lang, "idiom, phrase, full sentence", expr_hint);
+                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt("EXPRESSION", &matched_context, &extracted_val, lang, &foreign_lang, "idiom, phrase", expr_hint);
                                     let cancel_clone_e = cancellation_token.clone();
                                     
                                     let gen_arc_e = model.granite_generator.clone();
@@ -2889,23 +2889,6 @@ async fn process_task(
                                         emit_term(&format!("    💀 [REJECT] Verb/Expr 점수가 모두 7.0 초과 -> 맹독성 환각으로 강제 기각"));
                                         is_hallucination = true;
                                         break;
-                                    }
-
-                                    // 🌟 7.0 이상이면 다른 언어를 볼 필요도 없이 즉시 환각(Fatal) 처리 후 루프 탈출
-                                    if expr_score >= 7.0 {
-                                        emit_term(&format!("    💀 [REJECT] {} Expr Score 7.0 이상 (Fatal Early Exit)", lang));
-                                        is_hallucination = true;
-                                        break;
-                                    }
-
-                                    // 🌟 [수정] 해당 언어에서 Verb와 Expr 점수가 '전부(둘 다)' 0을 초과할 때만 애매한 오답으로 간주하여 카운트 증가
-                                    if verb_score > 0.0 && expr_score > 0.0 {
-                                        emit_term(&format!("    ⚠️ [WARNING] {} 검증에서 전부 0점 초과 (Verb: {}, Expr: {})", lang, verb_score, expr_score));
-                                        hallucination_count += 1;
-                                    } else {
-                                        // 🌟 하나라도 0점(또는 0 이하)인 값이 발견되면 완벽한 명사(타겟)로 간주하여 즉시 조기 종료(Early Exit) 허용!
-                                        emit_term(&format!("    ✅ [PASS] {} 검증 통과 (0점 포함). 완벽한 타겟으로 간주하여 나머지 검증 스킵", lang));
-                                        break; 
                                     }
                                 }
 
