@@ -1935,8 +1935,13 @@ async fn process_task(
                                             }
 
                                             if candidate_words.is_empty() {
-                                                candidate_words = ext_words_string.clone();
-                                                candidate_tags = tag_names.clone();
+                                                if use_context {
+                                                    candidate_words = vec![eval_target.clone()];
+                                                    candidate_tags = vec!["NOUN"];
+                                                } else {
+                                                    candidate_words = ext_words_string.clone();
+                                                    candidate_tags = tag_names.clone();
+                                                }
                                             }
 
                                             emit_term(&format!("[STANZA] 문맥 기반 형태소 분리 완료 '{}' -> {:?}", eval_target, candidate_tags));
@@ -2080,10 +2085,7 @@ async fn process_task(
                             }
                         }
 
-                        let mut miss_counter = 0;
                         let mut item_extract_count = 0;
-                        let mut current_temperature: f64 = 0.0;
-                        let mut value_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
                         
                         // 🌟 [CRITICAL FIX] Qwen3에게 전체 문서(masked_text)를 주지 않고, 
                         // 앞서 벡터 유사도로 0.10점을 넘긴(통과한) 정확히 PUG 한 줄만 제공합니다!
@@ -2160,13 +2162,9 @@ async fn process_task(
                             }
                         }).await.unwrap_or(Ok(None)).unwrap_or(None);
 
-                        loop {
+                        // 🌟 온도 상승 및 재시도 로직을 제거하여 1회만 단일 실행합니다.
+                        for _ in 0..1 {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
-                            
-                            if current_temperature > 0.6 {
-                                emit_term(&format!("[EXTRACTION] 🛑 온도 1.0 도달. {} 항목 종료.", target_item));
-                                break;
-                            }
 
                             let mut current_lang = target_name.split('_').next().unwrap_or("english");
                             if !detected_languages_vec.contains(&current_lang.to_string()) {
@@ -2289,30 +2287,16 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 요청하신 대로, 배열이 아닌 1:1 매칭된 NMS 단일값을 출력하며 로그 디자인을 명시적으로 반영합니다!
                             emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 (NMS 👑 [WINNER/EXPANDED]: '{}', 추출단어: '{}') - 응답 길이: {}, 결과: {}", base_target, input_keyword, extracted_val, res_mask.len(), res_mask));
 
-                            // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
+                            // 🌟 [CRITICAL FIX] 빈 값 반환 시 재시도 없이 해당 트랙을 즉시 종료합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
-                                miss_counter += 1;
-                                current_temperature += 0.2; // 🌟 온도 상승
-
-                                emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
-                                
-                                if current_temperature > 0.6 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 온도 0.6 도달로 강제 종료."));
-                                    break;
-                                }
-
-                                // 빈 값 꼼수 방지 및 재시도 유도
-                                ignore_list.push("null".to_string());
-                                continue;
+                                emit_term(&format!("[DEBUG] 빈 값 반환 감지. 재시도 없이 트랙을 종료합니다."));
+                                break;
                             }
 
                             // 🌟 [추가] 할루시네이션(환각)으로 이미 판명된 단어라면 즉시 스킵 (동의어 트랙 등에서 재등장 방지)
                             if hallucinated_candidates.contains(&extracted_val) {
                                 emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 할루시네이션으로 판명된 단어입니다. 스킵합니다: '{}'\n{}", extracted_val, res_mask));
-                                miss_counter += 1;
-                                current_temperature += 0.2;
-                                ignore_list.push(extracted_val.clone());
-                                continue;
+                                break;
                             }
 
                             // 🌟 [추가] 추출된 단어(extracted_val)에 대해 한 번 더 NLP(Stanza) 검증 및 정제를 수행하여 꼬리(조사)를 자르거나 명사가 아닌 경우 기각합니다.
@@ -2479,8 +2463,13 @@ async fn process_task(
                                                 }
 
                                                 if candidate_words.is_empty() {
-                                                    candidate_words = ext_words_string.clone();
-                                                    candidate_tags = tag_names.clone();
+                                                    if use_context {
+                                                        candidate_words = vec![eval_ext.clone()];
+                                                        candidate_tags = vec!["NOUN"];
+                                                    } else {
+                                                        candidate_words = ext_words_string.clone();
+                                                        candidate_tags = tag_names.clone();
+                                                    }
                                                 }
 
                                                 let invalid_tags = ["PUNCT", "SYM"];
@@ -2603,16 +2592,8 @@ async fn process_task(
                                 if !specific_candidate.is_empty() && specific_candidate == extracted_val {
                                     hallucinated_candidates.insert(specific_candidate.clone());
                                 }
-                                miss_counter += 1;
-                                current_temperature += 0.2;
-                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
-                                *count += 1;
-                                ignore_list.push(extracted_val.clone());
-                                if current_temperature > 0.6 || *count >= 3 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값 3회 누적 또는 온도 1.0 도달로 강제 종료."));
-                                    break;
-                                }
-                                continue;
+                                emit_term(&format!("[EXTRACTION] 🛑 NLP 검증 탈락. 재시도 없이 트랙을 종료합니다."));
+                                break;
                             }
 
                             // 🌟 [방어 로직 추가] NMS 후보 단어와의 교집합(포함 관계) 및 단일 숫자/기호 강제 기각
@@ -2691,12 +2672,6 @@ async fn process_task(
                                     }
                                 }
 
-                                miss_counter += 1;
-                                current_temperature += 0.2;
-                                
-                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
-                                *count += 1;
-
                                 if is_zombie {
                                     emit_term(&format!("[DEBUG] 🧟 좀비 단어(이미 마스킹 완료) 추출 감지. 연쇄 파기(Cascade Cancellation) 발동: '{}'", extracted_val));
                                     hallucinated_candidates.insert(extracted_val.clone());
@@ -2705,20 +2680,12 @@ async fn process_task(
                                         hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 연쇄 파기 명부 등재
                                     }
                                 } else if is_spoiler {
-                                    emit_term(&format!("[DEBUG] 🎬 스포일러 단어(대기 중인 미래 정답) 추출 감지. 무시 리스트 등재 면제 및 온도 상승 재시도: '{}'", extracted_val));
-                                    // 🌟 독성 리스트 및 ignore_list 추가 면제
+                                    emit_term(&format!("[DEBUG] 🎬 스포일러 단어(대기 중인 미래 정답) 추출 감지. 재시도 없이 트랙 종료: '{}'", extracted_val));
                                 } else {
-                                    emit_term(&format!("[DEBUG] ❌ 단순 오답 추출 감지. 무시 리스트 등재 및 온도 상승 재시도: '{}'", extracted_val));
-                                    // 🌟 영구 독성 리스트(hallucinated_candidates)에는 넣지 않음. (다른 트랙에서는 정답일 수 있으므로)
-                                    ignore_list.push(extracted_val.clone());
+                                    emit_term(&format!("[DEBUG] ❌ 단순 오답 추출 감지. 재시도 없이 트랙 종료: '{}'", extracted_val));
                                 }
                                 
-                                if current_temperature > 0.6 || *count >= 3 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값 3회 누적 또는 온도 1.0 도달로 강제 종료."));
-                                    break;
-                                }
-
-                                continue;
+                                break;
                             }
 
                             // 🌟 [CRITICAL FIX] 추출단어가 만약에 PUG CONTENT에 있는지 없는지 먼저 체크 (ctrl + f)
@@ -2748,19 +2715,7 @@ async fn process_task(
                                     hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 연쇄 파기 명부 등재
                                 }
                                 
-                                miss_counter += 1;
-                                current_temperature += 0.2;
-                                
-                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
-                                *count += 1;
-                                
-                                if current_temperature > 0.6 || *count >= 3 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값 3회 누적 또는 온도 1.0 도달로 강제 종료."));
-                                    break;
-                                }
-
-                                ignore_list.push(extracted_val.clone());
-                                continue;
+                                break;
                             }
 
                             // 🌟 [STAGE 3] 추출 단어 다국어 순차 검증 (Sequential CoT Evaluation with Early Exit)
@@ -2851,7 +2806,7 @@ async fn process_task(
                                     }
 
                                     let v_json = crate::parsing::parse_json_from_llm(&v_res);
-                                    let mut verb_score = v_json.get(&format!("{}_VERB_score", lang)).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let mut verb_score = v_json.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     
 
                                     // --- 2. Expression Score Check ---
@@ -2882,10 +2837,10 @@ async fn process_task(
                                     }
 
                                     let e_json = crate::parsing::parse_json_from_llm(&e_res);
-                                    let mut expr_score = e_json.get(&format!("{}_EXPRESSION_score", lang)).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let mut expr_score = e_json.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     
 
-                                    if (expr_score > 7.0 && expr_score > verb_score) {
+                                    if (expr_score > verb_score) {
                                         emit_term(&format!("    💀 [REJECT] Verb/Expr 점수가 모두 7.0 초과 -> 맹독성 환각으로 강제 기각"));
                                         is_hallucination = true;
                                         break;
@@ -2907,23 +2862,8 @@ async fn process_task(
                                     hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 동사/오답 판정 시 남은 파생 트랙 일괄 취소(연쇄 파기)를 위해 등록
                                 }
                                 
-                                miss_counter += 1;
-                                current_temperature += 0.2; // 🌟 환각이므로 온도를 올려 변형 유도
-                                
-                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
-                                *count += 1;
-                                
-                                emit_term(&format!("[DEBUG] 검증 탈락 감지됨. 환각으로 간주하여 강제 기각 (재시도 {}): '{}'", miss_counter, extracted_val));
-                                
-                                if current_temperature > 0.6 || *count >= 3 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 검증 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
-                                    break;
-                                }
-
-                                if !extracted_val.is_empty() {
-                                    ignore_list.push(extracted_val.clone());
-                                }
-                                continue;
+                                emit_term(&format!("[DEBUG] 검증 탈락 감지됨. 재시도 없이 강제 기각: '{}'", extracted_val));
+                                break;
                             }
 
                             // 🌟 [CRITICAL FIX] Qwen3가 압축된 문맥(matched_context)을 읽고 있으므로, 환각 검사도 동일한 문맥에서 수행해야 완벽합니다.
@@ -2935,21 +2875,8 @@ async fn process_task(
 
                             // 🌟 [CRITICAL FIX] 추출된 값이 임시 마커(해시 기반)를 포함하고 있다면 무조건 환각으로 간주하고 강제 차단합니다.
                             if extracted_val.contains("[___REDACTED_") {
-                                miss_counter += 1;
-                                current_temperature += 0.2; // 🌟 온도 상승
-                                
-                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
-                                *count += 1;
-                                
-                                emit_term(&format!("[DEBUG] 임시 마커 추출 시도 감지, 강제 차단 (재시도 {} - 무한): '{}' (현재 온도: {:.2}, 동일값: {}회)", miss_counter, extracted_val, current_temperature, count));
-                                
-                                if current_temperature > 0.6 || *count >= 3 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 마커 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
-                                    break;
-                                }
-
-                                ignore_list.push(extracted_val.clone());
-                                continue;
+                                emit_term(&format!("[DEBUG] 임시 마커 추출 시도 감지. 재시도 없이 강제 차단: '{}'", extracted_val));
+                                break;
                             }
 
                             // 🌟 [기 마스킹 단어 및 파생어 필터링] 이미 찾은 단어와 겹치거나 파생어인 경우 즉시 기각
@@ -2988,21 +2915,8 @@ async fn process_task(
                             let max_chars = if is_address { 100 } else { 30 };
 
                             if word_count > max_words || char_count > max_chars {
-                                miss_counter += 1;
-                                current_temperature += 0.2;
-                                
-                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
-                                *count += 1;
-                                
-                                emit_term(&format!("[DEBUG] 과잉 추출 감지 (어절: {}, 글자수: {}), 강제 차단: '{}'", word_count, char_count, extracted_val));
-                                
-                                if current_temperature > 0.6 || *count >= 3 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 과잉 추출 오류 3회 누적 또는 온도 1.0 도달로 강제 종료."));
-                                    break;
-                                }
-
-                                ignore_list.push(extracted_val.clone());
-                                continue;
+                                emit_term(&format!("[DEBUG] 과잉 추출 감지 (어절: {}, 글자수: {}). 재시도 없이 강제 차단: '{}'", word_count, char_count, extracted_val));
+                                break;
                             }
 
                             // 🌟 [전략 A & D 적용] 띄어쓰기 증발/변형에 대한 전역 보정 로직 (Space-Agnostic Validation)
@@ -3039,22 +2953,10 @@ async fn process_task(
                                 }
                             }
 
-                            // 🌟 [CRITICAL FIX] 아예 빈 값이거나 "..." 형태인 경우 바로 포기하지 않고 최대 3번까지 재시도합니다.
+                            // 🌟 [CRITICAL FIX] 빈 값 반환 시 재시도 없이 트랙 즉시 종료
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
-                                miss_counter += 1;
-                                current_temperature += 0.2; // 🌟 온도 상승
-                                // empty_count += 1; // 🌟 빈 값 카운트 증가
-
-                                emit_term(&format!("[DEBUG] 빈 값 반환 감지 (재시도 {} - 무한) (현재 온도: {:.2})", miss_counter, current_temperature));
-                                
-                                if current_temperature > 0.6 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 온도 0.6 도달로 강제 종료."));
-                                    break;
-                                }
-
-                                // 빈 값 꼼수 방지 및 재시도 유도
-                                ignore_list.push("null".to_string());
-                                continue;
+                                emit_term(&format!("[DEBUG] 빈 값 반환 감지. 재시도 없이 해당 트랙을 종료합니다."));
+                                break;
                             }
 
                             // 🌟 [환각 방지 3번 재시도 루프 (유지됨)]
@@ -3073,20 +2975,7 @@ async fn process_task(
                                     break;
                                 }
 
-                                miss_counter += 1;
-                                current_temperature += 0.2; // 🌟 못 찾았으므로 온도를 높여 다음 턴에 변형을 유도
-                                
-                                let count = value_counts.entry(extracted_val.clone()).or_insert(0);
-                                *count += 1;
-
-                                if current_temperature > 0.6 {
-                                    emit_term(&format!("[EXTRACTION] 🛑 동일한 오탐지 값({}회) 누적 또는 온도 {:.2} 도달로 강제 종료.", count, current_temperature));
-                                    break;
-                                }
-                                
                                 // 🌟 [조건부 부분 치환 (Vector Bouncer) 적용 - 양방향 점진적 수축 로테이션]
-                                // 완벽한 일치가 아니더라도 단어 단위로 쪼개서 본문에 존재하는지 확인하되, 
-                                // 무조건 치환하지 않고 NMS 배틀(Pass 2)과 완벽히 동일한 스코어링 공식으로 검증하여 통과한 단어만 마스킹합니다.
                                 let parts: Vec<&str> = extracted_val.split_whitespace().collect();
                                 let mut partial_masked = false;
 
@@ -3188,10 +3077,6 @@ async fn process_task(
                                 }
 
                                 if partial_masked {
-                                    ignore_list.push(extracted_val.clone());
-                                    
-                                    miss_counter = 0;
-                                    current_temperature = 0.0;
                                     item_extract_count += 1;
                                     
                                     // 🌟 [Part 1 개선] 마스킹 완료 장부 등록 기준 분리
@@ -3200,28 +3085,17 @@ async fn process_task(
                                         fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 두 단어가 일치할 때만 힌트 단어 장부 등록
                                     }
 
-                                    // 🌟 [Part 2 개선] 트랙 조기 종료(break) 조건 세분화
-                                    if !specific_candidate.is_empty() && !fully_masked_candidates.contains(&specific_candidate) && masked_text.contains(&specific_candidate) {
-                                        emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (부분 치환). 하지만 힌트 단어('{}')가 본문에 남아있어 트랙을 연장(continue)합니다.", specific_candidate));
-                                        continue;
-                                    } else {
-                                        // 🌟 [CRITICAL FIX] 마스킹 성공 시 무한 루프를 방지하고 다음 트랙으로 넘어가기 위해 break를 호출합니다.
-                                        emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (부분 치환). 해당 트랙 종료 후 다음 트랙으로 이동합니다."));
-                                        break;
-                                    }
+                                    emit_term(&format!("[EXTRACTION] 🎯 마스킹 성공 (부분 치환). 재시도 없이 해당 트랙을 종료합니다."));
+                                    break;
                                 }
 
-                                // 🌟 [전략 D 적용] 무작정 ignore_list에 넣기 전에 로깅하여 어떤 값이 날아갔는지 파악합니다.
-                                emit_term(&format!("[DEBUG] 완전 환각/오탐지 감지 (재시도 {} - 무한): '{}' -> 온도 {:.2}로 상승", miss_counter, extracted_val, current_temperature));
-                                
-                                // 🌟 [다이어트 적용] Tokenizer 꼼수 방지는 프롬프트 지시어로 대체하고 단일 코어 단어만 등록하여 토큰을 절약합니다.
-                                ignore_list.push(extracted_val.clone());
-                                continue;
+                                emit_term(&format!("[DEBUG] 완전 환각/오탐지 감지. 재시도 없이 해당 트랙을 즉시 종료합니다: '{}'", extracted_val));
+                                break;
                             }
 
                             // 정상 추출되었으므로 연속 실패 카운터를 리셋합니다.
-                            miss_counter = 0;
-                            current_temperature = 0.0; // 🌟 성공했으므로 온도를 다시 0으로 차갑게 초기화
+                            link_counter = 0;
+                            let current_temperature = 0.0; // 🌟 성공했으므로 온도를 다시 0으로 차갑게 초기화
                             // 🌟 성공적으로 추출했으므로 추출 횟수 카운터를 증가시킵니다. (무한 루프 방지용)
                             item_extract_count += 1; 
 

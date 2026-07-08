@@ -922,22 +922,20 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 
 pub fn build_single_property_verification_prompt(flag: &str, text: &str, word: &str, language: &str, foreign: &str, property: &str, hint: &str) -> (String, String) {
     let system_template = r###"[INSTRUCTION]
-- Rate how strongly the word represents the {FLAG} property in {LANG}. 
-- You must strictly base your evaluation on {FLAG} hint.
+- Determine the temperature indicating how strongly the word represents the {FLAG} property {PROPERTY} in {LANG}. 
+- You must strictly base your evaluation on {FLAG} hint {HINT}.
 
 [CRITERIA]
 Origin: {LANG}
 Text: {TEXT}
 Word: {WORD}
 {FLAG} Property: {PROPERTY}
-{FLAG} Hint: {HINT}
-
-"###.to_string();
-    let user_template = r###"[TASK] Analyze the word '{WORD}' extracted from the provided text, and score its {FLAG} property. 
+{FLAG} Hint: {HINT}"###.to_string();
+    let user_template = r###"[TASK] Analyze the word '{WORD}' extracted from the provided text and determine its {FLAG} property temperature. 
 
 [OUTPUT FORMAT]
 {
-  "{LANG}_{FLAG}_score": Integer(0-10)
+  "temperature": Float(0.0 to 1.0)
 }
 
 [ACTION] RETURN JSON ONLY. NO EXPLANATION.
