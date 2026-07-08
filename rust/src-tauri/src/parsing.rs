@@ -920,34 +920,53 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
 // }
 
 
-pub fn build_single_property_verification_prompt(word: &str, language: &str, foreign: &str, property: &str, hint: &str) -> (String, String) {
-    let system_prompt = format!("You are a strict linguistic verification assistant for {}.", language);
-    let user_template = r###"[TASK] Analyze the word '{WORD}' and score its linguistic property.
+pub fn build_single_property_verification_prompt(flag: &str, text: &str, word: &str, language: &str, foreign: &str, property: &str, hint: &str) -> (String, String) {
+    let system_template = r###"[INSTRUCTION]
+- Rate how strongly the word represents the {FLAG} property in {LANG}. 
+- You must strictly base your evaluation on {FLAG} hint.
+- Set to false ONLY IF '{WORD}' is of {LANG} origin.
+- Set to true ONLY IF '{WORD}' is of {FORE} foreign.
 
-[PROPERTY CONTEXT: {PROPERTY}]
+[CRITERIA]
 Origin: {LANG}
 Foreign: {FORE}
-Hint: {HINT}
+Text: {TEXT}
+Word: {WORD}
+{FLAG} Property: {PROPERTY}
+{FLAG} Hint: {HINT}
+
+"###.to_string();
+    let user_template = r###"[TASK] Analyze the word '{WORD}' extracted from the provided text, and score its {FLAG} property. 
 
 [SCHEMA DEFINITIONS]
-- score: Integer. 0 to 10.
-- loanword: Boolean. Set to true ONLY if '{WORD}' is a phonetically transliterated foreign proper noun in {LANG}. For native vocabulary, native verbs, numbers, or standard grammatical phrases, this MUST be false.
+- {LANG}_{FLAG}_score: Integer. 0 to 10
+- {LANG}_loanword: Boolean. is the word '{WORD}' of {FORE} origin
+- reason: String. reason({LANG}_{FLAG}_score and {LANG}_loanword)
 
 [OUTPUT FORMAT]
 {
-  "score": Integer,
-  "loanword": Boolean
+  "reason":"...",
+  "{LANG}_{FLAG}_score": Integer(0-10),
+  "{LANG}_loanword": Boolean
 }
 
 [ACTION] RETURN JSON ONLY. NO EXPLANATION.
     "###.to_string();
-    
-     let user_prompt = user_template
+
+    let system_prompt = system_template
+        .replace("{FLAG}", flag)
         .replace("{PROPERTY}", property)
         .replace("{HINT}", hint)
         .replace("{LANG}", language)
         .replace("{FORE}", foreign)
-        .replace("{WORD}", word);
+        .replace("{WORD}", word)
+        .replace("{TEXT}", text);
+    
+     let user_prompt = user_template
+        .replace("{WORD}", word)
+        .replace("{FLAG}", flag)
+        .replace("{LANG}", language)
+        .replace("{FORE}", foreign);
 
     (system_prompt, user_prompt)
 }

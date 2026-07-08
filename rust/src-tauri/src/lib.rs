@@ -377,8 +377,8 @@ async fn start_file_drag(
         let combined_yaml = yaml_contents.join("\n---\n");
         
         // 🌟 [CRITICAL FIX 1] Windows OS 예약어(CON) 사용 금지!
-        // kon.txt 대신 마크다운 표준 포맷에 맞추어 kon.text 로 생성합니다.
-        let file_path = crate::utils::paths::get_app_tmp_root(None).join("kon.text");
+        // kon.txt 대신 마크다운 표준 포맷에 맞추어 llms.txt 로 생성합니다.
+        let file_path = crate::utils::paths::get_app_tmp_root(None).join("llms.txt");
         std::fs::write(&file_path, combined_yaml).map_err(|e| e.to_string())?;
 
         // 🌟 Rust 백엔드에서 OS 네이티브 드래그 앤 드랍 트리거 (파일 물리적 이동 지원)

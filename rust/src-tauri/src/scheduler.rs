@@ -1273,34 +1273,36 @@ async fn process_task(
                         }
                     }
 
-                    // 🌟 [CRITICAL FIX] 메타데이터 노이즈(/사진=, /AFPBBNews=뉴스1 등)를 해시 마커로 치환하여 외부 장부(Shadow Map)에 격리
-                    let mut noise_map = std::collections::HashMap::new();
-                    let mut noise_counter = 0;
-                    if let Ok(noise_re) = regex::Regex::new(r"(?i)(/(?:사진|AFPBBNews|뉴스1|기자|특파원|Copyright|ⓒ|©)[^\n]*)") {
-                        masked_text = noise_re.replace_all(&masked_text, |caps: &regex::Captures| {
-                            let n_marker = format!(" [___REDACTED_NOISE_{}___] ", noise_counter);
-                            noise_map.insert(n_marker.trim().to_string(), caps[1].to_string());
-                            noise_counter += 1;
-                            n_marker
-                        }).to_string();
-                        
-                        doc_title = noise_re.replace_all(&doc_title, |caps: &regex::Captures| {
-                            let n_marker = format!(" [___REDACTED_NOISE_{}___] ", noise_counter);
-                            noise_map.insert(n_marker.trim().to_string(), caps[1].to_string());
-                            noise_counter += 1;
-                            n_marker
-                        }).to_string();
+                    // 🌟 [CRITICAL FIX] 특수문자 제거 및 언어(단어) 추출 범용 로직
+                    // 예측 불가능한 특수문자 패턴에 대응하기 위해, 기 마스킹된 마커를 제외한 모든 특수문자를 공백으로 치환하여 단어를 온전히 분리합니다.
+                    let mut noise_map: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // 🌟 하단 복원 로직 컴파일 에러 방지용 빈 장부 유지
+                    
+                    let clean_text_fn = |text: &str| -> String {
+                        text.lines().map(|line| { // 🌟 줄바꿈(\n) 보존을 위해 lines() 단위 루프 추가
+                            line.split_whitespace().map(|word| {
+                                if word.starts_with("[___REDACTED_") && word.ends_with("___]") {
+                                    word.to_string()
+                                } else {
+                                    let mut cleaned = String::new();
+                                    for c in word.chars() {
+                                        if c.is_alphanumeric() {
+                                            cleaned.push(c);
+                                        } else {
+                                            cleaned.push(' ');
+                                        }
+                                    }
+                                    cleaned
+                                }
+                            }).collect::<Vec<_>>().join(" ")
+                        }).collect::<Vec<_>>().join("\n") // 🌟 훼손되었던 줄바꿈(\n) 완벽 복구
+                    };
 
-                        doc_desc = noise_re.replace_all(&doc_desc, |caps: &regex::Captures| {
-                            let n_marker = format!(" [___REDACTED_NOISE_{}___] ", noise_counter);
-                            noise_map.insert(n_marker.trim().to_string(), caps[1].to_string());
-                            noise_counter += 1;
-                            n_marker
-                        }).to_string();
-                    }
+                    masked_text = clean_text_fn(&masked_text);
+                    doc_title = clean_text_fn(&doc_title);
+                    doc_desc = clean_text_fn(&doc_desc);
 
                     // 🌟 1차 패스용 라인 분할 (masked_text 기반)
-                    let structural_tags = ["html", "body", "div", "p", "span", "thead", "tbody", "tr", "td", "th", "table"];
+                    let structural_tags = ["html", "body", "div", "p", "span", "thead", "tbody", "tr", "td", "th", "table", "ul", "li", "a", "img", "br", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "em", "b", "i", "u", "s", "nav", "header", "footer", "main", "section", "article", "aside", "figure", "figcaption", "button", "input", "form", "label", "select", "textarea", "option", "iframe", "script", "style", "meta", "link", "head", "title", "svg", "path", "dl", "ol", "dd", "dt"];
                     let mut lines: Vec<String> = masked_text.lines()
                         .map(|s| s.trim().trim_start_matches('|').trim().to_string())
                         .filter(|s| {
@@ -1403,7 +1405,7 @@ async fn process_task(
                         let words: Vec<&str> = line.split_whitespace().collect();
                         
                         for start in 0..words.len() {
-                            let max_end = words.len().min(start + 4); // 1~4 단어 조합
+                            let max_end = words.len().min(start + 2); // 1~2 단어 조합
                             for end in (start + 1)..=max_end {
                                 // 🌟 [CRITICAL FIX] 노이즈, 링크 해시 마커를 벡터 청크에서 제외하여 순수 텍스트만 임베딩합니다.
                                 let clean_words: Vec<&str> = words[start..end].iter()
@@ -1450,8 +1452,8 @@ async fn process_task(
                                 top_targets.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                                 let best_score = top_targets[0].1;
 
-                                // 🌟 2차 패스 커트라인 상향 및 0.05 편차(Margin) 공동 우승 허용 로직 적용
-                                if best_score > 0.25 {
+                                // 🌟 2차 패스 커트라인 조정 및 0.05 편차(Margin) 공동 우승 허용 로직 적용
+                                if best_score > 0.2 {
                                     let final_score = best_score * length_weight;
 
                                     if verb_penalty > 0.005 {
@@ -1461,7 +1463,7 @@ async fn process_task(
                                     let mut selected_indices = Vec::new();
                                     
                                     for (idx, score) in top_targets {
-                                        if best_score - score <= 0.05 && score > 0.25 {
+                                        if best_score - score <= 0.05 && score > 0.2 {
                                             selected_indices.push(idx);
                                         } else {
                                             break;
@@ -1609,36 +1611,42 @@ async fn process_task(
 
                     for span in &final_spans {
                         if span.score >= 0.10 {
-                            let specific_line = lines[span.line_idx].clone();
                             let specific_candidate = span.text.clone(); // 🌟 이게 바로 NMS WINNER / EXPANDED 값입니다!
 
-                            for &t_idx in &span.target_indices {
-                                let (context_name, base_target, context_desc) = &dynamic_target_items[t_idx];
-                                
-                                if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
-                                    let bias_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("");
-                                    let prej_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("");
-                                    
-                                    let bias_keywords: Vec<&str> = bias_val.split(',')
-                                        .map(|s| s.trim())
-                                        .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
-                                        .collect();
-                                    
-                                    for keyword in bias_keywords {
-                                        let lang_prefix = context_name.split('_').next().unwrap_or("english");
-                                        let split_target_name = format!("{}_{}", lang_prefix, keyword);
-                                        let split_target_desc = format!("{} associated with '{}'", context_desc, keyword);
+                            // 🌟 [전체 PUG 각 줄 내용 루프 뎁스 추가]
+                            for (line_idx, line_content) in lines.iter().enumerate() {
+                                if line_content.contains(&specific_candidate) {
+                                    let specific_line = line_content.clone();
 
-                                        valid_targets.push((
-                                            split_target_name,
-                                            base_target.to_string(),
-                                            split_target_desc,
-                                            keyword.to_string(),
-                                            prej_val.to_string(),
-                                            false,
-                                            specific_line.clone(),
-                                            specific_candidate.clone() // 🌟 단일 NMS 우승 단어 1:1 매핑
-                                        ));
+                                    for &t_idx in &span.target_indices {
+                                        let (context_name, base_target, context_desc) = &dynamic_target_items[t_idx];
+                                        
+                                        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
+                                            let bias_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("");
+                                            let prej_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("");
+                                            
+                                            let bias_keywords: Vec<&str> = bias_val.split(',')
+                                                .map(|s| s.trim())
+                                                .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
+                                                .collect();
+                                            
+                                            for keyword in bias_keywords {
+                                                let lang_prefix = context_name.split('_').next().unwrap_or("english");
+                                                let split_target_name = format!("{}_{}", lang_prefix, keyword);
+                                                let split_target_desc = format!("{} associated with '{}'", context_desc, keyword);
+
+                                                valid_targets.push((
+                                                    split_target_name,
+                                                    base_target.to_string(),
+                                                    split_target_desc,
+                                                    keyword.to_string(),
+                                                    prej_val.to_string(),
+                                                    false,
+                                                    specific_line.clone(),
+                                                    specific_candidate.clone() // 🌟 단일 NMS 우승 단어 1:1 매핑
+                                                ));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1707,27 +1715,33 @@ async fn process_task(
 
                                             if let Some(i) = best_line_idx {
                                                 emit_term(&format!("[EXTRACTION] ✅ Phase 2 Vector matched for {} in line {}", c_name_desc, i));
-                                                let specific_line = lines[i].clone();
-
+                                                
                                                 let bias_keywords: Vec<&str> = b_bias.split(',')
                                                     .map(|s| s.trim())
                                                     .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
                                                     .collect();
                                                 
-                                                for keyword in bias_keywords {
-                                                    let split_target_name = format!("{}_{}", c_name_target, keyword);
-                                                    let split_target_desc = format!("{} associated with '{}'", c_name_desc, keyword);
+                                                // 🌟 [전체 PUG 각 줄 내용 루프 뎁스 추가 - Phase 2]
+                                                for line_content in &lines {
+                                                    if line_content.contains(clean_company) {
+                                                        let specific_line = line_content.clone();
 
-                                                    valid_targets.push((
-                                                        split_target_name,
-                                                        c_name_target.clone(), // 🌟 Phase 2에서는 이것을 덮어씀
-                                                        split_target_desc,
-                                                        keyword.to_string(),
-                                                        b_prej.to_string(),
-                                                        true, // 🌟 Phase 2 플래그!
-                                                        specific_line.clone(),
-                                                        String::new() // 🌟 Phase 2는 LLM이 찾도록 단서를 비워둠
-                                                    ));
+                                                        for keyword in &bias_keywords {
+                                                            let split_target_name = format!("{}_{}", c_name_target, keyword);
+                                                            let split_target_desc = format!("{} associated with '{}'", c_name_desc, keyword);
+
+                                                            valid_targets.push((
+                                                                split_target_name.clone(),
+                                                                c_name_target.clone(), // 🌟 Phase 2에서는 이것을 덮어씀
+                                                                split_target_desc.clone(),
+                                                                keyword.to_string(),
+                                                                b_prej.to_string(),
+                                                                true, // 🌟 Phase 2 플래그!
+                                                                specific_line.clone(),
+                                                                String::new() // 🌟 Phase 2는 LLM이 찾도록 단서를 비워둠
+                                                            ));
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -1757,14 +1771,17 @@ async fn process_task(
                                 // 🌟 [원본 보존] 문장 전체 검색을 위해 정제 전의 원본 타겟을 보존합니다.
                                 let original_candidate = specific_candidate.clone();
 
-                                // 🌟 [Plan C] 1. 괄호 및 특수문자 사전 완벽 제거 (다국어 공통)
-                                let mut eval_target = specific_candidate.clone();
-                                
-                                // 괄호, 따옴표 등 검색에 방해되는 특수문자를 문자열에서 공백으로 치환하여 단어 결합 방지 (따로따로 진행)
-                                eval_target = eval_target.replace(&['(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '“', '”', '‘', '’'][..], " ");
-                                
-                                // 양끝 구두점 및 기호 완벽 제거 ('|' 기호 포함)
-                                eval_target = eval_target.trim_matches(&['.', ',', '?', '!', ':', ';', '-', '_', '~', ' ', '|'][..]).to_string();
+                                // 🌟 [Plan C] 1. 범용 특수문자 완벽 분리 및 제거 (다국어 공통)
+                                // 하드코딩된 기호 배열 대신, 알파벳/숫자/공백이 아닌 모든 특수문자를 범용적으로 찾아 공백으로 분리합니다.
+                                let mut eval_target = String::new();
+                                for c in specific_candidate.chars() {
+                                    if c.is_alphanumeric() || c.is_whitespace() {
+                                        eval_target.push(c);
+                                    } else {
+                                        eval_target.push(' ');
+                                    }
+                                }
+                                eval_target = eval_target.split_whitespace().collect::<Vec<_>>().join(" ");
 
                                 // 🌟 정제된 텍스트를 specific_candidate에 다시 덮어씌워 LLM 프롬프트에도 깨끗한 값을 전달합니다.
                                 specific_candidate = eval_target.clone();
@@ -2305,13 +2322,17 @@ async fn process_task(
                                     // 🌟 [원본 보존] 문장 전체 검색을 위해 정제 전의 원본 타겟을 보존합니다.
                                     let original_ext = extracted_val.clone();
 
-                                    let mut eval_ext = extracted_val.clone();
+                                    let mut eval_ext = String::new();
                                     
-                                    // 1차 절단: 괄호 및 특수문자 사전 공백 치환 (다국어 공통, 따로따로 진행)
-                                    eval_ext = eval_ext.replace(&['(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '“', '”', '‘', '’'][..], " ");
-                                    
-                                    // 양끝 구두점 및 기호 완벽 제거 ('|' 기호 포함)
-                                    eval_ext = eval_ext.trim_matches(&['.', ',', '?', '!', ':', ';', '-', '_', '~', ' ', '|'][..]).to_string();
+                                    // 1차 절단: 알파벳/한글/숫자 등 일반 문자가 아닌 모든 특수기호를 범용적으로 찾아 공백으로 치환하여 단어 결합 방지
+                                    for c in extracted_val.chars() {
+                                        if c.is_alphanumeric() || c.is_whitespace() {
+                                            eval_ext.push(c);
+                                        } else {
+                                            eval_ext.push(' ');
+                                        }
+                                    }
+                                    eval_ext = eval_ext.split_whitespace().collect::<Vec<_>>().join(" ");
 
                                     // 🌟 정제된 텍스트를 extracted_val에 덮어씌워 오탐률을 줄입니다.
                                     extracted_val = eval_ext.clone();
@@ -2462,8 +2483,6 @@ async fn process_task(
                                                     candidate_tags = tag_names.clone();
                                                 }
 
-                                                emit_term(&format!("[STANZA-EXT] 문맥 기반 형태소 분리 완료 '{}' -> {:?}", eval_ext, candidate_tags));
-
                                                 let invalid_tags = ["PUNCT", "SYM"];
                                                 let all_invalid = candidate_tags.iter().all(|&t| invalid_tags.contains(&t));
                                                 // 🌟 [CRITICAL FIX] 개체명(Named Entity) 범주에 속할 수 없는 "VERB"를 허용 목록에서 제거하여 순수 동사의 강제 기각을 유도합니다.
@@ -2541,7 +2560,7 @@ async fn process_task(
 
                                                     if queue_split {
                                                         let parts_display = trimmed_words.join("', '");
-                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", parts_display));
+                                                        // emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", parts_display));
                                                         
                                                         for part in &trimmed_words {
                                                             let mut clone = valid_targets[p_idx - 1].clone();
@@ -2807,7 +2826,7 @@ async fn process_task(
                                     // --- 1. Verb Score Check ---
                                     // 🌟 문서에서 감지된 언어 중 현재 검증 언어(lang)가 아닌 2차 언어를 찾아 foreign으로 설정 (없을 경우 기본값 "english")
                                     let foreign_lang = detected_languages_vec.iter().find(|&l| l != lang).cloned().unwrap_or_else(|| "english".to_string());
-                                    let (v_sys, v_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, &foreign_lang, "verb, predicate", verb_hint);
+                                    let (v_sys, v_user) = crate::parsing::build_single_property_verification_prompt("VERB", &matched_context, &extracted_val, lang, &foreign_lang, "verb, predicate", verb_hint);
                                     let cancel_clone_v = cancellation_token.clone();
                                     
                                     let gen_arc_v = model.granite_generator.clone();
@@ -2832,8 +2851,8 @@ async fn process_task(
                                     }
 
                                     let v_json = crate::parsing::parse_json_from_llm(&v_res);
-                                    let mut verb_score = v_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                    let v_loanword = v_json.get("loanword").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    let mut verb_score = v_json.get(&format!("{}_VERB_score", lang)).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let v_loanword = v_json.get(&format!("{}_loanword", lang)).and_then(|v| v.as_bool()).unwrap_or(false);
                                     let original_verb_score = verb_score;
                                     
                                     if v_loanword {
@@ -2853,7 +2872,7 @@ async fn process_task(
                                     // --- 2. Expression Score Check ---
                                     // 🌟 문서에서 감지된 언어 중 현재 검증 언어(lang)가 아닌 2차 언어를 찾아 foreign으로 설정 (없을 경우 기본값 "english")
                                     let foreign_lang = detected_languages_vec.iter().find(|&l| l != lang).cloned().unwrap_or_else(|| "english".to_string());
-                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt(&extracted_val, lang, &foreign_lang, "idiom, phrase, full sentence", expr_hint);
+                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt("EXPRESSION", &matched_context, &extracted_val, lang, &foreign_lang, "idiom, phrase, full sentence", expr_hint);
                                     let cancel_clone_e = cancellation_token.clone();
                                     
                                     let gen_arc_e = model.granite_generator.clone();
@@ -2878,8 +2897,8 @@ async fn process_task(
                                     }
 
                                     let e_json = crate::parsing::parse_json_from_llm(&e_res);
-                                    let mut expr_score = e_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                    let e_loanword = e_json.get("loanword").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    let mut expr_score = e_json.get(&format!("{}_EXPRESSION_score", lang)).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let e_loanword = e_json.get(&format!("{}_loanword", lang)).and_then(|v| v.as_bool()).unwrap_or(false);
                                     let original_expr_score = expr_score;
                                     
                                     if e_loanword {
