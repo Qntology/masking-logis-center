@@ -2091,14 +2091,9 @@ async fn process_task(
                         // 앞서 벡터 유사도로 0.10점을 넘긴(통과한) 정확히 PUG 한 줄만 제공합니다!
                         let mut matched_context = specific_line.clone();
 
+                        // 🌟 [CRITICAL FIX] Phase 2에서 의도적으로 마커를 해제하여 LLM에게 이름을 재노출하던 로직을 삭제합니다.
+                        // 한 번 마스킹된 데이터는 Phase 2에서도 철저히 가려져야 중복 추출(Overlap) 및 무한 루프가 발생하지 않습니다.
                         for (original_val, marker) in &replacement_history {
-                            if is_phase2 {
-                                if let Some(final_repl) = skip_map.get(marker) {
-                                    if final_repl.contains("NAME:") || final_repl.contains("USERNAME:") {
-                                        continue; 
-                                    }
-                                }
-                            }
                             matched_context = matched_context.replace(original_val, marker);
                         }
 
