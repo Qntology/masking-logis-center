@@ -924,12 +924,9 @@ pub fn build_single_property_verification_prompt(flag: &str, text: &str, word: &
     let system_template = r###"[INSTRUCTION]
 - Rate how strongly the word represents the {FLAG} property in {LANG}. 
 - You must strictly base your evaluation on {FLAG} hint.
-- Set to false ONLY IF '{WORD}' is of {LANG} origin.
-- Set to true ONLY IF '{WORD}' is of {FORE} foreign.
 
 [CRITERIA]
 Origin: {LANG}
-Foreign: {FORE}
 Text: {TEXT}
 Word: {WORD}
 {FLAG} Property: {PROPERTY}
@@ -938,16 +935,9 @@ Word: {WORD}
 "###.to_string();
     let user_template = r###"[TASK] Analyze the word '{WORD}' extracted from the provided text, and score its {FLAG} property. 
 
-[SCHEMA DEFINITIONS]
-- {LANG}_{FLAG}_score: Integer. 0 to 10
-- {LANG}_loanword: Boolean. is the word '{WORD}' of {FORE} origin
-- reason: String. reason({LANG}_{FLAG}_score and {LANG}_loanword)
-
 [OUTPUT FORMAT]
 {
-  "reason":"...",
-  "{LANG}_{FLAG}_score": Integer(0-10),
-  "{LANG}_loanword": Boolean
+  "{LANG}_{FLAG}_score": Integer(0-10)
 }
 
 [ACTION] RETURN JSON ONLY. NO EXPLANATION.
