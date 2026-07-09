@@ -1604,56 +1604,95 @@ async fn process_task(
                     // 🌟 [CRITICAL FIX] 결합 파생 조각만 별도로 격리하여 보관합니다.
                     let mut expanded_only_spans: Vec<ChunkSpan> = Vec::new(); 
 
-                    // 각 그룹 내에서 '오직 2개의 연속된 조각(Pair)' 결합 경우의 수만 생성합니다. (제약 완전 철폐)
+                    // 🌟 [CRITICAL FIX] 2조각뿐만 아니라 최대 3조각(단어)까지 확장하여 고유명사가 파편화되는 것을 방지합니다.
                     for group in contiguous_groups {
                         let n = group.len();
                         if n >= 2 {
-                            let len = 2; // 🌟 [CRITICAL FIX] 무조건 2조각까지만 이어지도록 결합 길이를 2로 고정합니다.
-                            for start_idx in 0..=(n - len) {
-                                let sub_group = &group[start_idx..(start_idx + len)];
-                                
-                                // 🌟 [CRITICAL FIX] 단순 공백 결합이 아닌 원본 텍스트 기반 정규식 발췌 로직 적용 (PASS 3.5)
-                                // 결합되는 조각들 사이의 원래 띄어쓰기(다중 공백 등) 간격을 그대로 가져옵니다.
-                                let combined_words: Vec<&str> = sub_group.iter().map(|s| s.text.as_str()).collect();
-                                let mut regex_pattern = String::new();
-                                for (i, word) in combined_words.iter().enumerate() {
-                                    let escaped_word = regex::escape(word).replace("\\ ", r"\s+");
-                                    if i > 0 { regex_pattern.push_str(r"\s+"); }
-                                    regex_pattern.push_str(&escaped_word);
-                                }
-                                
-                                let line_text = &lines[sub_group[0].line_idx];
-                                let combined_text = if let Ok(re) = regex::Regex::new(&regex_pattern) {
-                                    if let Some(mat) = re.find(line_text) {
-                                        mat.as_str().to_string()
+                            let max_len = n.min(3); // 최대 3조각 조합 허용
+                            for len in 2..=max_len {
+                                for start_idx in 0..=(n - len) {
+                                    let sub_group = &group[start_idx..(start_idx + len)];
+                                    
+                                    // 🌟 [CRITICAL FIX] 단순 공백 결합이 아닌 원본 텍스트 기반 정규식 발췌 로직 적용 (PASS 3.5)
+                                    // 결합되는 조각들 사이의 원래 띄어쓰기(다중 공백 등) 간격을 그대로 가져옵니다.
+                                    let combined_words: Vec<&str> = sub_group.iter().map(|s| s.text.as_str()).collect();
+                                    let mut regex_pattern = String::new();
+                                    for (i, word) in combined_words.iter().enumerate() {
+                                        let escaped_word = regex::escape(word).replace("\\ ", r"\s+");
+                                        if i > 0 { regex_pattern.push_str(r"\s+"); }
+                                        regex_pattern.push_str(&escaped_word);
+                                    }
+                                    
+                                    let line_text = &lines[sub_group[0].line_idx];
+                                    let combined_text = if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                        if let Some(mat) = re.find(line_text) {
+                                            mat.as_str().to_string()
+                                        } else {
+                                            combined_words.join(" ")
+                                        }
                                     } else {
                                         combined_words.join(" ")
+                                    };
+                                    
+                                    // 🌟 파생된 거대 조각은 결합된 모든 조각들의 타겟(카테고리)을 합집합으로 가집니다.
+                                    let mut combined_targets = Vec::new();
+                                    for s in sub_group {
+                                        combined_targets.extend(s.target_indices.clone());
                                     }
-                                } else {
-                                    combined_words.join(" ")
-                                };
-                                
-                                let max_score = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
-                                
-                                // 🌟 파생된 거대 조각은 결합된 모든 조각들의 타겟(카테고리)을 합집합으로 가집니다. (이종 카테고리 제약 완전 철폐)
-                                let mut combined_targets = Vec::new();
-                                for s in sub_group {
-                                    combined_targets.extend(s.target_indices.clone());
+                                    combined_targets.sort();
+                                    combined_targets.dedup();
+
+                                    // 🌟 [수정] Granite 임베딩을 호출하여 결합된 텍스트의 진짜 문맥 점수를 재계산합니다.
+                                    let combined_emb = model.get_embedding(combined_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                    let mut real_max_score = 0.0_f32;
+                                    
+                                    for &t_idx in &combined_targets {
+                                        let b_score = cosine_similarity(&combined_emb, &target_biases_embs[t_idx]);
+                                        let p_score = cosine_similarity(&combined_emb, &target_prejs_embs[t_idx]);
+                                        
+                                        // 🌟 [CRITICAL FIX] "연임에 성공한", "바르셀로나에 맞서" 등 서술어/동사가 섞인 무의미한 확장을 원천 차단하기 위해 
+                                        // 결합된 텍스트에 대한 verb_penalty 가중치를 대폭 상향(0.10 -> 0.25)하여 NMS 경쟁에서 패배하도록 유도합니다.
+                                        let v_sim = cosine_similarity(&combined_emb, &verb_emb);
+                                        let verb_penalty = v_sim * 0.25; 
+                                        
+                                        let mut title_bonus = 0.0;
+                                        let t_sim = cosine_similarity(&combined_emb, &title_emb);
+                                        if t_sim > 0.0 { title_bonus = t_sim * 0.15; }
+                                        
+                                        let target_score = b_score - (p_score * 0.7) - verb_penalty + title_bonus;
+                                        if target_score > real_max_score {
+                                            real_max_score = target_score;
+                                        }
+                                    }
+
+                                    // 🌟 [CRITICAL FIX] 동사 패널티로 인해 점수가 폭락한 경우(예: '연임에 성공한'), 
+                                    // 기존 조각의 점수를 무조건 상속(90%)받지 못하도록 방어 코드를 추가합니다.
+                                    // 서술어 유사도(v_sim)가 특정 수치를 초과하면 상속을 완전히 끊어버려 탈락(Drop)을 유도합니다.
+                                    let v_sim_for_drop = cosine_similarity(&combined_emb, &verb_emb);
+                                    let final_score = if v_sim_for_drop > 0.40 {
+                                        real_max_score // 동사성이 강하면 상속 없이 순수 계산 점수만 반영 (NMS 탈락 유도)
+                                    } else {
+                                        let inherited_max = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
+                                        real_max_score.max(inherited_max * 0.9)
+                                    };
+                                    
+                                    // 0.3 커트라인을 넘지 못하면 아예 후보군에 넣지 않음
+                                    if final_score > 0.3 {
+                                        let new_span = ChunkSpan {
+                                            line_idx: sub_group[0].line_idx,
+                                            start: sub_group[0].start,
+                                            end: sub_group.last().unwrap().end,
+                                            text: combined_text.clone(),
+                                            target_indices: combined_targets,
+                                            score: final_score,
+                                        };
+                                        
+                                        emit_term(&format!("    🤝 [EXPANDED] {}조각 결합 파생: '{}' (재평가 스코어: {:.4})", len, combined_text, final_score));
+                                        expanded_only_spans.push(new_span);
+                                    } else {
+                                        emit_term(&format!("    🚫 [EXPANDED DROP] 동사/서술어 패널티로 결합 기각: '{}'", combined_text));
+                                    }
                                 }
-                                combined_targets.sort();
-                                combined_targets.dedup();
-                                
-                                let new_span = ChunkSpan {
-                                    line_idx: sub_group[0].line_idx,
-                                    start: sub_group[0].start,
-                                    end: sub_group.last().unwrap().end,
-                                    text: combined_text.clone(),
-                                    target_indices: combined_targets,
-                                    score: max_score,
-                                };
-                                
-                                emit_term(&format!("    🤝 [EXPANDED] 2조각 결합 파생: '{}'", combined_text));
-                                expanded_only_spans.push(new_span);
                             }
                         }
                     }
@@ -3211,28 +3250,8 @@ async fn process_task(
                             current_target_found.push(extracted_val.clone());
                             domain_history.push((target_name.to_string(), extracted_val.clone()));
 
-                            // 🌟 [파생어 자동 마스킹 적용] 띄어쓰기로 이루어진 복합어인 경우, 쪼개진 단어(파생어)들도 모두 동일한 마커로 강제 마스킹합니다.
-                            let parts: Vec<&str> = extracted_val.split_whitespace().collect();
-                            if parts.len() > 1 {
-                                for p in parts {
-                                    if p.chars().count() >= 2 {
-                                        let mut hybrid_val_p = p.to_string();
-                                        for (orig, marker) in &replacement_history {
-                                            if p.contains(orig) && orig.chars().count() >= 2 {
-                                                hybrid_val_p = hybrid_val_p.replace(orig, marker);
-                                            }
-                                        }
-                                        masked_text = masked_text.replace(&hybrid_val_p, &skip_marker);
-                                        doc_title = doc_title.replace(&hybrid_val_p, &skip_marker);
-                                        doc_desc = doc_desc.replace(&hybrid_val_p, &skip_marker);
-                                        matched_context = matched_context.replace(&hybrid_val_p, &skip_marker);
-                                        
-                                        replacement_history.push((p.to_string(), skip_marker.clone()));
-                                        current_target_found.push(p.to_string());
-                                        domain_history.push((target_name.to_string(), p.to_string()));
-                                    }
-                                }
-                            }
+                            // 🌟 [파생어 자동 마스킹 제거됨] NMS 로직이 개별 단어를 충분히 커버하므로,
+                            // 과도한 전역 치환으로 인한 타 트랙의 컨텍스트 훼손을 방지하기 위해 파생어 강제 마스킹을 삭제했습니다.
 
                             if base_target == "company" {
                                 phase2_companies.push(extracted_val.clone());
