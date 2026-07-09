@@ -3557,6 +3557,57 @@ async fn process_task(
                         doc_desc = link_re.replace_all(&doc_desc, |caps: &regex::Captures| { link_map.get(&caps[1]).cloned().unwrap_or_default() }).to_string();
                     }
 
+                    // 🌟 [FINAL SWEEP] 마지막으로 한 번 더 루프를 돌며 마스킹된 항목(all_matches)이 본문/제목/요약에 누락되어 남아있는지 체크하고 일괄 강제 마스킹합니다.
+                    let mut final_sweep_count = 0;
+                    for match_val in &all_matches {
+                        if let Some(obj) = match_val.as_object() {
+                            if let (Some(name), Some(val), Some(mnemonic)) = (obj.get("name").and_then(|v| v.as_str()), obj.get("value").and_then(|v| v.as_str()), obj.get("mnemonic").and_then(|v| v.as_str())) {
+                                if val.chars().count() >= 2 && !val.starts_with("[___REDACTED") {
+                                    let final_repl = format!("[{}: {}]", name, mnemonic);
+                                    
+                                    // 1. 단순 교체 (노이즈/링크 복원 과정에서 튀어나온 텍스트 등 즉시 교체)
+                                    if masked_text.contains(val) { masked_text = masked_text.replace(val, &final_repl); final_sweep_count += 1; }
+                                    if doc_title.contains(val) { doc_title = doc_title.replace(val, &final_repl); final_sweep_count += 1; }
+                                    if doc_desc.contains(val) { doc_desc = doc_desc.replace(val, &final_repl); final_sweep_count += 1; }
+
+                                    // 2. 띄어쓰기/특수기호 변형 누락분 추적 교체 (Space-Agnostic Sweep)
+                                    let no_space_val: String = val.chars().filter(|c| c.is_alphanumeric()).collect();
+                                    if no_space_val.len() >= 2 && no_space_val.len() <= 100 {
+                                        let escaped_chars: Vec<String> = no_space_val.chars().map(|c| regex::escape(&c.to_string())).collect();
+                                        let regex_pattern = escaped_chars.join(r"[^\p{L}\p{N}_]+"); 
+                                        if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                            masked_text = re.replace_all(&masked_text, |caps: &regex::Captures| {
+                                                let matched_str = caps[0].to_string();
+                                                if !matched_str.contains("[") && !matched_str.contains("]") {
+                                                    final_sweep_count += 1;
+                                                    final_repl.clone()
+                                                } else { matched_str }
+                                            }).to_string();
+                                            doc_title = re.replace_all(&doc_title, |caps: &regex::Captures| {
+                                                let matched_str = caps[0].to_string();
+                                                if !matched_str.contains("[") && !matched_str.contains("]") {
+                                                    final_sweep_count += 1;
+                                                    final_repl.clone()
+                                                } else { matched_str }
+                                            }).to_string();
+                                            doc_desc = re.replace_all(&doc_desc, |caps: &regex::Captures| {
+                                                let matched_str = caps[0].to_string();
+                                                if !matched_str.contains("[") && !matched_str.contains("]") {
+                                                    final_sweep_count += 1;
+                                                    final_repl.clone()
+                                                } else { matched_str }
+                                            }).to_string();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if final_sweep_count > 0 {
+                        emit_term(&format!("[EXTRACTION] 🧹 Final Sweep 완료: 변형되거나 누락된 잔여 항목 {}번 추가 마스킹 처리됨.", final_sweep_count));
+                    }
+
                     if !all_matches.is_empty() {
                         // 🌟 마스킹된 전체 텍스트도 masked 오브젝트 내부의 text 필드로 함께 캡슐화합니다.
                         extracted_json = json!({ "matches": all_matches, "text": masked_text, "title": doc_title.clone(), "description": doc_desc.clone() });
