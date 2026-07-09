@@ -1453,17 +1453,17 @@ async fn process_task(
                                 let best_score = top_targets[0].1;
 
                                 // 🌟 2차 패스 커트라인 조정 및 0.05 편차(Margin) 공동 우승 허용 로직 적용
-                                if best_score > 0.2 {
+                                if best_score > 0.3 {
                                     let final_score = best_score * length_weight;
 
-                                    if verb_penalty > 0.005 {
+                                    if verb_penalty > 0.05 {
                                         emit_term(&format!("    📉 [VERB PENALTY] '{}' -> 감점: {:.4} (최종 반영 스코어: {:.4})", chunk_text, verb_penalty, final_score));
                                     }
 
                                     let mut selected_indices = Vec::new();
                                     
                                     for (idx, score) in top_targets {
-                                        if best_score - score <= 0.05 && score > 0.2 {
+                                        if best_score - score <= 0.05 && score > 0.3 {
                                             selected_indices.push(idx);
                                         } else {
                                             break;
@@ -2296,6 +2296,7 @@ async fn process_task(
 
                             // 🌟 [추가] 추출된 단어(extracted_val)에 대해 한 번 더 NLP(Stanza) 검증 및 정제를 수행하여 꼬리(조사)를 자르거나 명사가 아닌 경우 기각합니다.
                             let mut nlp_rejected = false;
+                            let mut already_masked_skip = false;
                             if let Some(stanza) = &mut stanza_pipeline {
                                 if !extracted_val.is_empty() {
                                     // 🌟 [원본 보존] 문장 전체 검색을 위해 정제 전의 원본 타겟을 보존합니다.
@@ -2324,7 +2325,8 @@ async fn process_task(
                                         emit_term(&format!("[DEBUG] 추출 단어 정제 후 독성 단어 명부 등재 확인. NLP 연산을 스킵하고 강제 기각합니다: '{}'", extracted_val));
                                         nlp_rejected = true;
                                     } else if fully_masked_candidates.contains(&extracted_val) {
-                                        emit_term(&format!("[DEBUG] 추출 단어 정제 후 이미 마스킹 완료된 타겟으로 판명. NLP 연산을 스킵합니다: '{}'", extracted_val));
+                                        emit_term(&format!("[DEBUG] 추출 단어 정제 후 이미 마스킹 완료된 타겟으로 판명. 불필요한 후속 연산을 스킵하고 트랙을 즉시 종료합니다: '{}'", extracted_val));
+                                        already_masked_skip = true;
                                     } else {
                                         // 🌟 [1차 형태소 분리] 문맥 검색을 통한 안전한 폴백 매핑
                                         let cand_byte_idx_opt = matched_context.find(&original_ext);
@@ -2591,6 +2593,10 @@ async fn process_task(
                                 break;
                             }
 
+                            if already_masked_skip {
+                                break;
+                            }
+
                             // 🌟 [방어 로직 추가] NMS 후보 단어와의 교집합(포함 관계) 및 단일 숫자/기호 강제 기각
                             let mut nms_valid = true;
                             if !specific_candidate.is_empty() {
@@ -2715,6 +2721,7 @@ async fn process_task(
 
                             // 🌟 [STAGE 3] 추출 단어 다국어 순차 검증 (Sequential CoT Evaluation with Early Exit)
                             let is_mismatch = parsed.get("is_target_mismatch").and_then(|v| v.as_bool()).unwrap_or(false);
+
 
                             emit_term(&format!("\n======================================="));
                             emit_term(&format!("[DEBUG-EXTRACTION-STAGE3] 🎯 추출 단어 다국어 순차 검증 시작 🎯"));
@@ -2896,6 +2903,10 @@ async fn process_task(
                                 // 🌟 [CRITICAL FIX] 기 마스킹 단어의 파생어가 반복 추출된다는 것은 해당 트랙이 포화 상태라는 의미입니다.
                                 // 무의미하게 온도를 올리며 continue 하지 않고, 즉시 break하여 루프를 조기 종료(Early Exit)합니다.
                                 emit_term(&format!("[DEBUG] 기 마스킹 단어의 파생어 반복 추출 감지. 트랙 포화로 판단하여 조기 종료(Early Break): '{}'", extracted_val));
+                                fully_masked_candidates.insert(extracted_val.clone());
+                                if !specific_candidate.is_empty() && specific_candidate == extracted_val {
+                                    fully_masked_candidates.insert(specific_candidate.clone());
+                                }
                                 break;
                             }
 
@@ -2967,6 +2978,10 @@ async fn process_task(
                                 // 이미 다른 트랙에 의해 부분 마스킹되어 텍스트가 훼손된 상태이므로 환각이 아닌 트랙 포화로 간주하고 조기 종료합니다.
                                 if early_exists {
                                     emit_term(&format!("[DEBUG] 원본에는 존재하나 마스킹 과정에서 훼손됨. 파생어/중복 마스킹으로 간주하여 트랙 조기 종료: '{}'", extracted_val));
+                                    fully_masked_candidates.insert(extracted_val.clone());
+                                    if !specific_candidate.is_empty() && specific_candidate == extracted_val {
+                                        fully_masked_candidates.insert(specific_candidate.clone());
+                                    }
                                     break;
                                 }
 
@@ -3007,8 +3022,8 @@ async fn process_task(
                                             
                                             let base_score = b_score - (p_score * penalty_weight) - verb_penalty;
                                             
-                                            // Pass 2와 동일한 커트라인(0.25) 검증
-                                            if base_score > 0.25 {
+                                            // Pass 2와 동일한 커트라인(0.3) 검증
+                                            if base_score > 0.3 {
                                                 sub_chunks.push((start, end, chunk_text, base_score * length_weight, verb_penalty));
                                             } else {
                                                 emit_term(&format!("    💀 [DEFEAT] 수축 로테이션 탈락: '{}' (Score: {:.4} / VerbPenalty: {:.4})", chunk_text, base_score, verb_penalty));
