@@ -1384,6 +1384,9 @@ async fn process_task(
                     let combined_verb_b_val = prefixed_verb_b_vals.join(", ");
                     let verb_emb = model.get_embedding(combined_verb_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
 
+                    // 🌟 [추가] 문서 제목(Title) 임베딩 생성 (NMS 경쟁 시 고유명사 타이브레이커 가중치용)
+                    let title_emb = model.get_embedding(doc_title.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+
                     // 🌟 2. Sliding Window를 통한 단어 단위 청크(Chunk) 생성 및 기초 점수 산출
                     #[derive(Clone)]
                     struct ChunkSpan {
@@ -1442,8 +1445,16 @@ async fn process_task(
                                     
                                     let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
                                     
-                                    // 🌟 타이브레이커 감점을 최종 스코어에 반영
-                                    let score = b_score - (p_score * penalty_weight) - verb_penalty;
+                                    // 🌟 [추가] 문맥 의존도가 높은 고유명사 타겟(이름, 회사, 계정)에 한하여 제목 벡터 유사도 보너스를 동적으로 부여합니다.
+                                    let (_, base_target, _) = &dynamic_target_items[i];
+                                    let mut title_bonus = 0.0;
+                                    let t_sim = cosine_similarity(&chunk_emb, &title_emb);
+                                    if t_sim > 0.0 {
+                                        title_bonus = t_sim * 0.15; // 제목과 벡터 방향성이 일치하는 단어에 15% 보정치 가점 부여
+                                    }
+                                    
+                                    // 🌟 타이브레이커 감점 및 제목 보너스를 최종 스코어에 반영
+                                    let score = b_score - (p_score * penalty_weight) - verb_penalty + title_bonus;
 
                                     top_targets.push((i, score));
                                 }
@@ -1603,7 +1614,36 @@ async fn process_task(
                             }
                         }
                     }
-                    let final_spans = expanded_spans;
+                    
+                    // 🌟 [추가] 4.6 EXPANDED 결합 조각과 기존 조각 간의 중복(Overlap) 제거 (2차 NMS)
+                    emit_term("  🧹 [PASS 3.6: EXPANDED NMS CLEANUP] Resolving Overlaps between Expanded and Original chunks...");
+                    
+                    // 조각의 단어 길이(end - start)가 긴 결합 조각을 최우선으로 두고, 길이가 같으면 점수순으로 정렬합니다.
+                    expanded_spans.sort_by(|a, b| {
+                        let len_a = a.end - a.start;
+                        let len_b = b.end - b.start;
+                        len_b.cmp(&len_a).then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+                    });
+
+                    let mut cleaned_spans: Vec<ChunkSpan> = Vec::new();
+                    for span in expanded_spans {
+                        let mut is_overlapped = false;
+                        for selected in &cleaned_spans {
+                            if span.line_idx == selected.line_idx {
+                                if span.start < selected.end && span.end > selected.start {
+                                    is_overlapped = true;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if !is_overlapped {
+                            cleaned_spans.push(span);
+                        } else {
+                            emit_term(&format!("    🗑️ [CLEANUP] 기존 👑 조각 제거됨 (EXPANDED 조각에 흡수): '{}'", span.text));
+                        }
+                    }
+                    let final_spans = cleaned_spans;
 
                     // 🌟 5. NMS 승자들을 바탕으로 매칭된 라인 및 valid_targets 재조립
                     // 구조: (target_name, base_target, target_desc, bias_keyword, prejudice, is_phase2, specific_line_text, specific_candidate_text)
@@ -2771,89 +2811,89 @@ async fn process_task(
                                 }
 
                                 // 🌟 다국어 전체를 순회하며 모두 0점을 초과할 때만 할루시네이션으로 판단
-                                let mut hallucination_count = 0;
-                                let total_langs = current_word_langs.len();
+                                // let mut hallucination_count = 0;
+                                // let total_langs = current_word_langs.len();
 
-                                for lang in &current_word_langs {
-                                    if cancellation_token.load(Ordering::Relaxed) { break; }
+                                // for lang in &current_word_langs {
+                                //     if cancellation_token.load(Ordering::Relaxed) { break; }
 
-                                    let verb_hint = bias_json.get("verb").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Does the word represent an action, state, or predicate (e.g., ends with a verb conjugation)?");
-                                    let expr_hint = bias_json.get("expression").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Is it an idiom, conversational phrase, or full sentence?");
+                                //     let verb_hint = bias_json.get("verb").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Does the word represent an action, state, or predicate (e.g., ends with a verb conjugation)?");
+                                //     let expr_hint = bias_json.get("expression").and_then(|v| v.get("hints")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("Is it an idiom, conversational phrase, or full sentence?");
 
-                                    // --- 1. Verb Score Check ---
-                                    // 🌟 문서에서 감지된 언어 중 현재 검증 언어(lang)가 아닌 2차 언어를 찾아 foreign으로 설정 (없을 경우 기본값 "english")
-                                    let foreign_lang = detected_languages_vec.iter().find(|&l| l != lang).cloned().unwrap_or_else(|| "english".to_string());
-                                    let (v_sys, v_user) = crate::parsing::build_single_property_verification_prompt("VERB", &matched_context, &extracted_val, lang, &foreign_lang, "verb, predicate", verb_hint);
-                                    let cancel_clone_v = cancellation_token.clone();
+                                //     // --- 1. Verb Score Check ---
+                                //     // 🌟 문서에서 감지된 언어 중 현재 검증 언어(lang)가 아닌 2차 언어를 찾아 foreign으로 설정 (없을 경우 기본값 "english")
+                                //     let foreign_lang = detected_languages_vec.iter().find(|&l| l != lang).cloned().unwrap_or_else(|| "english".to_string());
+                                //     let (v_sys, v_user) = crate::parsing::build_single_property_verification_prompt("VERB", &matched_context, &extracted_val, lang, &foreign_lang, "verb, predicate", verb_hint);
+                                //     let cancel_clone_v = cancellation_token.clone();
                                     
-                                    let gen_arc_v = model.granite_generator.clone();
-                                    let dev_v = model.device_config.device.clone();
-                                    let v_prompt_text = format!("<|start_of_role|>system<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>", v_sys, v_user);
+                                //     let gen_arc_v = model.granite_generator.clone();
+                                //     let dev_v = model.device_config.device.clone();
+                                //     let v_prompt_text = format!("<|start_of_role|>system<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>", v_sys, v_user);
 
-                                    let v_res = tokio::task::spawn_blocking(move || -> String {
-                                        let mut gen_guard = gen_arc_v.blocking_lock();
-                                        if let Some(gen) = gen_guard.as_mut() {
-                                            gen.clear_kv_cache();
-                                            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                                gen.generate(&v_prompt_text, 64, &dev_v, Some(cancel_clone_v))
-                                            })).unwrap_or_else(|_| Ok("{}".to_string())).unwrap_or_else(|_| "{}".to_string());
-                                            gen.clear_kv_cache();
-                                            res
-                                        } else { "{}".to_string() }
-                                    }).await.unwrap_or_else(|_| "{}".to_string());
+                                //     let v_res = tokio::task::spawn_blocking(move || -> String {
+                                //         let mut gen_guard = gen_arc_v.blocking_lock();
+                                //         if let Some(gen) = gen_guard.as_mut() {
+                                //             gen.clear_kv_cache();
+                                //             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                //                 gen.generate(&v_prompt_text, 64, &dev_v, Some(cancel_clone_v))
+                                //             })).unwrap_or_else(|_| Ok("{}".to_string())).unwrap_or_else(|_| "{}".to_string());
+                                //             gen.clear_kv_cache();
+                                //             res
+                                //         } else { "{}".to_string() }
+                                //     }).await.unwrap_or_else(|_| "{}".to_string());
 
-                                    if !model.is_cpu_mode {
-                                        let dev = model.device_config.device.clone();
-                                        let _ = tokio::task::spawn_blocking(move || { if dev.is_cuda() { let _ = dev.synchronize(); } }).await;
-                                    }
+                                //     if !model.is_cpu_mode {
+                                //         let dev = model.device_config.device.clone();
+                                //         let _ = tokio::task::spawn_blocking(move || { if dev.is_cuda() { let _ = dev.synchronize(); } }).await;
+                                //     }
 
-                                    let v_json = crate::parsing::parse_json_from_llm(&v_res);
-                                    let mut verb_score = v_json.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                    
-
-                                    // --- 2. Expression Score Check ---
-                                    // 🌟 문서에서 감지된 언어 중 현재 검증 언어(lang)가 아닌 2차 언어를 찾아 foreign으로 설정 (없을 경우 기본값 "english")
-                                    let foreign_lang = detected_languages_vec.iter().find(|&l| l != lang).cloned().unwrap_or_else(|| "english".to_string());
-                                    let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt("EXPRESSION", &matched_context, &extracted_val, lang, &foreign_lang, "expression, idiom, phrase", expr_hint);
-                                    let cancel_clone_e = cancellation_token.clone();
-                                    
-                                    let gen_arc_e = model.granite_generator.clone();
-                                    let dev_e = model.device_config.device.clone();
-                                    let e_prompt_text = format!("<|start_of_role|>system<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>", e_sys, e_user);
-
-                                    let e_res = tokio::task::spawn_blocking(move || -> String {
-                                        let mut gen_guard = gen_arc_e.blocking_lock();
-                                        if let Some(gen) = gen_guard.as_mut() {
-                                            gen.clear_kv_cache();
-                                            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                                gen.generate(&e_prompt_text, 64, &dev_e, Some(cancel_clone_e))
-                                            })).unwrap_or_else(|_| Ok("{}".to_string())).unwrap_or_else(|_| "{}".to_string());
-                                            gen.clear_kv_cache();
-                                            res
-                                        } else { "{}".to_string() }
-                                    }).await.unwrap_or_else(|_| "{}".to_string());
-
-                                    if !model.is_cpu_mode {
-                                        let dev = model.device_config.device.clone();
-                                        let _ = tokio::task::spawn_blocking(move || { if dev.is_cuda() { let _ = dev.synchronize(); } }).await;
-                                    }
-
-                                    let e_json = crate::parsing::parse_json_from_llm(&e_res);
-                                    let mut expr_score = e_json.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                //     let v_json = crate::parsing::parse_json_from_llm(&v_res);
+                                //     let mut verb_score = v_json.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     
 
-                                    if (expr_score > verb_score) {
-                                        emit_term(&format!("    💀 [REJECT] Verb/Expr 점수가 모두 7.0 초과 -> 맹독성 환각으로 강제 기각"));
-                                        is_hallucination = true;
-                                        break;
-                                    }
-                                }
+                                //     // --- 2. Expression Score Check ---
+                                //     // 🌟 문서에서 감지된 언어 중 현재 검증 언어(lang)가 아닌 2차 언어를 찾아 foreign으로 설정 (없을 경우 기본값 "english")
+                                //     let foreign_lang = detected_languages_vec.iter().find(|&l| l != lang).cloned().unwrap_or_else(|| "english".to_string());
+                                //     let (e_sys, e_user) = crate::parsing::build_single_property_verification_prompt("EXPRESSION", &matched_context, &extracted_val, lang, &foreign_lang, "expression, idiom, phrase", expr_hint);
+                                //     let cancel_clone_e = cancellation_token.clone();
+                                    
+                                //     let gen_arc_e = model.granite_generator.clone();
+                                //     let dev_e = model.device_config.device.clone();
+                                //     let e_prompt_text = format!("<|start_of_role|>system<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>", e_sys, e_user);
 
-                                // 🌟 Fatal(>= 7.0)로 강제 종료되지 않고 끝까지 돌았을 때, 모든 다국어가 전부 0점을 초과했다면 최종 할루시네이션으로 판정
-                                if !is_hallucination && hallucination_count == total_langs && total_langs > 0 {
-                                    emit_term(&format!("    💀 [REJECT] 모든 다국어 검증에서 전부 0점 초과. 할루시네이션으로 최종 차단"));
-                                    is_hallucination = true;
-                                }
+                                //     let e_res = tokio::task::spawn_blocking(move || -> String {
+                                //         let mut gen_guard = gen_arc_e.blocking_lock();
+                                //         if let Some(gen) = gen_guard.as_mut() {
+                                //             gen.clear_kv_cache();
+                                //             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                //                 gen.generate(&e_prompt_text, 64, &dev_e, Some(cancel_clone_e))
+                                //             })).unwrap_or_else(|_| Ok("{}".to_string())).unwrap_or_else(|_| "{}".to_string());
+                                //             gen.clear_kv_cache();
+                                //             res
+                                //         } else { "{}".to_string() }
+                                //     }).await.unwrap_or_else(|_| "{}".to_string());
+
+                                //     if !model.is_cpu_mode {
+                                //         let dev = model.device_config.device.clone();
+                                //         let _ = tokio::task::spawn_blocking(move || { if dev.is_cuda() { let _ = dev.synchronize(); } }).await;
+                                //     }
+
+                                //     let e_json = crate::parsing::parse_json_from_llm(&e_res);
+                                //     let mut expr_score = e_json.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    
+
+                                //     if (expr_score > verb_score) {
+                                //         emit_term(&format!("    💀 [REJECT] Verb/Expr 점수가 모두 7.0 초과 -> 맹독성 환각으로 강제 기각"));
+                                //         is_hallucination = true;
+                                //         break;
+                                //     }
+                                // }
+
+                                // // 🌟 Fatal(>= 7.0)로 강제 종료되지 않고 끝까지 돌았을 때, 모든 다국어가 전부 0점을 초과했다면 최종 할루시네이션으로 판정
+                                // if !is_hallucination && hallucination_count == total_langs && total_langs > 0 {
+                                //     emit_term(&format!("    💀 [REJECT] 모든 다국어 검증에서 전부 0점 초과. 할루시네이션으로 최종 차단"));
+                                //     is_hallucination = true;
+                                // }
                             }
 
                             // 🌟 [CRITICAL FIX] 서술어/표현 점수가 7점을 넘거나 타겟 미스매치 시 즉시 환각으로 간주하고 강제 차단합니다.
@@ -3020,7 +3060,14 @@ async fn process_task(
                                             let verb_penalty = v_sim * beta;
                                             let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
                                             
-                                            let base_score = b_score - (p_score * penalty_weight) - verb_penalty;
+                                            // 🌟 [추가] 수축 로테이션 시에도 문맥 의존도가 높은 고유명사 타겟에 한하여 제목 벡터 유사도 보너스를 동일하게 부여합니다.
+                                            let mut title_bonus = 0.0;
+                                            let t_sim = cosine_similarity(&p_emb, &title_emb);
+                                            if t_sim > 0.0 {
+                                                title_bonus = t_sim * 0.15;
+                                            }
+                                            
+                                            let base_score = b_score - (p_score * penalty_weight) - verb_penalty + title_bonus;
                                             
                                             // Pass 2와 동일한 커트라인(0.3) 검증
                                             if base_score > 0.3 {
