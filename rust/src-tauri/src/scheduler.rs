@@ -1581,6 +1581,9 @@ async fn process_task(
                         contiguous_groups.push(current_group);
                     }
                     
+                    // 🌟 [CRITICAL FIX] 결합 파생 조각만 별도로 격리하여 보관합니다.
+                    let mut expanded_only_spans: Vec<ChunkSpan> = Vec::new(); 
+
                     // 각 그룹 내에서 '오직 2개의 연속된 조각(Pair)' 결합 경우의 수만 생성합니다. (제약 완전 철폐)
                     for group in contiguous_groups {
                         let n = group.len();
@@ -1610,7 +1613,7 @@ async fn process_task(
                                 };
                                 
                                 emit_term(&format!("    🤝 [EXPANDED] 2조각 결합 파생: '{}'", combined_text));
-                                expanded_spans.push(new_span);
+                                expanded_only_spans.push(new_span);
                             }
                         }
                     }
@@ -1618,17 +1621,17 @@ async fn process_task(
                     // 🌟 [추가] 4.6 EXPANDED 결합 조각과 기존 조각 간의 중복(Overlap) 제거 (2차 NMS)
                     emit_term("  🧹 [PASS 3.6: EXPANDED NMS CLEANUP] Resolving Overlaps between Expanded and Original chunks...");
                     
-                    // 조각의 단어 길이(end - start)가 긴 결합 조각을 최우선으로 두고, 길이가 같으면 점수순으로 정렬합니다.
-                    expanded_spans.sort_by(|a, b| {
+                    // 1) 결합 파생 조각(EXPANDED)들끼리 자체 NMS를 진행하여, 겹치는 결합 조각 중 가장 길고 점수가 높은 것을 우선 확정합니다.
+                    expanded_only_spans.sort_by(|a, b| {
                         let len_a = a.end - a.start;
                         let len_b = b.end - b.start;
                         len_b.cmp(&len_a).then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
                     });
 
-                    let mut cleaned_spans: Vec<ChunkSpan> = Vec::new();
-                    for span in expanded_spans {
+                    let mut survived_expanded: Vec<ChunkSpan> = Vec::new();
+                    for span in expanded_only_spans {
                         let mut is_overlapped = false;
-                        for selected in &cleaned_spans {
+                        for selected in &survived_expanded {
                             if span.line_idx == selected.line_idx {
                                 if span.start < selected.end && span.end > selected.start {
                                     is_overlapped = true;
@@ -1636,13 +1639,32 @@ async fn process_task(
                                 }
                             }
                         }
-                        
                         if !is_overlapped {
-                            cleaned_spans.push(span);
-                        } else {
-                            emit_term(&format!("    🗑️ [CLEANUP] 기존 👑 조각 제거됨 (EXPANDED 조각에 흡수): '{}'", span.text));
+                            survived_expanded.push(span);
                         }
                     }
+
+                    // 2) 살아남은 결합 조각을 1순위로 두고, 기존 👑 단일 조각 중 겹치는 것들은 모조리 강제 흡수(제거)합니다.
+                    let mut cleaned_spans: Vec<ChunkSpan> = survived_expanded.clone();
+                    for original_span in final_spans {
+                        let mut is_overlapped = false;
+                        for expanded_span in &survived_expanded {
+                            if original_span.line_idx == expanded_span.line_idx {
+                                if original_span.start < expanded_span.end && original_span.end > expanded_span.start {
+                                    is_overlapped = true;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if !is_overlapped {
+                            // 🌟 결합 조각과 전혀 겹치지 않는 독립적인 자투리 조각은 보존합니다.
+                            cleaned_spans.push(original_span);
+                        } else {
+                            emit_term(&format!("    🗑️ [CLEANUP] 기존 👑 조각 제거됨 (EXPANDED 결합 조각에 완벽히 흡수): '{}'", original_span.text));
+                        }
+                    }
+                    
                     let final_spans = cleaned_spans;
 
                     // 🌟 5. NMS 승자들을 바탕으로 매칭된 라인 및 valid_targets 재조립
@@ -1713,82 +1735,82 @@ async fn process_task(
                     while p_idx < valid_targets.len() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
                         
-                        // 🌟 [추가] Phase 2 진입 확인 및 펌핑(Pumping) 로직
-                        if p_idx == total_valid && !phase2_executed {
-                            phase2_executed = true;
-                            if !phase2_companies.is_empty() {
-                                emit_term(&format!("[EXTRACTION] 🔄 Phase 2: Generating context-aware targets for {} companies...", phase2_companies.len()));
+                        // // 🌟 [추가] Phase 2 진입 확인 및 펌핑(Pumping) 로직
+                        // if p_idx == total_valid && !phase2_executed {
+                        //     phase2_executed = true;
+                        //     if !phase2_companies.is_empty() {
+                        //         emit_term(&format!("[EXTRACTION] 🔄 Phase 2: Generating context-aware targets for {} companies...", phase2_companies.len()));
                                 
-                                for company in &phase2_companies {
-                                    let clean_company = company.trim();
-                                    if clean_company.is_empty() { continue; }
+                        //         for company in &phase2_companies {
+                        //             let clean_company = company.trim();
+                        //             if clean_company.is_empty() { continue; }
 
-                                    for lang in &detected_languages_vec {
-                                        let targets_to_add = vec![
-                                            ("name", "person's name", "reporter, player, coach, representative, council member, mr, ms, name, person, first name, full name", "company, corporate, business, team, location, place, animal, object"),
-                                            ("username", "person's username", "id, username, nickname, account, user", "real name, email, password")
-                                        ];
+                        //             for lang in &detected_languages_vec {
+                        //                 let targets_to_add = vec![
+                        //                     ("name", "person's name", "reporter, player, coach, representative, council member, mr, ms, name, person, first name, full name", "company, corporate, business, team, location, place, animal, object"),
+                        //                     ("username", "person's username", "id, username, nickname, account, user", "real name, email, password")
+                        //                 ];
 
-                                        for (b_target, b_desc, b_bias, b_prej) in targets_to_add {
-                                            // 저장용 부모 키. ex) 레알 마드리드_korean_name
-                                            let c_name_target = format!("{}_{}_{}", clean_company, lang, b_target);
-                                            let c_name_desc = format!("{} associated with '{}'", b_desc, clean_company);
+                        //                 for (b_target, b_desc, b_bias, b_prej) in targets_to_add {
+                        //                     // 저장용 부모 키. ex) 레알 마드리드_korean_name
+                        //                     let c_name_target = format!("{}_{}_{}", clean_company, lang, b_target);
+                        //                     let c_name_desc = format!("{} associated with '{}'", b_desc, clean_company);
                                             
-                                            // Vector Search
-                                            let bias_emb_vec = model.get_embedding(b_bias.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
-                                            let prej_emb_vec = model.get_embedding(b_prej.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                        //                     // Vector Search
+                        //                     let bias_emb_vec = model.get_embedding(b_bias.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                        //                     let prej_emb_vec = model.get_embedding(b_prej.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
 
-                                            let mut best_score = 0.0;
-                                            let mut best_line_idx = None;
+                        //                     let mut best_score = 0.0;
+                        //                     let mut best_line_idx = None;
 
-                                            for (i, line_text) in lines.iter().enumerate() {
-                                                let line_emb = model.get_embedding(line_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
-                                                let b_score = cosine_similarity(&line_emb, &bias_emb_vec);
-                                                let p_score = cosine_similarity(&line_emb, &prej_emb_vec);
-                                                let score = b_score - (p_score * 0.3);
+                        //                     for (i, line_text) in lines.iter().enumerate() {
+                        //                         let line_emb = model.get_embedding(line_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                        //                         let b_score = cosine_similarity(&line_emb, &bias_emb_vec);
+                        //                         let p_score = cosine_similarity(&line_emb, &prej_emb_vec);
+                        //                         let score = b_score - (p_score * 0.3);
                                                 
-                                                if score >= 0.10 && score > best_score {
-                                                    best_score = score;
-                                                    best_line_idx = Some(i);
-                                                }
-                                            }
+                        //                         if score >= 0.10 && score > best_score {
+                        //                             best_score = score;
+                        //                             best_line_idx = Some(i);
+                        //                         }
+                        //                     }
 
-                                            if let Some(i) = best_line_idx {
-                                                emit_term(&format!("[EXTRACTION] ✅ Phase 2 Vector matched for {} in line {}", c_name_desc, i));
+                        //                     if let Some(i) = best_line_idx {
+                        //                         emit_term(&format!("[EXTRACTION] ✅ Phase 2 Vector matched for {} in line {}", c_name_desc, i));
                                                 
-                                                let bias_keywords: Vec<&str> = b_bias.split(',')
-                                                    .map(|s| s.trim())
-                                                    .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
-                                                    .collect();
+                        //                         let bias_keywords: Vec<&str> = b_bias.split(',')
+                        //                             .map(|s| s.trim())
+                        //                             .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
+                        //                             .collect();
                                                 
-                                                // 🌟 [전체 PUG 각 줄 내용 루프 뎁스 추가 - Phase 2]
-                                                for line_content in &lines {
-                                                    if line_content.contains(clean_company) {
-                                                        let specific_line = line_content.clone();
+                        //                         // 🌟 [전체 PUG 각 줄 내용 루프 뎁스 추가 - Phase 2]
+                        //                         for line_content in &lines {
+                        //                             if line_content.contains(clean_company) {
+                        //                                 let specific_line = line_content.clone();
 
-                                                        for keyword in &bias_keywords {
-                                                            let split_target_name = format!("{}_{}", c_name_target, keyword);
-                                                            let split_target_desc = format!("{} associated with '{}'", c_name_desc, keyword);
+                        //                                 for keyword in &bias_keywords {
+                        //                                     let split_target_name = format!("{}_{}", c_name_target, keyword);
+                        //                                     let split_target_desc = format!("{} associated with '{}'", c_name_desc, keyword);
 
-                                                            valid_targets.push((
-                                                                split_target_name.clone(),
-                                                                c_name_target.clone(), // 🌟 Phase 2에서는 이것을 덮어씀
-                                                                split_target_desc.clone(),
-                                                                keyword.to_string(),
-                                                                b_prej.to_string(),
-                                                                true, // 🌟 Phase 2 플래그!
-                                                                specific_line.clone(),
-                                                                String::new() // 🌟 Phase 2는 LLM이 찾도록 단서를 비워둠
-                                                            ));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        //                                     valid_targets.push((
+                        //                                         split_target_name.clone(),
+                        //                                         c_name_target.clone(), // 🌟 Phase 2에서는 이것을 덮어씀
+                        //                                         split_target_desc.clone(),
+                        //                                         keyword.to_string(),
+                        //                                         b_prej.to_string(),
+                        //                                         true, // 🌟 Phase 2 플래그!
+                        //                                         specific_line.clone(),
+                        //                                         String::new() // 🌟 Phase 2는 LLM이 찾도록 단서를 비워둠
+                        //                                     ));
+                        //                                 }
+                        //                             }
+                        //                         }
+                        //                     }
+                        //                 }
+                        //             }
+                        //         }
+                        //     }
+                        // }
 
                         // 만약 valid_targets.len()을 넘어섰다면 진짜 끝
                         if p_idx >= valid_targets.len() { break; }
