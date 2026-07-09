@@ -2219,6 +2219,37 @@ async fn process_task(
                             }
 
                             if !cand_exists {
+                                // 🌟 [자투리 단어 구제 로직] 전체가 증발했더라도, 일부만 치환되고 남은 자투리(예: '페레스 회장은' -> '페레스' 마스킹 후 '회장은' 잔존)가 있는지 확인하여 구제합니다.
+                                let mut leftover_candidate = specific_candidate.clone();
+                                for (orig, _) in &replacement_history {
+                                    if leftover_candidate.contains(orig) {
+                                        leftover_candidate = leftover_candidate.replace(orig, " ");
+                                    }
+                                }
+                                
+                                // 특수문자 제거 후 순수 단어만 추출
+                                let mut clean_leftovers = String::new();
+                                for c in leftover_candidate.chars() {
+                                    if c.is_alphanumeric() {
+                                        clean_leftovers.push(c);
+                                    } else {
+                                        clean_leftovers.push(' ');
+                                    }
+                                }
+                                
+                                let final_leftover = clean_leftovers.split_whitespace().collect::<Vec<_>>().join(" ");
+                                
+                                // 자투리 단어가 2글자 이상 살아남아 있고, 본문에 존재한다면 그것으로 교체하여 트랙을 구제함
+                                let leftover_char_count = final_leftover.chars().filter(|c| !c.is_whitespace()).count();
+                                if leftover_char_count >= 2 && (matched_context.contains(&final_leftover) || masked_text.contains(&final_leftover) || doc_title.contains(&final_leftover) || doc_desc.contains(&final_leftover)) {
+                                    emit_term(&format!("[DEBUG] ♻️ 힌트 단어('{}') 중 일부가 마스킹되었으나, 자투리 단어('{}')가 남아있어 트랙을 구제합니다.", specific_candidate, final_leftover));
+                                    fully_masked_candidates.insert(specific_candidate.clone()); // 원본은 마스킹된 것으로 처리
+                                    specific_candidate = final_leftover.clone();
+                                    cand_exists = true;
+                                }
+                            }
+
+                            if !cand_exists {
                                 emit_term(&format!("[DEBUG] ⚠️ 힌트 단어('{}')가 현재 마스킹된 PUG 본문/문맥에 더 이상 존재하지 않습니다(이미 다른 마커로 치환됨). 불필요한 LLM 추론을 스킵합니다.", specific_candidate));
                                 fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 이미 마스킹된 것으로 간주하여 이후 동의어 트랙에서도 스킵 유도
                                 continue;
