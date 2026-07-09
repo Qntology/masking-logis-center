@@ -1174,15 +1174,15 @@ async fn process_task(
                     // 네이티브 스레드 풀 경합(Thread Pool Contention)이 발생해 영구적인 데드락에 빠집니다.
                     // 무거운 LLM 로딩이 완전히 끝날 때까지 먼저 대기한 후, 안전하게 ONNX를 로드합니다!
                     // =====================================================================
-                    emit_term("[EXTRACTION] 🧠 LLM 로딩 동기화 대기 중...");
-                    let _ = llm_load_handle.await;
+                    emit_term("[EXTRACTION] 🧠 LLM 로딩 동기화 대기 중... (현재 LLM 우회 중으로 스킵)");
+                    // let _ = llm_load_handle.await;
                     
                     // 🌟 [추가] LLM 모델 로딩 실패 시 상세 로그(에러 스택)를 UI 터미널에 출력합니다.
-                    if let Err(e) = model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await {
-                        let err_msg = format!("LLM 모델({:?}) 로딩 실패 상세 원인: {:?}", target_model_size, e);
-                        emit_term(&format!("🚨 [CRITICAL ERROR] {}", err_msg));
-                        return Err(anyhow::anyhow!(err_msg));
-                    }
+                    // if let Err(e) = model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await {
+                    //     let err_msg = format!("LLM 모델({:?}) 로딩 실패 상세 원인: {:?}", target_model_size, e);
+                    //     emit_term(&format!("🚨 [CRITICAL ERROR] {}", err_msg));
+                    //     return Err(anyhow::anyhow!(err_msg));
+                    // }
 
                     let stanza_base_dir = crate::utils::get_app_dir().join("models").join("stanza");
                     let mut stanza_pipeline = None;
@@ -1418,7 +1418,26 @@ async fn process_task(
                                     .collect();
                                 
                                 if clean_words.is_empty() { continue; }
-                                let chunk_text = clean_words.join(" ");
+                                
+                                // 🌟 [CRITICAL FIX] 단순 공백 결합이 아닌 원본 텍스트 기반 정규식 발췌 로직 적용 (PASS 2)
+                                // 다중 공백(특수기호 치환 흔적 등)을 완벽히 보존하여 이후 contains 검사에서 누락되지 않도록 합니다.
+                                let mut regex_pattern = String::new();
+                                for (i, word) in clean_words.iter().enumerate() {
+                                    let escaped_word = regex::escape(word);
+                                    if i > 0 { regex_pattern.push_str(r"\s+"); }
+                                    regex_pattern.push_str(&escaped_word);
+                                }
+                                
+                                let line_text = &lines[line_idx];
+                                let chunk_text = if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                    if let Some(mat) = re.find(line_text) {
+                                        mat.as_str().to_string()
+                                    } else {
+                                        clean_words.join(" ")
+                                    }
+                                } else {
+                                    clean_words.join(" ")
+                                };
 
                                 // 특수기호만 존재하는 무의미한 텍스트 스킵
                                 if chunk_text.trim().chars().all(|c| !c.is_alphanumeric()) { continue; }
@@ -1593,7 +1612,27 @@ async fn process_task(
                             for start_idx in 0..=(n - len) {
                                 let sub_group = &group[start_idx..(start_idx + len)];
                                 
-                                let combined_text = sub_group.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+                                // 🌟 [CRITICAL FIX] 단순 공백 결합이 아닌 원본 텍스트 기반 정규식 발췌 로직 적용 (PASS 3.5)
+                                // 결합되는 조각들 사이의 원래 띄어쓰기(다중 공백 등) 간격을 그대로 가져옵니다.
+                                let combined_words: Vec<&str> = sub_group.iter().map(|s| s.text.as_str()).collect();
+                                let mut regex_pattern = String::new();
+                                for (i, word) in combined_words.iter().enumerate() {
+                                    let escaped_word = regex::escape(word).replace("\\ ", r"\s+");
+                                    if i > 0 { regex_pattern.push_str(r"\s+"); }
+                                    regex_pattern.push_str(&escaped_word);
+                                }
+                                
+                                let line_text = &lines[sub_group[0].line_idx];
+                                let combined_text = if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                    if let Some(mat) = re.find(line_text) {
+                                        mat.as_str().to_string()
+                                    } else {
+                                        combined_words.join(" ")
+                                    }
+                                } else {
+                                    combined_words.join(" ")
+                                };
+                                
                                 let max_score = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
                                 
                                 // 🌟 파생된 거대 조각은 결합된 모든 조각들의 타겟(카테고리)을 합집합으로 가집니다. (이종 카테고리 제약 완전 철폐)
