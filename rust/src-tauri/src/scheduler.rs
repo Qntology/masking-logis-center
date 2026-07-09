@@ -1075,12 +1075,13 @@ async fn process_task(
                     emit_term(&format!("[DEBUG-OOM] 현재 투입되는 컨텍스트 사이즈(문자 수): {}. 선택된 모델: {:?}", target_text.len(), target_model_size));
 
                     // 🌟 [CRITICAL FIX] Granite 모델 백그라운드 로딩 트리거!
-                    let bg_model = model.clone();
-                    let bg_cancel = cancellation_token.clone();
-                    let llm_load_handle = tokio::spawn(async move {
-                        if bg_cancel.load(Ordering::Relaxed) { return; }
-                        let _ = bg_model.ensure_granite().await;
-                    });
+                    // (현재 Stage 3 LLM 추론을 우회 중이므로 VRAM 누수 방지를 위해 주석 처리합니다)
+                    // let bg_model = model.clone();
+                    // let bg_cancel = cancellation_token.clone();
+                    // let llm_load_handle = tokio::spawn(async move {
+                    //     if bg_cancel.load(Ordering::Relaxed) { return; }
+                    //     let _ = bg_model.ensure_granite().await;
+                    // });
 
                     // 🌟 16개의 마스킹 타겟 항목에 대해 (JSON_키, 추출_설명) 튜플 형태로 분리합니다.
                     let target_items = vec![
@@ -1557,7 +1558,7 @@ async fn process_task(
                     let mut contiguous_groups: Vec<Vec<ChunkSpan>> = Vec::new();
                     let mut current_group: Vec<ChunkSpan> = Vec::new();
                     
-                    for span in final_spans {
+                    for span in &final_spans {
                         if let Some(last) = current_group.last() {
                             // 🌟 [CRITICAL FIX] 카테고리 100% 일치 제약을 완전히 삭제! 
                             // 승리한 조각들이 같은 줄에 있고 물리적으로 맞닿아 있기만 하다면 무조건 연쇄 결합 그룹에 포함시킵니다.
@@ -1567,7 +1568,7 @@ async fn process_task(
                                 let span_word_count = span.end - span.start;
                                 
                                 if last_word_count == 1 || span_word_count == 1 {
-                                    current_group.push(span);
+                                    current_group.push(span.clone());
                                     continue;
                                 }
                             }
@@ -1575,7 +1576,7 @@ async fn process_task(
                         if !current_group.is_empty() {
                             contiguous_groups.push(current_group.clone());
                         }
-                        current_group = vec![span];
+                        current_group = vec![span.clone()];
                     }
                     if !current_group.is_empty() {
                         contiguous_groups.push(current_group);
@@ -2185,60 +2186,11 @@ async fn process_task(
                             }
                         }
 
-                        // 🌟 [PREFIX CACHING] Mamba State 유지를 위해 루프 진입 전 공통 프롬프트를 1회 사전 연산(Prefill)합니다.
-                        let already_found_str = if current_target_found.is_empty() { "".to_string() } else { current_target_found.iter().map(|s| format!("\"{}\"", s.replace("\"", "\\\""))).collect::<Vec<_>>().join(", ") };
-                        let candidates_str = if specific_candidate.is_empty() { "".to_string() } else { format!("\"{}\"", specific_candidate.replace("\"", "\\\"")) };
                         let input_keyword = if specific_candidate.is_empty() { target_bias.clone() } else { specific_candidate.clone() };
 
-                        let mut clean_matched_context = matched_context.clone();
-                        if let Ok(marker_re) = regex::Regex::new(r"\[___REDACTED_(LINK|NOISE)_\d+___\]") {
-                            clean_matched_context = marker_re.replace_all(&clean_matched_context, " ").to_string();
-                        }
-
-                        // 변하지 않는 기본 프롬프트만 생성 (ignore_list 배제)
-                        let (system_prompt_base, user_prompt_base) = crate::parsing::build_extraction_prompt(&doc_title, &clean_matched_context, &target_name, &target_item, &target_bias, &target_prejudice, &already_found_str, "", &candidates_str, &local_language, &localized_guide_str, &input_keyword);
-                        
-                        let base_prompt_text = format!(
-                            "<|start_of_role|>system<|end_of_role|>{}\n<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>{}",
-                            system_prompt_base,
-                            user_prompt_base
-                        );
-
-                        let dev_base = model.device_config.device.clone();
-                        let gen_arc_base = model.granite_generator.clone();
-                        
-                        // 공통 컨텍스트 스냅샷 생성 (루프 외부에서 단 1회 실행)
-                        let base_cache = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<crate::models::granite::model::GraniteHybridCache>> {
-                            let mut gen_guard = gen_arc_base.blocking_lock();
-                            if let Some(gen) = gen_guard.as_mut() {
-                                gen.clear_kv_cache();
-                                gen.prefill(&base_prompt_text, &dev_base).map_err(|e| anyhow::anyhow!("Prefill failed: {}", e))?;
-                                Ok(gen.get_cache_snapshot())
-                            } else {
-                                Ok(None)
-                            }
-                        }).await.unwrap_or(Ok(None)).unwrap_or(None);
-
-                        // 🌟 온도 상승 및 재시도 로직을 제거하여 1회만 단일 실행합니다.
+                        // 🌟 무거운 LLM(Granite) 추론을 완전히 스킵하고 NMS/Stanza 결과를 즉시 채택합니다.
                         for _ in 0..1 {
                             if cancellation_token.load(Ordering::Relaxed) { break; }
-
-                            let mut current_lang = target_name.split('_').next().unwrap_or("english");
-                            if !detected_languages_vec.contains(&current_lang.to_string()) {
-                                current_lang = detected_languages_vec.first().map(|s| s.as_str()).unwrap_or("english");
-                            }
-                            
-                            let current_verb_hint = bias_json.get("verb")
-                                .and_then(|v| v.get("bias"))
-                                .and_then(|v| v.get(current_lang))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("verb, predicate");
-                                
-                            let current_expr_hint = bias_json.get("expression")
-                                .and_then(|v| v.get("bias"))
-                                .and_then(|v| v.get(current_lang))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("idiom, phrase");
 
                             let payload = json!({ 
                                 "task_id": task.id.clone(),
@@ -2249,100 +2201,13 @@ async fn process_task(
                             let _ = app_handle.emit("extraction-progress", &payload);
                             crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
 
-                            let cancel_clone = cancellation_token.clone();
-                            let session_id_clone = format!("{}_{}", task.id, doc_id);
-
-                            let gen_arc = model.granite_generator.clone();
-                            
-                            // 🌟 재시도마다 내용이 바뀌는 가변 영역 조립
-                            let mut variable_suffix = String::new();
-                            if !ignore_list.is_empty() {
-                                let mut unique_ignores = std::collections::HashSet::new();
-                                let mut clean_ignore_list = Vec::new();
-                                for ign in ignore_list.iter().rev() {
-                                    if unique_ignores.insert(ign.clone()) {
-                                        clean_ignore_list.push(ign.clone());
-                                        if clean_ignore_list.len() >= 15 { break; }
-                                    }
-                                }
-                                
-                                variable_suffix.push_str("\n\nCRITICAL: DO NOT output any of the following values under any circumstances (regardless of upper/lowercase, spaces, or quotes):\n");
-                                for ignored in clean_ignore_list.iter().rev() {
-                                    variable_suffix.push_str(&format!("- {}\n", ignored));
-                                }
-                            }
-                            
-                            let expected_json_format = serde_json::json!({
-                                base_target.to_lowercase(): "The extracted value matching the target attribute",
-                                target_name.clone(): "The exact literal token value present in the content to be masked",
+                            // LLM 로직 우회 후 NMS 추출 단어 직접 채택
+                            let mut extracted_val = specific_candidate.clone();
+                            let parsed = serde_json::json!({
                                 "is_target_mismatch": false
                             });
 
-                            variable_suffix.push_str(&format!(
-                                "\n\nYou must respond ONLY with a valid JSON object. Do not wrap in tags. Use this exact format:\n{}\n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>",
-                                serde_json::to_string_pretty(&expected_json_format).unwrap_or_default()
-                            ));
-                            
-                            let dev = model.device_config.device.clone();
-                            let base_cache_clone = base_cache.clone();
-
-                            let res_mask = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-                                let mut gen_guard = gen_arc.blocking_lock();
-                                if let Some(gen) = gen_guard.as_mut() {
-                                    // 🌟 [PREFIX CACHING 적용] Base Snapshot을 복원하고 가변 영역(변동되는 지시어)만 추가 추론합니다.
-                                    gen.set_cache_snapshot(base_cache_clone);
-                                    
-                                    let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        // 전체 프롬프트가 아닌, 꼬리표(variable_suffix)만 넘깁니다!
-                                        // 🌟 [개선] 추출 단어 길이를 고려하여 max_tokens를 1024에서 256으로 축소하여 오버헤드를 방지합니다.
-                                        gen.generate(&variable_suffix, 128, &dev, Some(cancel_clone))
-                                    }));
-                                    
-                                    match panic_res {
-                                        Ok(gen_res) => gen_res.map_err(|e| anyhow::anyhow!("Granite Inference failed: {}", e)),
-                                        Err(_) => Err(anyhow::anyhow!("Granite native tensor operation panicked inside CUDA/Candle architecture layer.")),
-                                    }
-                                } else {
-                                    Err(anyhow::anyhow!("Granite Generator is missing"))
-                                }
-                            }).await.unwrap_or_else(|e| {
-                                Err(anyhow::anyhow!("Spawn blocking failed: {}", e))
-                            });
-
-                            // 🌟 [DIAGNOSTIC LOGGING] 추론 과정에서 발생하는 내부 스레드 패닉이나 에러 트랙을 
-                            // 삼켜버리지 않고 콘솔 및 터미널 화면에 즉각 전사하도록 예외 로깅 제어 라인을 보강합니다.
-                            let res_mask = match res_mask {
-                                Ok(output) => {
-                                    if output.trim().is_empty() {
-                                        emit_term("⚠️ [WARNING] Granite Model generated an empty string response.");
-                                    }
-                                    output
-                                },
-                                Err(err) => {
-                                    emit_term(&format!("🚨 [CRITICAL ERROR] Granite Inference Task crashed: {}", err));
-                                    return Err(err);
-                                }
-                            };
-
-                            if !model.is_cpu_mode {
-                                let dev = model.device_config.device.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    if dev.is_cuda() { let _ = dev.synchronize(); }
-                                }).await;
-                            }
-
-                            let raw_parsed = crate::parsing::parse_json_from_llm(&res_mask);
-                            let parsed = raw_parsed.get("arguments").cloned().unwrap_or(raw_parsed);
-                            
-                            let mut extracted_val = parsed.get(&target_name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-                            
-                            // 🌟 [추가] LLM이 target_name(예: korean_inc) 키에 빈 값을 주고 base_target(예: company) 키에만 정답을 담아 반환하는 경우를 방어하기 위한 Fallback 로직
-                            if extracted_val.is_empty() {
-                                extracted_val = parsed.get(&base_target.to_lowercase()).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-                            }
-
-                            // 🌟 [CRITICAL FIX] 요청하신 대로, 배열이 아닌 1:1 매칭된 NMS 단일값을 출력하며 로그 디자인을 명시적으로 반영합니다!
-                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 (NMS 👑 [WINNER/EXPANDED]: '{}', 추출단어: '{}') - 응답 길이: {}, 결과: {}", base_target, input_keyword, extracted_val, res_mask.len(), res_mask));
+                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 (LLM 우회 - NMS 👑 [WINNER/EXPANDED] 직접 채택: '{}')", base_target, extracted_val));
 
                             // 🌟 [CRITICAL FIX] 빈 값 반환 시 재시도 없이 해당 트랙을 즉시 종료합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
@@ -2352,7 +2217,7 @@ async fn process_task(
 
                             // 🌟 [추가] 할루시네이션(환각)으로 이미 판명된 단어라면 즉시 스킵 (동의어 트랙 등에서 재등장 방지)
                             if hallucinated_candidates.contains(&extracted_val) {
-                                emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 할루시네이션으로 판명된 단어입니다. 스킵합니다: '{}'\n{}", extracted_val, res_mask));
+                                emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 할루시네이션으로 판명된 단어입니다. 스킵합니다: '{}'", extracted_val));
                                 break;
                             }
 
