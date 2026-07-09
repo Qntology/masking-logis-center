@@ -1291,13 +1291,12 @@ async fn process_task(
                         }).collect::<Vec<_>>().join("\n") // 🌟 훼손되었던 줄바꿈(\n) 완벽 복구
                     };
 
-                    masked_text = clean_text_fn(&masked_text);
-                    doc_title = clean_text_fn(&doc_title);
-                    doc_desc = clean_text_fn(&doc_desc);
+                    // 🌟 [CRITICAL FIX] masked_text의 들여쓰기 구조를 영구 파괴하던 덮어쓰기를 제거하고, 평가용 텍스트만 별도 생성합니다.
+                    let eval_masked_text = clean_text_fn(&masked_text);
 
-                    // 🌟 1차 패스용 라인 분할 (masked_text 기반)
+                    // 🌟 1차 패스용 라인 분할 (평가용 텍스트 기반)
                     let structural_tags = ["html", "body", "div", "p", "span", "thead", "tbody", "tr", "td", "th", "table", "ul", "li", "a", "img", "br", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "em", "b", "i", "u", "s", "nav", "header", "footer", "main", "section", "article", "aside", "figure", "figcaption", "button", "input", "form", "label", "select", "textarea", "option", "iframe", "script", "style", "meta", "link", "head", "title", "svg", "path", "dl", "ol", "dd", "dt"];
-                    let mut lines: Vec<String> = masked_text.lines()
+                    let mut lines: Vec<String> = eval_masked_text.lines()
                         .map(|s| s.trim().trim_start_matches('|').trim().to_string())
                         .filter(|s| {
                             let s_lower = s.to_lowercase();
@@ -1310,7 +1309,7 @@ async fn process_task(
                     // =====================================================================
                     emit_term("[EXTRACTION] ⚔️ [PASS 2] 텍스트 단위 NMS 배틀 및 전체 항목 추출 시작...");
                     
-                    lines = masked_text.lines()
+                    lines = eval_masked_text.lines()
                         .map(|s| s.trim().trim_start_matches('|').trim().to_string())
                         .filter(|s| {
                             let s_lower = s.to_lowercase();
@@ -2291,12 +2290,12 @@ async fn process_task(
                         if !specific_candidate.is_empty() {
                             let mut cand_exists = matched_context.contains(&specific_candidate) || masked_text.contains(&specific_candidate) || doc_title.contains(&specific_candidate) || doc_desc.contains(&specific_candidate);
                             
-                            // 띄어쓰기 변형을 고려한 교차 검증
+                            // 띄어쓰기 및 특수기호 변형을 고려한 교차 검증
                             if !cand_exists && specific_candidate.chars().count() >= 2 {
-                                let no_space_cand: String = specific_candidate.chars().filter(|c| !c.is_whitespace()).collect();
+                                let no_space_cand: String = specific_candidate.chars().filter(|c| c.is_alphanumeric()).collect();
                                 if no_space_cand.len() >= 2 && no_space_cand.len() <= 100 {
                                     let escaped_chars: Vec<String> = no_space_cand.chars().map(|c| regex::escape(&c.to_string())).collect();
-                                    let regex_pattern = escaped_chars.join(r"\s*");
+                                    let regex_pattern = escaped_chars.join(r"[^\p{L}\p{N}_]*");
                                     if let Ok(re) = regex::Regex::new(&regex_pattern) {
                                         if re.is_match(&matched_context) || re.is_match(&masked_text) || re.is_match(&doc_title) || re.is_match(&doc_desc) {
                                             cand_exists = true;
@@ -2382,7 +2381,9 @@ async fn process_task(
                             let mut nlp_rejected = false;
                             let mut already_masked_skip = false;
                             if let Some(stanza) = &mut stanza_pipeline {
-                                if !extracted_val.is_empty() {
+                                // 🌟 [CRITICAL FIX] 이미 Stage 2.5에서 NLP 검증을 통과한 specific_candidate와 동일하다면, 
+                                // 마커([___REDACTED_...])로 인해 문맥이 오염된 상태에서 Stanza가 동사(VERB)로 오판하는 것을 막기 위해 중복 검증을 안전하게 건너뜁니다!
+                                if !extracted_val.is_empty() && extracted_val != specific_candidate {
                                     // 🌟 [원본 보존] 문장 전체 검색을 위해 정제 전의 원본 타겟을 보존합니다.
                                     let original_ext = extracted_val.clone();
 
@@ -2756,8 +2757,13 @@ async fn process_task(
                                 for masked in &fully_masked_candidates {
                                     let no_space_masked: String = masked.chars().filter(|c| !c.is_whitespace()).collect();
                                     if no_space_masked.contains(&no_space_ext) || no_space_ext.contains(&no_space_masked) {
-                                        is_zombie = true;
-                                        break;
+                                        // 🌟 [CRITICAL FIX] 본문(masked_text)에 해당 단어가 독립적으로 살아있다면 좀비(할루시네이션)로 취급하지 않고 마스킹 기회를 줍니다!
+                                        if masked_text.contains(&extracted_val) {
+                                            is_zombie = false;
+                                        } else {
+                                            is_zombie = true;
+                                            break;
+                                        }
                                     }
                                 }
 
@@ -2795,12 +2801,12 @@ async fn process_task(
                             // 🌟 [CRITICAL FIX] 추출단어가 만약에 PUG CONTENT에 있는지 없는지 먼저 체크 (ctrl + f)
                             let mut early_exists = matched_context.contains(&extracted_val) || target_text.contains(&extracted_val) || doc_title.contains(&extracted_val) || doc_desc.contains(&extracted_val);
 
-                            // 띄어쓰기 변형으로 인한 오탐지를 막기 위해 Space-Agnostic 보정을 선행
+                            // 띄어쓰기 및 기호 변형으로 인한 오탐지를 막기 위해 Space-Agnostic 보정을 선행
                             if !early_exists && extracted_val.chars().count() >= 2 {
-                                let no_space_val: String = extracted_val.chars().filter(|c| !c.is_whitespace()).collect();
+                                let no_space_val: String = extracted_val.chars().filter(|c| c.is_alphanumeric()).collect();
                                 if no_space_val.len() >= 2 && no_space_val.len() <= 100 {
                                     let escaped_chars: Vec<String> = no_space_val.chars().map(|c| regex::escape(&c.to_string())).collect();
-                                    let regex_pattern = escaped_chars.join(r"\s*");
+                                    let regex_pattern = escaped_chars.join(r"[^\p{L}\p{N}_]*");
                                     if let Ok(re) = regex::Regex::new(&regex_pattern) {
                                         if let Some(mat) = re.find(&target_text).or_else(|| re.find(&matched_context)).or_else(|| re.find(&doc_title)) {
                                             extracted_val = mat.as_str().to_string();
@@ -2809,7 +2815,7 @@ async fn process_task(
                                     }
                                 }
                             }
-
+                            
                             // 못찾으면 환각 장부에 등록하고 즉시 스킵
                             if !early_exists {
                                 emit_term(&format!("[DEBUG] 추출단어가 PUG CONTENT에 존재하지 않습니다(contains 실패). 할루시네이션으로 즉시 차단: '{}'", extracted_val));
@@ -3042,19 +3048,19 @@ async fn process_task(
                                         }
                                     }
                                 } else {
-                                    // 🌟 [일반 텍스트 보정] 공백을 완전히 무시한 정규식을 동적 생성하여 원본 텍스트에 존재하는 형태(띄어쓰기 포함)를 복원합니다.
-                                    let no_space_val: String = extracted_val.chars().filter(|c| !c.is_whitespace()).collect();
+                                    // 🌟 [일반 텍스트 보정] 공백 및 특수문자를 완전히 무시한 정규식을 동적 생성하여 원본 텍스트에 존재하는 형태(기호 포함)를 복원합니다.
+                                    let no_space_val: String = extracted_val.chars().filter(|c| c.is_alphanumeric()).collect();
                                     
                                     // 정규식 엔진의 부하를 막기 위해 글자 수가 2글자 이상 100글자 이하일 때만 수행
                                     if no_space_val.len() >= 2 && no_space_val.len() <= 100 {
-                                        // 정규식 특수문자 이스케이프 후 띄어쓰기 허용 패턴 조립 (예: 조\s*세\s*무\s*리\s*뉴)
+                                        // 정규식 특수문자 이스케이프 후 공백/특수기호 허용 패턴 조립
                                         let escaped_chars: Vec<String> = no_space_val.chars().map(|c| regex::escape(&c.to_string())).collect();
-                                        let regex_pattern = escaped_chars.join(r"\s*");
+                                        let regex_pattern = escaped_chars.join(r"[^\p{L}\p{N}_]*");
                                         
                                         if let Ok(re) = regex::Regex::new(&regex_pattern) {
                                             // 본문, 제목, 압축 문맥 순으로 탐색하여 원래 형태 복원 시도
                                             if let Some(mat) = re.find(&masked_text).or_else(|| re.find(&matched_context)).or_else(|| re.find(&doc_title)) {
-                                                emit_term(&format!("[DEBUG] 띄어쓰기 보정 성공: '{}' -> '{}'", extracted_val, mat.as_str()));
+                                                emit_term(&format!("[DEBUG] 특수기호/띄어쓰기 보정 성공: '{}' -> '{}'", extracted_val, mat.as_str()));
                                                 extracted_val = mat.as_str().to_string();
                                             }
                                         }
@@ -3313,10 +3319,131 @@ async fn process_task(
                             // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 해시 기반 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
                             let upper_key = base_target.to_uppercase(); 
-                            
                             let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
-                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                             
+                            // 🌟 [CRITICAL FIX] 추출된 단어(extracted_val)가 본문에는 존재하지만, 
+                            // 제목(doc_title)이나 요약(doc_desc)에는 조사/수식어가 포함된 전체 형태가 아닌 
+                            // 핵심 명사(예: "이동건")만 단독으로 존재하여 마스킹이 누락되는 현상을 방지합니다.
+                            // 문자열 강제 절단(String Trimming) 없이, 해당 단어의 모든 문자열 조합(Sub-strings) 중 
+                            // 대상 필드에 존재하는 단어를 찾아 벡터 점수로 검증하여 가장 강력한 핵심 단어를 구출합니다.
+                            let chars_vec: Vec<char> = extracted_val.chars().collect();
+                            if chars_vec.len() >= 2 {
+                                let lang_prefix = target_name.split('_').next().unwrap_or("english");
+                                let prefixed_b_val = target_bias.split(',').map(|s| format!("{} {}", lang_prefix, s.trim())).collect::<Vec<_>>().join(", ");
+                                let prefixed_p_val = target_prejudice.split(',').map(|s| format!("{} {}", lang_prefix, s.trim())).collect::<Vec<_>>().join(", ");
+                                let bias_emb = model.get_embedding(prefixed_b_val.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                let prej_emb = model.get_embedding(prefixed_p_val.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+
+                                // Title 검증
+                                if !doc_title.contains(&extracted_val) {
+                                    let mut best_chunk = String::new();
+                                    let mut best_score = 0.3_f32; 
+                                    for start in 0..chars_vec.len() {
+                                        for end in (start + 2)..=chars_vec.len() {
+                                            let chunk_text: String = chars_vec[start..end].iter().collect();
+                                            let chunk_trim = chunk_text.trim().to_string(); 
+                                            
+                                            if chunk_trim.chars().count() >= 2 && doc_title.contains(&chunk_trim) {
+                                                let p_emb = model.get_embedding(chunk_trim.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                                let b_score = cosine_similarity(&p_emb, &bias_emb);
+                                                let p_score = cosine_similarity(&p_emb, &prej_emb);
+                                                let v_sim = cosine_similarity(&p_emb, &verb_emb);
+                                                
+                                                let word_count = chunk_trim.split_whitespace().count();
+                                                let beta = if word_count <= 2 { 0.05 } else { 0.10 };
+                                                let verb_penalty = v_sim * beta;
+                                                let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
+                                                
+                                                let mut t_bonus = 0.0;
+                                                let t_sim = cosine_similarity(&p_emb, &title_emb);
+                                                if t_sim > 0.0 { t_bonus = t_sim * 0.15; }
+                                                
+                                                let score = b_score - (p_score * penalty_weight) - verb_penalty + t_bonus;
+                                                if score > best_score {
+                                                    best_score = score;
+                                                    best_chunk = chunk_trim;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !best_chunk.is_empty() {
+                                        emit_term(&format!("    👑 [CROSS-FIELD RESCUE] 제목(Title)에 전체 문자열이 없으나, 핵심 단어 '{}' 발견 (Score: {:.4}) -> 강제 마스킹", best_chunk, best_score));
+                                        let c_mnemonic = crate::parsing::generate_mnemonic();
+                                        let c_final_replacement = format!("[{}: {}]", upper_key, c_mnemonic);
+                                        let c_skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+                                        
+                                        doc_title = doc_title.replace(&best_chunk, &c_skip_marker);
+                                        skip_map.insert(c_skip_marker.clone(), c_final_replacement.clone());
+                                        replacement_history.push((best_chunk.clone(), c_skip_marker.clone()));
+                                        current_target_found.push(best_chunk.clone());
+                                        domain_history.push((target_name.to_string(), best_chunk.clone()));
+                                        skip_counter += 1;
+                                        
+                                        all_matches.push(json!({
+                                            "name": upper_key,
+                                            "value": best_chunk,
+                                            "mnemonic": c_mnemonic
+                                        }));
+                                    }
+                                }
+
+                                // Desc 검증
+                                if !doc_desc.contains(&extracted_val) {
+                                    let mut best_chunk = String::new();
+                                    let mut best_score = 0.3_f32; 
+                                    for start in 0..chars_vec.len() {
+                                        for end in (start + 2)..=chars_vec.len() {
+                                            let chunk_text: String = chars_vec[start..end].iter().collect();
+                                            let chunk_trim = chunk_text.trim().to_string(); 
+                                            
+                                            if chunk_trim.chars().count() >= 2 && doc_desc.contains(&chunk_trim) {
+                                                let p_emb = model.get_embedding(chunk_trim.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                                let b_score = cosine_similarity(&p_emb, &bias_emb);
+                                                let p_score = cosine_similarity(&p_emb, &prej_emb);
+                                                let v_sim = cosine_similarity(&p_emb, &verb_emb);
+                                                
+                                                let word_count = chunk_trim.split_whitespace().count();
+                                                let beta = if word_count <= 2 { 0.05 } else { 0.10 };
+                                                let verb_penalty = v_sim * beta;
+                                                let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
+                                                
+                                                let mut t_bonus = 0.0;
+                                                let t_sim = cosine_similarity(&p_emb, &title_emb);
+                                                if t_sim > 0.0 { t_bonus = t_sim * 0.15; }
+                                                
+                                                let score = b_score - (p_score * penalty_weight) - verb_penalty + t_bonus;
+                                                if score > best_score {
+                                                    best_score = score;
+                                                    best_chunk = chunk_trim;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !best_chunk.is_empty() {
+                                        emit_term(&format!("    👑 [CROSS-FIELD RESCUE] 요약(Desc)에 전체 문자열이 없으나, 핵심 단어 '{}' 발견 (Score: {:.4}) -> 강제 마스킹", best_chunk, best_score));
+                                        let c_mnemonic = crate::parsing::generate_mnemonic();
+                                        let c_final_replacement = format!("[{}: {}]", upper_key, c_mnemonic);
+                                        let c_skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+                                        
+                                        doc_desc = doc_desc.replace(&best_chunk, &c_skip_marker);
+                                        skip_map.insert(c_skip_marker.clone(), c_final_replacement.clone());
+                                        replacement_history.push((best_chunk.clone(), c_skip_marker.clone()));
+                                        current_target_found.push(best_chunk.clone());
+                                        domain_history.push((target_name.to_string(), best_chunk.clone()));
+                                        skip_counter += 1;
+                                        
+                                        all_matches.push(json!({
+                                            "name": upper_key,
+                                            "value": best_chunk,
+                                            "mnemonic": c_mnemonic
+                                        }));
+                                    }
+                                }
+                            }
+
+                            // 🌟 안전해진 상태에서 메인 마커 생성 (Cross-Field Rescue가 skip_counter를 업데이트했을 수 있음)
+                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+
                             // 🌟 [Subsumption 2단계] 추출된 거대 덩어리 내부에 이미 치환된 소형 마커가 존재하는지 확인하고, 
                             // 현재 masked_text에 반영된 형태(Hybrid)를 역산하여 덮어쓸 준비를 합니다.
                             let mut hybrid_val = extracted_val.clone();
@@ -3330,13 +3457,28 @@ async fn process_task(
 
                             // 🌟 [Subsumption 3단계] 흡수된 구형 소형 마커들을 장부(all_matches)에서 제거하여 새로운 범주(예: NAME)로 완벽히 세대교체합니다.
                             if !subsumed_markers.is_empty() {
-                                emit_term(&format!("    🔄 [SUBSUMPTION] 거대 덩어리 발견! 기존 마커 {}개를 '{}' ({}) 속성으로 흡수 병합합니다.", subsumed_markers.len(), extracted_val, upper_key));
+                                emit_term(&format!("    🔄 [SUBSUMPTION] 거대 덩어리 발견! 기존 마커 {}개를 '{}' ({}) 속성으로 흡수 병합 평가합니다.", subsumed_markers.len(), extracted_val, upper_key));
                                 all_matches.retain(|match_val| {
                                     if let Some(obj) = match_val.as_object() {
                                         if let Some(m_val) = obj.get("value").and_then(|v| v.as_str()) {
-                                            // 만약 all_matches에 들어있는 원본 값이 현재 거대 덩어리 안에 포함된다면 파기
                                             if extracted_val.contains(m_val) && m_val != extracted_val && m_val.chars().count() >= 2 {
-                                                return false;
+                                                // 🌟 [CRITICAL FIX] 거대 덩어리에 흡수되었더라도, 제목이나 본문 다른 곳에 소형 마커가 독립적으로 살아있다면 장부에서 삭제하지 않습니다!
+                                                if let Some(m_mnemonic) = obj.get("mnemonic").and_then(|v| v.as_str()) {
+                                                    let mut is_still_alive = false;
+                                                    for (s_marker, s_repl) in skip_map.iter() {
+                                                        if s_repl.contains(m_mnemonic) {
+                                                            if masked_text.contains(s_marker) || doc_title.contains(s_marker) || doc_desc.contains(s_marker) {
+                                                                is_still_alive = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    if is_still_alive {
+                                                        emit_term(&format!("      -> 소형 마커 '{}'는 다른 필드(제목 등)에 독립적으로 살아있어 흡수를 면제합니다.", m_val));
+                                                        return true; // Keep it!
+                                                    }
+                                                }
+                                                return false; // Safely subsume
                                             }
                                         }
                                     }

@@ -349,7 +349,16 @@ async fn start_file_drag(
                         // 🌟 [추가] 이미지 타입 판별
                         let is_image = doc.r#type == "draft" && (doc.text.contains("[Image]") || doc.json_data.contains("file://"));
 
-                        if is_image {
+                        let masked_text_owned = json_val.get("masked")
+                            .and_then(|m| m.get("text"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        if let Some(masked_text) = masked_text_owned {
+                            if let Some(obj) = json_val.as_object_mut() {
+                                obj.insert("yaml".to_string(), json!(masked_text));
+                            }
+                        } else if is_image {
                             // 🌟 [CRITICAL FIX 1] 마스킹이 안 된 이미지는 포함하지 않고 건너뜀
                             if !doc.is_masked { continue; }
 
