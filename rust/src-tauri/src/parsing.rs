@@ -960,6 +960,37 @@ Word: {WORD}
 }
 
 
+pub fn build_nms_resolution_prompt(context: &str, candidates: &Vec<String>) -> (String, String) {
+    let system_template = r###"[INSTRUCTION]
+- You are an AI data extraction judge. You are given a context sentence and a list of overlapping text chunks extracted from it.
+- Your goal is to select the single best chunk that represents a clear, minimal, and distinct proper noun or entity (e.g., person name, company, organization, location).
+- Reject any chunk that contains unnecessary verbs, adjectives, idioms, or descriptive phrases.
+- You MUST output your decision as a JSON object containing the index number of the best chunk.
+
+[CRITERIA]
+Context: {CONTEXT}"###.to_string();
+
+    let mut candidates_str = String::new();
+    for (i, cand) in candidates.iter().enumerate() {
+        candidates_str.push_str(&format!("{}. {}\n", i + 1, cand));
+    }
+
+    let user_template = r###"[TASK] Evaluate the candidates and select the single best entity chunk.
+
+[CANDIDATES]
+{CANDIDATES}
+[OUTPUT FORMAT]
+{
+  "best_index": Integer (1 to N)
+}
+
+[ACTION] RETURN JSON ONLY. NO EXPLANATION. NO THINKING."###.to_string();
+
+    let system_prompt = system_template.replace("{CONTEXT}", context);
+    let user_prompt = user_template.replace("{CANDIDATES}", &candidates_str);
+
+    (system_prompt, user_prompt)
+}
 
 pub fn build_extraction_prompt(title: &str, pug_content: &str, target_name: &str, target_item: &str, target_bias: &str, target_prejudice: &str, already_found_str: &str, not_found_str: &str, candidates_str: &str, local_language: &str, loanword_guide_str: &str, input_keyword: &str) -> (String, String) {
     let system_template = r###"[PUG CONTENT]

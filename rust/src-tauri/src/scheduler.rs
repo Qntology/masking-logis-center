@@ -923,6 +923,9 @@ async fn process_task(
         };
 
         emit_term("[PROCESS] Starting batch masking for selected documents...");
+
+        // 🌟 [CRITICAL FIX] Granite 모델을 매번 불러오지 않기 위해 마스킹 작업 전체 진입 전 최초 1회만 로드합니다!
+        model.ensure_granite().await?;
         
         let uuids = task_data.get("uuids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         if uuids.is_empty() { return Ok(()); }
@@ -1074,14 +1077,7 @@ async fn process_task(
                     // 🌟 [OOM 원인 분석용 로그] 모델에 투입되기 직전 전체 컨텍스트의 문자열 길이를 터미널에 출력합니다.
                     emit_term(&format!("[DEBUG-OOM] 현재 투입되는 컨텍스트 사이즈(문자 수): {}. 선택된 모델: {:?}", target_text.len(), target_model_size));
 
-                    // 🌟 [CRITICAL FIX] Granite 모델 백그라운드 로딩 트리거!
-                    // (현재 Stage 3 LLM 추론을 우회 중이므로 VRAM 누수 방지를 위해 주석 처리합니다)
-                    // let bg_model = model.clone();
-                    // let bg_cancel = cancellation_token.clone();
-                    // let llm_load_handle = tokio::spawn(async move {
-                    //     if bg_cancel.load(Ordering::Relaxed) { return; }
-                    //     let _ = bg_model.ensure_granite().await;
-                    // });
+                    // 🌟 Granite 모델 로딩은 상단 작업 진입부 최초 1회 로드로 이동되었습니다.
 
                     // 🌟 16개의 마스킹 타겟 항목에 대해 (JSON_키, 추출_설명) 튜플 형태로 분리합니다.
                     let target_items = vec![
@@ -1170,12 +1166,9 @@ async fn process_task(
                     
                     // =====================================================================
                     // 🌟 [CRITICAL FIX] 순차적 로딩 강제 (Concurrency Deadlock 원천 차단)
-                    // LLM(Granite) 백그라운드 로딩과 ONNX(Stanza) 컴파일이 동시에 일어나면 
-                    // 네이티브 스레드 풀 경합(Thread Pool Contention)이 발생해 영구적인 데드락에 빠집니다.
-                    // 무거운 LLM 로딩이 완전히 끝날 때까지 먼저 대기한 후, 안전하게 ONNX를 로드합니다!
+                    // LLM(Granite) 백그라운드 로딩은 상단 최초 1회 로드로 이동되었으므로 즉시 ONNX를 로드합니다.
                     // =====================================================================
-                    emit_term("[EXTRACTION] 🧠 LLM 로딩 동기화 대기 중... (현재 LLM 우회 중으로 스킵)");
-                    // let _ = llm_load_handle.await;
+                    emit_term("[EXTRACTION] 🧠 LLM 로딩 완료 확인. ONNX 로딩 진입...");
                     
                     // 🌟 [추가] LLM 모델 로딩 실패 시 상세 로그(에러 스택)를 UI 터미널에 출력합니다.
                     // if let Err(e) = model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await {
@@ -1532,38 +1525,90 @@ async fn process_task(
                         eval_spans.push(ChunkSpan { score: final_context_score, ..target.clone() });
                     }
 
-                    // 🌟 4. NMS BATTLE (Pass 3) - 오버랩 충돌 해결 (승자 독식)
-                    emit_term("  ⚔️ [PASS 3: NMS BATTLE] Resolving Overlaps across all targets...");
+                    // 🌟 4. NMS BATTLE (Pass 3) - 오버랩 충돌 해결 (LLM Granite 기반)
+                    emit_term("  ⚔️ [PASS 3: NMS BATTLE] Resolving Overlaps across all targets using LLM Granite...");
                     eval_spans.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                    
                     let mut final_spans: Vec<ChunkSpan> = Vec::new();
+                    let mut remaining_spans = eval_spans.clone();
 
-                    for span in eval_spans {
-                        let mut is_overlapped = false;
-                        for selected in &final_spans {
-                            if span.line_idx == selected.line_idx {
-                                if span.start < selected.end && span.end > selected.start {
-                                    is_overlapped = true;
-                                    break;
+                    while !remaining_spans.is_empty() {
+                        let current = remaining_spans.remove(0); // 가장 점수 높은 조각
+                        let mut overlaps = Vec::new();
+                        let mut next_remaining = Vec::new();
+
+                        for span in remaining_spans {
+                            if current.line_idx == span.line_idx && current.start < span.end && current.end > span.start {
+                                overlaps.push(span);
+                            } else {
+                                next_remaining.push(span);
+                            }
+                        }
+
+                        if overlaps.is_empty() {
+                            for &t_idx in &current.target_indices {
+                                let (context_name, _, _) = &dynamic_target_items[t_idx];
+                                emit_term(&format!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", current.text, context_name.replace("_", " "), current.score));
+                            }
+                            final_spans.push(current);
+                        } else {
+                            let mut candidates = vec![current.clone()];
+                            candidates.extend(overlaps.clone());
+                            
+                            let mut unique_texts = Vec::new();
+                            let mut unique_cands = Vec::new();
+                            for cand in &candidates {
+                                if !unique_texts.contains(&cand.text) {
+                                    unique_texts.push(cand.text.clone());
+                                    unique_cands.push(cand.clone());
+                                } else {
+                                    if let Some(pos) = unique_texts.iter().position(|x| x == &cand.text) {
+                                        for &idx in &cand.target_indices {
+                                            if !unique_cands[pos].target_indices.contains(&idx) {
+                                                unique_cands[pos].target_indices.push(idx);
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                        }
-                        
-                        if !is_overlapped {
-                            for &t_idx in &span.target_indices {
-                                // 🌟 [로그 가시성 개선] 축약된 base_target 대신 다국어 정보가 결합된 context_name을 가져옵니다.
-                                let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                let display_name = context_name.replace("_", " ");
-                                emit_term(&format!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", span.text, display_name, span.score));
+
+                            if unique_cands.len() == 1 {
+                                let winner = unique_cands[0].clone();
+                                for &t_idx in &winner.target_indices {
+                                    let (context_name, _, _) = &dynamic_target_items[t_idx];
+                                    emit_term(&format!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", winner.text, context_name.replace("_", " "), winner.score));
+                                }
+                                final_spans.push(winner);
+                            } else {
+                                emit_term(&format!("    ⚖️ [SCORE NMS] 중첩 충돌 발생! 벡터 점수 기반 판별: {:?}", unique_texts));
+                                
+                                // 점수가 가장 높은 후보를 승자로 선택 (동점일 경우 텍스트 길이가 긴 것을 선호)
+                                let mut sorted_cands = unique_cands.clone();
+                                sorted_cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(b.text.len().cmp(&a.text.len())));
+                                
+                                let winner = sorted_cands[0].clone();
+                                // winner가 원래 unique_cands에서 몇 번째인지 찾기 (로그 출력을 위해)
+                                let winner_idx = unique_cands.iter().position(|x| x.text == winner.text).unwrap_or(0);
+                                
+                                for &t_idx in &winner.target_indices {
+                                    let (context_name, _, _) = &dynamic_target_items[t_idx];
+                                    emit_term(&format!("    👑 [WINNER-SCORE] '{}' -> {} (Score: {:.4})", winner.text, context_name.replace("_", " "), winner.score));
+                                }
+                                
+                                for (i, cand) in unique_cands.iter().enumerate() {
+                                    if i != winner_idx {
+                                        for &t_idx in &cand.target_indices {
+                                            let (context_name, _, _) = &dynamic_target_items[t_idx];
+                                            emit_term(&format!("    💀 [DEFEAT-SCORE] '{}' -> {} (Rejected, Score: {:.4})", cand.text, context_name.replace("_", " "), cand.score));
+                                        }
+                                    }
+                                }
+                                
+                                final_spans.push(winner);
                             }
-                            final_spans.push(span);
-                        } else {
-                            for &t_idx in &span.target_indices {
-                                // 🌟 [로그 가시성 개선] 패배(Absorbed) 로그에도 어떤 언어 트랙에서 충돌이 터졌는지 명확히 명시합니다.
-                                let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                let display_name = context_name.replace("_", " ");
-                                emit_term(&format!("    💀 [DEFEAT] '{}' -> {} (Absorbed: {:.4})", span.text, display_name, span.score));
-                            }
                         }
+
+                        remaining_spans = next_remaining;
                     }
 
                     // 🌟 [추가] 4.5 인접 청크 동적 스팬 확장 (Dynamic Span Expansion)
@@ -1700,47 +1745,31 @@ async fn process_task(
                     // 🌟 [추가] 4.6 EXPANDED 결합 조각과 기존 조각 간의 중복(Overlap) 제거 (2차 NMS)
                     emit_term("  🧹 [PASS 3.6: EXPANDED NMS CLEANUP] Resolving Overlaps between Expanded and Original chunks...");
                     
-                    // 1) 결합 파생 조각(EXPANDED)들끼리 자체 NMS를 진행하여, 겹치는 결합 조각 중 가장 길고 점수가 높은 것을 우선 확정합니다.
-                    expanded_only_spans.sort_by(|a, b| {
-                        let len_a = a.end - a.start;
-                        let len_b = b.end - b.start;
-                        len_b.cmp(&len_a).then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
-                    });
+                    let mut all_pool = final_spans.clone();
+                    all_pool.extend(expanded_only_spans);
 
-                    let mut survived_expanded: Vec<ChunkSpan> = Vec::new();
-                    for span in expanded_only_spans {
+                    // 점수 기준 내림차순 정렬 (동점이면 텍스트 길이가 긴 것 우선)
+                    all_pool.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(b.text.len().cmp(&a.text.len())));
+
+                    let mut cleaned_spans: Vec<ChunkSpan> = Vec::new();
+
+                    for cand in all_pool {
                         let mut is_overlapped = false;
-                        for selected in &survived_expanded {
-                            if span.line_idx == selected.line_idx {
-                                if span.start < selected.end && span.end > selected.start {
+                        for selected in &cleaned_spans {
+                            if cand.line_idx == selected.line_idx {
+                                if cand.start < selected.end && cand.end > selected.start {
                                     is_overlapped = true;
                                     break;
                                 }
                             }
                         }
-                        if !is_overlapped {
-                            survived_expanded.push(span);
-                        }
-                    }
 
-                    // 2) 살아남은 결합 조각을 1순위로 두고, 기존 👑 단일 조각 중 겹치는 것들은 모조리 강제 흡수(제거)합니다.
-                    let mut cleaned_spans: Vec<ChunkSpan> = survived_expanded.clone();
-                    for original_span in final_spans {
-                        let mut is_overlapped = false;
-                        for expanded_span in &survived_expanded {
-                            if original_span.line_idx == expanded_span.line_idx {
-                                if original_span.start < expanded_span.end && original_span.end > expanded_span.start {
-                                    is_overlapped = true;
-                                    break;
-                                }
-                            }
-                        }
-                        
                         if !is_overlapped {
-                            // 🌟 결합 조각과 전혀 겹치지 않는 독립적인 자투리 조각은 보존합니다.
-                            cleaned_spans.push(original_span);
+                            cleaned_spans.push(cand);
                         } else {
-                            emit_term(&format!("    🗑️ [CLEANUP] 기존 👑 조각 제거됨 (EXPANDED 결합 조각에 완벽히 흡수): '{}'", original_span.text));
+                            if let Some(overlap_target) = cleaned_spans.iter().find(|s| s.line_idx == cand.line_idx && cand.start < s.end && cand.end > s.start) {
+                                emit_term(&format!("    🗑️ [CLEANUP] 조각 기각됨 (중첩 흡수): '{}' (Score: {:.4}) -> 승자: '{}' (Score: {:.4})", cand.text, cand.score, overlap_target.text, overlap_target.score));
+                            }
                         }
                     }
                     
@@ -2012,11 +2041,30 @@ async fn process_task(
                                 }
                                 
                                 if ext_words_string.is_empty() {
-                                    ext_words_string = text_to_analyze.split_whitespace().map(|s| s.to_string()).collect();
-                                    let mut curr = 0;
-                                    for w in &ext_words_string {
-                                        word_spans.push((w.clone(), curr, curr + w.chars().count()));
-                                        curr += w.chars().count() + 1; 
+                                    ext_words_string = Vec::new();
+                                    let chars: Vec<char> = text_to_analyze.chars().collect();
+                                    let mut in_word = false;
+                                    let mut word_start = 0;
+                                    let mut current_word = String::new();
+                                    for (i, &c) in chars.iter().enumerate() {
+                                        if c.is_whitespace() {
+                                            if in_word {
+                                                word_spans.push((current_word.clone(), word_start, i));
+                                                ext_words_string.push(current_word.clone());
+                                                in_word = false;
+                                                current_word.clear();
+                                            }
+                                        } else {
+                                            if !in_word {
+                                                in_word = true;
+                                                word_start = i;
+                                            }
+                                            current_word.push(c);
+                                        }
+                                    }
+                                    if in_word {
+                                        word_spans.push((current_word.clone(), word_start, chars.len()));
+                                        ext_words_string.push(current_word.clone());
                                     }
                                 }
                                 
@@ -2433,13 +2481,32 @@ async fn process_task(
                                         }
                                         
                                         if ext_words_string.is_empty() {
-                                            ext_words_string = text_to_analyze.split_whitespace().map(|s| s.to_string()).collect();
-                                            let mut curr = 0;
-                                            for w in &ext_words_string {
-                                                word_spans.push((w.clone(), curr, curr + w.chars().count()));
-                                                curr += w.chars().count() + 1; 
+                                            ext_words_string = Vec::new();
+                                            let chars: Vec<char> = text_to_analyze.chars().collect();
+                                            let mut in_word = false;
+                                            let mut word_start = 0;
+                                            let mut current_word = String::new();
+                                            for (i, &c) in chars.iter().enumerate() {
+                                                if c.is_whitespace() {
+                                                    if in_word {
+                                                        word_spans.push((current_word.clone(), word_start, i));
+                                                        ext_words_string.push(current_word.clone());
+                                                        in_word = false;
+                                                        current_word.clear();
+                                                    }
+                                        } else {
+                                            if !in_word {
+                                                in_word = true;
+                                                word_start = i;
                                             }
+                                            current_word.push(c);
                                         }
+                                    }
+                                    if in_word {
+                                        word_spans.push((current_word.clone(), word_start, chars.len()));
+                                        ext_words_string.push(current_word.clone());
+                                    }
+                                }
                                         
                                         let ext_words: Vec<&str> = ext_words_string.iter().map(|s| s.as_str()).collect();
 
@@ -3075,24 +3142,64 @@ async fn process_task(
                                     }
                                 }
 
-                                // 🌟 [NMS BATTLE] 추출된 서브 청크 중 점수가 가장 높은 것을 살리고 겹치는 하위 조각들을 흡수(기각)합니다.
+                                // 🌟 [NMS BATTLE] 추출된 서브 청크 중첩을 LLM Granite 기반으로 해결합니다.
                                 sub_chunks.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
                                 let mut final_sub_chunks: Vec<(usize, usize, String, f32, f32)> = Vec::new();
+                                let mut remaining_subs = sub_chunks.clone();
 
-                                for cand in sub_chunks {
-                                    let mut is_overlapped = false;
-                                    for selected in &final_sub_chunks {
-                                        // start < selected.end && end > selected.start
-                                        if cand.0 < selected.1 && cand.1 > selected.0 {
-                                            is_overlapped = true;
-                                            break;
+                                while !remaining_subs.is_empty() {
+                                    let current = remaining_subs.remove(0);
+                                    let mut overlaps = Vec::new();
+                                    let mut next_remaining = Vec::new();
+
+                                    for cand in remaining_subs {
+                                        if current.0 < cand.1 && current.1 > cand.0 {
+                                            overlaps.push(cand);
+                                        } else {
+                                            next_remaining.push(cand);
                                         }
                                     }
-                                    if !is_overlapped {
-                                        final_sub_chunks.push(cand);
+
+                                    if overlaps.is_empty() {
+                                        final_sub_chunks.push(current);
                                     } else {
-                                        emit_term(&format!("    💀 [DEFEAT] NMS 오버랩 흡수: '{}' (Score: {:.4})", cand.2, cand.3));
+                                        let mut candidates = vec![current.clone()];
+                                        candidates.extend(overlaps.clone());
+                                        
+                                        let mut unique_texts = Vec::new();
+                                        let mut unique_cands = Vec::new();
+                                        for cand in &candidates {
+                                            if !unique_texts.contains(&cand.2) {
+                                                unique_texts.push(cand.2.clone());
+                                                unique_cands.push(cand.clone());
+                                            }
+                                        }
+
+                                        if unique_cands.len() == 1 {
+                                            final_sub_chunks.push(unique_cands[0].clone());
+                                        } else {
+                                            emit_term(&format!("    ⚖️ [SCORE NMS] 수축 로테이션 오버랩 발생! 벡터 점수 기반 판별: {:?}", unique_texts));
+                                            
+                                            let mut sorted_cands = unique_cands.clone();
+                                            // 튜플 구조: (start, end, chunk_text, base_score, verb_penalty)
+                                            // base_score(3번 인덱스) 기준 내림차순 정렬, 동점이면 텍스트 길이 내림차순
+                                            sorted_cands.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal).then(b.2.len().cmp(&a.2.len())));
+
+                                            let winner = sorted_cands[0].clone();
+                                            let winner_idx = unique_cands.iter().position(|x| x.2 == winner.2).unwrap_or(0);
+
+                                            emit_term(&format!("    👑 [WINNER-SCORE] 수축 로테이션 승리: '{}' (Score: {:.4})", winner.2, winner.3));
+                                            
+                                            for (i, cand) in unique_cands.iter().enumerate() {
+                                                if i != winner_idx {
+                                                    emit_term(&format!("    💀 [DEFEAT-SCORE] 수축 로테이션 기각: '{}' (Score: {:.4})", cand.2, cand.3));
+                                                }
+                                            }
+                                            
+                                            final_sub_chunks.push(winner);
+                                        }
                                     }
+                                    remaining_subs = next_remaining;
                                 }
 
                                 // 🌟 [WINNER 마스킹 반영] 살아남은 조각들을 최종 마스킹 처리합니다.

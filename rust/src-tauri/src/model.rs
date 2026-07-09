@@ -161,12 +161,14 @@ impl LogisModel {
         *q3_gen = None;
         let mut q35_gen = self.qwen3_5_generator.lock().await;
         *q35_gen = None;
-        let mut granite_gen = self.granite_generator.lock().await;
-        *granite_gen = None;
+        // 🌟 [CRITICAL FIX] Granite 350M 모델은 최초 1회만 불러오고 계속 유지하기 위해 unload 대상에서 제외합니다.
         
         let mut size = self.current_size.lock().await;
-        *size = None;
-        println!("[MODEL] All generators (Active) destroyed."); 
+        // 🌟 Granite가 상주하므로 current_size를 None으로 날리지 않고 상태를 보존합니다.
+        if *size != Some(ModelSize::Granite) {
+            *size = None;
+        }
+        println!("[MODEL] Main generators destroyed (Granite kept resident)."); 
     }
 
     pub async fn unload_embedding(&self) {
@@ -501,8 +503,8 @@ impl LogisModel {
             }
         }
         
-        println!("[RELAY] Performing Deep Purge before loading {:?} (Baking: {})...", target_size, is_baking);
-        self.deep_purge_resources().await;
+        println!("[RELAY] Unloading previous models before loading {:?} (Baking: {})...", target_size, is_baking);
+        self.unload_generator().await; // 🌟 [CRITICAL FIX] deep_purge_resources 대신 unload_generator를 호출하여 Granite가 VRAM에 상주(Resident)할 수 있도록 변경합니다.
         
         if !self.is_cpu_mode {
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -563,7 +565,7 @@ impl LogisModel {
         let needs_load = { self.granite_generator.lock().await.is_none() };
         if needs_load {
             println!("[MODEL] Loading Granite 4.0 (350m) Model...");
-            self.unload_generator().await;
+            // 🌟 [CRITICAL FIX] Granite 로드 시 기존 모델들을 해제하지 않도록 unload_generator 호출을 제거하여 동시 상주를 지원합니다.
             {
                 *self.current_size.lock().await = Some(ModelSize::Granite);
             }
