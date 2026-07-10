@@ -1359,37 +1359,13 @@ async fn process_task(
                     }
 
                     // 🌟 [CRITICAL FIX] 특수문자 제거 및 언어(단어) 추출 범용 로직
-                    // 예측 불가능한 특수문자 패턴에 대응하기 위해, 기 마스킹된 마커를 제외한 모든 특수문자를 공백으로 치환하여 단어를 온전히 분리합니다.
+                    // 기존에 특수문자를 공백으로 덮어씌워 "FDE(Forward"가 "FDE Forward"로 쪼개지는 현상을 방지합니다.
+                    // 원본 텍스트 구조를 그대로 유지하여 NMS 추출 시 괄호 등 특수문자가 훼손되지 않도록 개선합니다.
                     let mut noise_map: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // 🌟 하단 복원 로직 컴파일 에러 방지용 빈 장부 유지
-                    
-                    let clean_text_fn = |text: &str| -> String {
-                        text.lines().map(|line| { // 🌟 줄바꿈(\n) 보존을 위해 lines() 단위 루프 추가
-                            line.split_whitespace().map(|word| {
-                                if word.starts_with("[___REDACTED_") && word.ends_with("___]") {
-                                    word.to_string()
-                                } else {
-                                    let mut cleaned = String::new();
-                                    for c in word.chars() {
-                                        if c.is_alphanumeric() || c == '-' {
-                                            cleaned.push(c);
-                                        } else {
-                                            cleaned.push(' ');
-                                        }
-                                    }
-                                    cleaned
-                                }
-                            }).collect::<Vec<_>>().join(" ")
-                        }).collect::<Vec<_>>().join("\n") // 🌟 훼손되었던 줄바꿈(\n) 완벽 복구
-                    };
 
-                    // 🌟 [CRITICAL FIX] masked_text의 들여쓰기 구조를 영구 파괴하던 덮어쓰기를 제거하고, 평가용 텍스트만 별도 생성합니다.
-                    let eval_masked_text = clean_text_fn(&masked_text);
-                    let eval_doc_title = clean_text_fn(&doc_title);
-                    let eval_doc_desc = clean_text_fn(&doc_desc);
-
-                    // 🌟 1차 패스용 라인 분할 (평가용 텍스트 기반)
+                    // 🌟 1차 패스용 라인 분할 (원본 텍스트 기반 유지)
                     let structural_tags = ["html", "body", "div", "p", "span", "thead", "tbody", "tr", "td", "th", "table", "ul", "li", "a", "img", "br", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "em", "b", "i", "u", "s", "nav", "header", "footer", "main", "section", "article", "aside", "figure", "figcaption", "button", "input", "form", "label", "select", "textarea", "option", "iframe", "script", "style", "meta", "link", "head", "title", "svg", "path", "dl", "ol", "dd", "dt"];
-                    let mut lines: Vec<String> = eval_masked_text.lines()
+                    let mut lines: Vec<String> = masked_text.lines()
                         .map(|s| s.trim().trim_start_matches('|').trim().to_string())
                         .filter(|s| {
                             let s_lower = s.to_lowercase();
@@ -1398,15 +1374,15 @@ async fn process_task(
                         .collect();
                         
                     // 🌟 [추가] 제목과 요약 텍스트도 마스킹 탐색 라인업에 추가합니다.
-                    if !eval_doc_title.trim().is_empty() { lines.push(eval_doc_title.trim().to_string()); }
-                    if !eval_doc_desc.trim().is_empty() { lines.push(eval_doc_desc.trim().to_string()); }
+                    if !doc_title.trim().is_empty() { lines.push(doc_title.trim().to_string()); }
+                    if !doc_desc.trim().is_empty() { lines.push(doc_desc.trim().to_string()); }
 
                     // =====================================================================
                     // 🌟 [PASS 2: NMS 기반 전체 추출] 동적 접두사 기반 벡터 검색 및 타이브레이커 적용
                     // =====================================================================
                     emit_term("[EXTRACTION] ⚔️ [PASS 2] 텍스트 단위 NMS 배틀 및 전체 항목 추출 시작...");
                     
-                    lines = eval_masked_text.lines()
+                    lines = masked_text.lines()
                         .map(|s| s.trim().trim_start_matches('|').trim().to_string())
                         .filter(|s| {
                             let s_lower = s.to_lowercase();
@@ -1415,8 +1391,8 @@ async fn process_task(
                         .collect();
                         
                     // 🌟 [추가] 2차 패스 초기화 직후에도 제목과 요약 텍스트를 재장전합니다.
-                    if !eval_doc_title.trim().is_empty() { lines.push(eval_doc_title.trim().to_string()); }
-                    if !eval_doc_desc.trim().is_empty() { lines.push(eval_doc_desc.trim().to_string()); }
+                    if !doc_title.trim().is_empty() { lines.push(doc_title.trim().to_string()); }
+                    if !doc_desc.trim().is_empty() { lines.push(doc_desc.trim().to_string()); }
                         
                     emit_term(&format!("[EXTRACTION] 문서 제목, 요약, 본문을 총 {}개의 라인으로 분할하여 순차 임베딩 및 NMS 배틀 진행 중...", lines.len()));
 
@@ -1538,7 +1514,16 @@ async fn process_task(
                                 let char_count = chunk_text.chars().filter(|c| !c.is_whitespace()).count();
                                 if char_count <= 1 { continue; }
 
-                                let chunk_emb = model.get_embedding(chunk_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                // 🌟 [수정] 벡터 품질 보존을 위해 임베딩 모델에 들어가는 텍스트만 특수문자를 공백으로 치환합니다.
+                                let mut clean_for_emb = String::new();
+                                for c in chunk_text.chars() {
+                                    if c.is_alphanumeric() || c == '-' {
+                                        clean_for_emb.push(c);
+                                    } else {
+                                        clean_for_emb.push(' ');
+                                    }
+                                }
+                                let chunk_emb = model.get_embedding(clean_for_emb).await.unwrap_or_else(|_| vec![0.0; 384]);
                                 let word_count = end - start;
                                 let length_weight = 1.0; // 단어 개수 가중치 제거 (길이 무관 동등 점수)
 
