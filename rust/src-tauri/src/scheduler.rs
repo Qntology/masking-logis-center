@@ -1253,7 +1253,7 @@ async fn process_task(
                         for email_val in found_emails {
                             let mnemonic = crate::parsing::generate_mnemonic();
                             let upper_key = "EMAIL".to_string();
-                            let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                            let final_replacement = format!("[{}]", mnemonic);
                             let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                             masked_text = masked_text.replace(&email_val, &skip_marker);
                             doc_title = doc_title.replace(&email_val, &skip_marker);
@@ -3214,7 +3214,7 @@ async fn process_task(
                                     
                                     let mnemonic = crate::parsing::generate_mnemonic();
                                     let upper_key = base_target.to_uppercase(); 
-                                    let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                                    let final_replacement = format!("[{}]", mnemonic);
                                     let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                                     
                                     masked_text = masked_text.replace(&text_val, &skip_marker);
@@ -3280,7 +3280,7 @@ async fn process_task(
                                     
                                     let mnemonic = crate::parsing::generate_mnemonic();
                                     let upper_key = base_target.to_uppercase(); // ex: "레알 마드리드_KOREAN_NAME"
-                                    let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                                    let final_replacement = format!("[{}]", mnemonic);
                                     
                                     // skip_map 의 최종 치환 문자열을 Phase 2 타겟으로 덮어씁니다!
                                     skip_map.insert(marker.clone(), final_replacement.clone());
@@ -3319,7 +3319,7 @@ async fn process_task(
                             // 🌟 마스킹 니모닉 생성 및 즉시 치환 대신 해시 기반 마커로 임시 치환
                             let mnemonic = crate::parsing::generate_mnemonic();
                             let upper_key = base_target.to_uppercase(); 
-                            let final_replacement = format!("[{}: {}]", upper_key, mnemonic);
+                            let final_replacement = format!("[{}]", mnemonic);
                             
                             // 🌟 [CRITICAL FIX] 추출된 단어(extracted_val)가 본문에는 존재하지만, 
                             // 제목(doc_title)이나 요약(doc_desc)에는 조사/수식어가 포함된 전체 형태가 아닌 
@@ -3369,7 +3369,7 @@ async fn process_task(
                                     if !best_chunk.is_empty() {
                                         emit_term(&format!("    👑 [CROSS-FIELD RESCUE] 제목(Title)에 전체 문자열이 없으나, 핵심 단어 '{}' 발견 (Score: {:.4}) -> 강제 마스킹", best_chunk, best_score));
                                         let c_mnemonic = crate::parsing::generate_mnemonic();
-                                        let c_final_replacement = format!("[{}: {}]", upper_key, c_mnemonic);
+                                        let c_final_replacement = format!("[{}]", c_mnemonic);
                                         let c_skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                                         
                                         doc_title = doc_title.replace(&best_chunk, &c_skip_marker);
@@ -3422,7 +3422,7 @@ async fn process_task(
                                     if !best_chunk.is_empty() {
                                         emit_term(&format!("    👑 [CROSS-FIELD RESCUE] 요약(Desc)에 전체 문자열이 없으나, 핵심 단어 '{}' 발견 (Score: {:.4}) -> 강제 마스킹", best_chunk, best_score));
                                         let c_mnemonic = crate::parsing::generate_mnemonic();
-                                        let c_final_replacement = format!("[{}: {}]", upper_key, c_mnemonic);
+                                        let c_final_replacement = format!("[{}]", c_mnemonic);
                                         let c_skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                                         
                                         doc_desc = doc_desc.replace(&best_chunk, &c_skip_marker);
@@ -3563,7 +3563,7 @@ async fn process_task(
                         if let Some(obj) = match_val.as_object() {
                             if let (Some(name), Some(val), Some(mnemonic)) = (obj.get("name").and_then(|v| v.as_str()), obj.get("value").and_then(|v| v.as_str()), obj.get("mnemonic").and_then(|v| v.as_str())) {
                                 if val.chars().count() >= 2 && !val.starts_with("[___REDACTED") {
-                                    let final_repl = format!("[{}: {}]", name, mnemonic);
+                                    let final_repl = format!("[{}]", mnemonic);
                                     
                                     // 1. 단순 교체 (노이즈/링크 복원 과정에서 튀어나온 텍스트 등 즉시 교체)
                                     if masked_text.contains(val) { masked_text = masked_text.replace(val, &final_repl); final_sweep_count += 1; }
