@@ -1091,6 +1091,7 @@ async fn process_task(
                         ("name", "person's name"),
                         ("username", "person's username"),
                         ("address", "physical street address"),
+                        ("national_id", "national identification number or resident registration number"),
                         // ("age", "person's age"),
                         // ("gender_identity", "person's gender identity"),
                         // ("biological_sex", "person's biological sex"),
@@ -1246,6 +1247,24 @@ async fn process_task(
                     let mut domain_history: Vec<(String, String)> = Vec::new(); 
                     let task_marker_hash = crate::utils::hash::crc32(&task.id); // 🌟 [CRITICAL FIX] CRC32 해싱 기반 고유 마커 뼈대 생성
 
+                    // 🌟 [CRITICAL FIX] 일반 텍스트 교체 시 [___REDACTED_x___] 마커 내부의 숫자가 오염되는 현상을 방지하는 안전한 교체 함수
+                    let safe_replace = |text: &str, target: &str, replacement: &str| -> String {
+                        if target.is_empty() { return text.to_string(); }
+                        let escaped_target = regex::escape(target);
+                        let pattern = format!(r"(\[___REDACTED_[0-9]+___\])|({})", escaped_target);
+                        if let Ok(re) = regex::Regex::new(&pattern) {
+                            re.replace_all(text, |caps: &regex::Captures| {
+                                if caps.get(1).is_some() {
+                                    caps[0].to_string() // 마커는 그대로 보존
+                                } else {
+                                    replacement.to_string() // 타겟만 치환
+                                }
+                            }).to_string()
+                        } else {
+                            text.replace(target, replacement)
+                        }
+                    };
+
                     // 🌟 [사전 정규식 추출] email 먼저 마스킹 (1차 패스 전)
                     if let Ok(email_re) = regex::Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}") {
                         let mut found_emails = std::collections::HashSet::new();
@@ -1255,9 +1274,9 @@ async fn process_task(
                             let upper_key = "EMAIL".to_string();
                             let final_replacement = format!("[{}]", mnemonic);
                             let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
-                            masked_text = masked_text.replace(&email_val, &skip_marker);
-                            doc_title = doc_title.replace(&email_val, &skip_marker);
-                            doc_desc = doc_desc.replace(&email_val, &skip_marker);
+                            masked_text = safe_replace(&masked_text, &email_val, &skip_marker);
+                            doc_title = safe_replace(&doc_title, &email_val, &skip_marker);
+                            doc_desc = safe_replace(&doc_desc, &email_val, &skip_marker);
                             skip_map.insert(skip_marker.clone(), final_replacement);
                             replacement_history.push((email_val.clone(), skip_marker.clone()));
                             domain_history.push(("email".to_string(), email_val.clone()));
@@ -1279,7 +1298,7 @@ async fn process_task(
                                 } else {
                                     let mut cleaned = String::new();
                                     for c in word.chars() {
-                                        if c.is_alphanumeric() {
+                                        if c.is_alphanumeric() || c == '-' {
                                             cleaned.push(c);
                                         } else {
                                             cleaned.push(' ');
@@ -1392,8 +1411,7 @@ async fn process_task(
                     }
                     let mut raw_spans = Vec::new();
 
-                    let noise_marker_prefix = "[___REDACTED_NOISE_".to_string();
-                    let link_marker_prefix = "[___REDACTED_LINK_".to_string();
+                    let redacted_marker_prefix = "[___REDACTED_".to_string();
 
                     for (line_idx, line) in lines.iter().enumerate() {
                         if cancellation_token.load(Ordering::Relaxed) { break; }
@@ -1403,9 +1421,9 @@ async fn process_task(
                         for start in 0..words.len() {
                             let max_end = words.len().min(start + 2); // 1~2 단어 조합
                             for end in (start + 1)..=max_end {
-                                // 🌟 [CRITICAL FIX] 노이즈, 링크 해시 마커를 벡터 청크에서 제외하여 순수 텍스트만 임베딩합니다.
+                                // 🌟 [CRITICAL FIX] 사전 마스킹된 마커(이메일 등), 노이즈, 링크 해시 마커를 벡터 청크에서 모두 제외하여 순수 텍스트만 임베딩합니다.
                                 let clean_words: Vec<&str> = words[start..end].iter()
-                                    .filter(|&&w| !w.starts_with(&noise_marker_prefix) && !w.starts_with(&link_marker_prefix))
+                                    .filter(|&&w| !w.starts_with(&redacted_marker_prefix))
                                     .copied()
                                     .collect();
                                 
@@ -1623,9 +1641,11 @@ async fn process_task(
                     
                     for span in &final_spans {
                         if let Some(last) = current_group.last() {
-                            // 🌟 [CRITICAL FIX] 카테고리 100% 일치 제약을 완전히 삭제! 
-                            // 승리한 조각들이 같은 줄에 있고 물리적으로 맞닿아 있기만 하다면 무조건 연쇄 결합 그룹에 포함시킵니다.
-                            if last.line_idx == span.line_idx && last.end == span.start {
+                            // 🌟 [CRITICAL FIX] 무분별한 이종 카테고리(예: 이름+주민번호) 결합을 막기 위해,
+                            // 타겟 도메인(target_indices)에 최소 1개 이상의 교집합이 존재할 때만 결합을 허용합니다.
+                            let has_common_target = last.target_indices.iter().any(|idx| span.target_indices.contains(idx));
+                            
+                            if last.line_idx == span.line_idx && last.end == span.start && has_common_target {
                                 // 🌟 두 청크 중 최소 하나는 '단어 1개'로 구성된 경우에만 연속성을 인정하여 과잉 그룹화 방지
                                 let last_word_count = last.end - last.start;
                                 let span_word_count = span.end - span.start;
@@ -1867,7 +1887,7 @@ async fn process_task(
                                 // 하드코딩된 기호 배열 대신, 알파벳/숫자/공백이 아닌 모든 특수문자를 범용적으로 찾아 공백으로 분리합니다.
                                 let mut eval_target = String::new();
                                 for c in specific_candidate.chars() {
-                                    if c.is_alphanumeric() || c.is_whitespace() {
+                                    if c.is_alphanumeric() || c.is_whitespace() || c == '-' {
                                         eval_target.push(c);
                                     } else {
                                         eval_target.push(' ');
@@ -2063,14 +2083,17 @@ async fn process_task(
                                             let has_noun_or_oov = candidate_tags.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON");
                                             
                                             let cand_char_count = specific_candidate.chars().filter(|c| !c.is_whitespace()).count();
-                                            let rescue_oov = cand_char_count >= 2 && all_invalid;
+                                            
+                                            // 🌟 [CRITICAL FIX] 식별번호, 연락처 등 기호(-)가 필수적으로 포함된 고유 형식 도메인은 무조건 구제(Bypass)합니다.
+                                            let is_id_domain = base_target == "national_id" || base_target == "contact_number" || base_target == "email";
+                                            let rescue_oov = (cand_char_count >= 2 && all_invalid) || is_id_domain;
 
                                             if !rescue_oov && (all_invalid || !has_noun_or_oov) {
                                                 emit_term(&format!("[STANZA] 💀 순수 수식어/조사/동사/기호 감지 (Plan B). 강제 기각: '{}'", specific_candidate));
                                                 hallucinated_candidates.insert(specific_candidate.clone());
                                             } else {
                                                 if rescue_oov {
-                                                    emit_term(&format!("[STANZA] 🚑 OOV 구제 발동 (Plan B 우회): '{}' ({} 항목). 강제 기각을 면제하고 LLM 교차 검증으로 넘깁니다.", specific_candidate, base_target));
+                                                    emit_term(&format!("[STANZA] 🚑 OOV 및 식별번호 구제 발동 (Plan B 우회): '{}' ({} 항목). 강제 기각 및 절단을 면제합니다.", specific_candidate, base_target));
                                                 }
                                                 let mut trimmed_words = candidate_words.clone();
                                                 let mut valid_tags_clone = candidate_tags.clone();
@@ -2095,26 +2118,30 @@ async fn process_task(
 
                                                 // 🌟 [CRITICAL FIX] 추출 단어 앞부분에 붙은 수식어(관형사, 부사, 접속사 등)를 잘라내는 머리 절단 로직을 추가합니다. ('전 소속팀' 등 방어)
                                                 let front_drop_tags = ["DET", "ADJ", "ADV", "PUNCT", "CCONJ", "SCONJ", "PART", "ADP"];
-                                                while let Some(first_tag) = valid_tags_clone.first() {
-                                                    if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
-                                                        trimmed_words.remove(0);
-                                                        valid_tags_clone.remove(0);
-                                                        is_trimmed = true;
-                                                    } else {
-                                                        break;
+                                                if !is_id_domain {
+                                                    while let Some(first_tag) = valid_tags_clone.first() {
+                                                        if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
+                                                            trimmed_words.remove(0);
+                                                            valid_tags_clone.remove(0);
+                                                            is_trimmed = true;
+                                                        } else {
+                                                            break;
+                                                        }
                                                     }
                                                 }
                                                 
                                                 // 🌟 [CRITICAL FIX] 추출 단어 끝에 꼬리로 잘못 붙은 동사(VERB), 형용사(ADJ), 부사(ADV)도 잘라내도록 꼬리 절단 태그를 대폭 보강합니다.
                                                 let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV"];
                                                 
-                                                while let Some(last_tag) = valid_tags_clone.last() {
-                                                    if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
-                                                        trimmed_words.pop();
-                                                        valid_tags_clone.pop();
-                                                        is_trimmed = true;
-                                                    } else {
-                                                        break;
+                                                if !is_id_domain {
+                                                    while let Some(last_tag) = valid_tags_clone.last() {
+                                                        if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
+                                                            trimmed_words.pop();
+                                                            valid_tags_clone.pop();
+                                                            is_trimmed = true;
+                                                        } else {
+                                                            break;
+                                                        }
                                                     }
                                                 }
                                                 
@@ -2137,9 +2164,14 @@ async fn process_task(
                                                     emit_term(&format!("[STANZA] ✂️ 1글자 단어 포함 감지. '{}' 로 분할하여 추론 큐에 독립적으로 추가합니다.", parts_display));
                                                     
                                                     for part in &trimmed_words {
-                                                        let mut clone = valid_targets[p_idx - 1].clone();
-                                                        clone.7 = part.to_string();
-                                                        valid_targets.push(clone);
+                                                        let p_char_count = part.chars().filter(|c| !c.is_whitespace()).count();
+                                                        if p_char_count >= 2 {
+                                                            let mut clone = valid_targets[p_idx - 1].clone();
+                                                            clone.7 = part.to_string();
+                                                            valid_targets.push(clone);
+                                                        } else {
+                                                            emit_term(&format!("[STANZA] 🚫 1글자 분할 조각 기각: '{}' (무의미한 단어 확산 방지)", part));
+                                                        }
                                                     }
                                                     
                                                     continue;
@@ -2294,6 +2326,14 @@ async fn process_task(
                                 break;
                             }
 
+                            // 🌟 [CRITICAL FIX] 이름/회사명 등이 1글자로 잘려나와 마스킹되는 대참사 원천 차단
+                            let ext_char_count = extracted_val.chars().filter(|c| !c.is_whitespace()).count();
+                            if ext_char_count <= 1 {
+                                emit_term(&format!("[DEBUG] 1글자 단어 추출 감지. 무의미한 과잉 마스킹 방지를 위해 강제 기각: '{}'", extracted_val));
+                                hallucinated_candidates.insert(extracted_val.clone());
+                                break;
+                            }
+
                             // 🌟 [추가] 할루시네이션(환각)으로 이미 판명된 단어라면 즉시 스킵 (동의어 트랙 등에서 재등장 방지)
                             if hallucinated_candidates.contains(&extracted_val) {
                                 emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 할루시네이션으로 판명된 단어입니다. 스킵합니다: '{}'", extracted_val));
@@ -2314,7 +2354,7 @@ async fn process_task(
                                     
                                     // 1차 절단: 알파벳/한글/숫자 등 일반 문자가 아닌 모든 특수기호를 범용적으로 찾아 공백으로 치환하여 단어 결합 방지
                                     for c in extracted_val.chars() {
-                                        if c.is_alphanumeric() || c.is_whitespace() {
+                                        if c.is_alphanumeric() || c.is_whitespace() || c == '-' {
                                             eval_ext.push(c);
                                         } else {
                                             eval_ext.push(' ');
@@ -2502,14 +2542,17 @@ async fn process_task(
                                                 let has_noun_or_oov = candidate_tags.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON");
                                                 
                                                 let ext_char_count = extracted_val.chars().filter(|c| !c.is_whitespace()).count();
-                                                let rescue_oov = ext_char_count >= 2 && all_invalid;
+                                                
+                                                // 🌟 [CRITICAL FIX] 식별번호 등 기호가 섞인 형식 도메인은 강제 기각 면제 (Bypass)
+                                                let is_id_domain = base_target == "national_id" || base_target == "contact_number" || base_target == "email";
+                                                let rescue_oov = (ext_char_count >= 2 && all_invalid) || is_id_domain;
 
                                                 if !rescue_oov && (all_invalid || !has_noun_or_oov) {
                                                     emit_term(&format!("[STANZA-EXT] 💀 순수 수식어/조사/동사/기호 감지. 추출단어 강제 기각: '{}'", extracted_val));
                                                     nlp_rejected = true;
                                                 } else {
                                                     if rescue_oov {
-                                                        emit_term(&format!("[STANZA-EXT] 🚑 OOV 구제 발동 (Plan B 우회): '{}'. 강제 기각을 면제합니다.", extracted_val));
+                                                        emit_term(&format!("[STANZA-EXT] 🚑 OOV 및 식별번호 구제 발동 (Plan B 우회): '{}'. 강제 기각 및 절단을 면제합니다.", extracted_val));
                                                     }
                                                     let mut trimmed_words = candidate_words.clone();
                                                     let mut valid_tags_clone = candidate_tags.clone();
@@ -2534,26 +2577,30 @@ async fn process_task(
 
                                                     // 🌟 [CRITICAL FIX] 추출 단어 앞부분에 붙은 수식어(관형사, 부사, 접속사 등)를 잘라내는 머리 절단 로직을 추가합니다. ('전 소속팀' 등 방어)
                                                     let front_drop_tags = ["DET", "ADJ", "ADV", "PUNCT", "CCONJ", "SCONJ", "PART", "ADP"];
-                                                    while let Some(first_tag) = valid_tags_clone.first() {
-                                                        if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
-                                                            trimmed_words.remove(0);
-                                                            valid_tags_clone.remove(0);
-                                                            is_trimmed = true;
-                                                        } else {
-                                                            break;
+                                                    if !is_id_domain {
+                                                        while let Some(first_tag) = valid_tags_clone.first() {
+                                                            if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
+                                                                trimmed_words.remove(0);
+                                                                valid_tags_clone.remove(0);
+                                                                is_trimmed = true;
+                                                            } else {
+                                                                break;
+                                                            }
                                                         }
                                                     }
                                                     
                                                     // 🌟 [CRITICAL FIX] 추출 단어 끝에 꼬리로 잘못 붙은 동사(VERB), 형용사(ADJ), 부사(ADV)도 잘라내도록 꼬리 절단 태그를 대폭 보강합니다.
                                                     let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV"];
                                                     
-                                                    while let Some(last_tag) = valid_tags_clone.last() {
-                                                        if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
-                                                            trimmed_words.pop();
-                                                            valid_tags_clone.pop();
-                                                            is_trimmed = true;
-                                                        } else {
-                                                            break;
+                                                    if !is_id_domain {
+                                                        while let Some(last_tag) = valid_tags_clone.last() {
+                                                            if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
+                                                                trimmed_words.pop();
+                                                                valid_tags_clone.pop();
+                                                                is_trimmed = true;
+                                                            } else {
+                                                                break;
+                                                            }
                                                         }
                                                     }
                                                     
@@ -2576,9 +2623,14 @@ async fn process_task(
                                                         emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 로 분할하여 추론 큐에 독립적으로 추가하고 현재 트랙을 종료합니다.", parts_display));
                                                         
                                                         for part in &trimmed_words {
-                                                            let mut clone = valid_targets[p_idx - 1].clone();
-                                                            clone.7 = part.to_string();
-                                                            valid_targets.push(clone);
+                                                            let p_char_count = part.chars().filter(|c| !c.is_whitespace()).count();
+                                                            if p_char_count >= 2 {
+                                                                let mut clone = valid_targets[p_idx - 1].clone();
+                                                                clone.7 = part.to_string();
+                                                                valid_targets.push(clone);
+                                                            } else {
+                                                                emit_term(&format!("[STANZA-EXT] 🚫 1글자 분할 조각 기각: '{}' (무의미한 단어 확산 방지)", part));
+                                                            }
                                                         }
                                                         
                                                         // [CRITICAL FIX] LLM 재시도 루프(loop) 내부에서 온도(temperature) 상승이나 무시 리스트(ignore_list) 갱신 없이 
@@ -3055,10 +3107,10 @@ async fn process_task(
                                     let final_replacement = format!("[{}]", mnemonic);
                                     let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                                     
-                                    masked_text = masked_text.replace(&text_val, &skip_marker);
-                                    doc_title = doc_title.replace(&text_val, &skip_marker);
-                                    doc_desc = doc_desc.replace(&text_val, &skip_marker);
-                                    matched_context = matched_context.replace(&text_val, &skip_marker);
+                                    masked_text = safe_replace(&masked_text, &text_val, &skip_marker);
+                                    doc_title = safe_replace(&doc_title, &text_val, &skip_marker);
+                                    doc_desc = safe_replace(&doc_desc, &text_val, &skip_marker);
+                                    matched_context = safe_replace(&matched_context, &text_val, &skip_marker);
                                     
                                     skip_map.insert(skip_marker.clone(), final_replacement.clone());
                                     replacement_history.push((text_val.clone(), skip_marker.clone()));
@@ -3210,7 +3262,7 @@ async fn process_task(
                                         let c_final_replacement = format!("[{}]", c_mnemonic);
                                         let c_skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                                         
-                                        doc_title = doc_title.replace(&best_chunk, &c_skip_marker);
+                                        doc_title = safe_replace(&doc_title, &best_chunk, &c_skip_marker);
                                         skip_map.insert(c_skip_marker.clone(), c_final_replacement.clone());
                                         replacement_history.push((best_chunk.clone(), c_skip_marker.clone()));
                                         current_target_found.push(best_chunk.clone());
@@ -3263,7 +3315,7 @@ async fn process_task(
                                         let c_final_replacement = format!("[{}]", c_mnemonic);
                                         let c_skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                                         
-                                        doc_desc = doc_desc.replace(&best_chunk, &c_skip_marker);
+                                        doc_desc = safe_replace(&doc_desc, &best_chunk, &c_skip_marker);
                                         skip_map.insert(c_skip_marker.clone(), c_final_replacement.clone());
                                         replacement_history.push((best_chunk.clone(), c_skip_marker.clone()));
                                         current_target_found.push(best_chunk.clone());
@@ -3326,10 +3378,10 @@ async fn process_task(
                             
                             // 🌟 [CRITICAL FIX] 원본 텍스트(본문+제목) 모두에서 임시 마커로 치환하여 이어지는 LLM 추론에서 혼선을 원천 방지합니다.
                             // 역산된 hybrid_val을 사용하여 조각난 마커들까지 통째로 하나의 거대 마커로 덮어씌웁니다.
-                            masked_text = masked_text.replace(&hybrid_val, &skip_marker);
-                            doc_title = doc_title.replace(&hybrid_val, &skip_marker);
-                            doc_desc = doc_desc.replace(&hybrid_val, &skip_marker);
-                            matched_context = matched_context.replace(&hybrid_val, &skip_marker); 
+                            masked_text = safe_replace(&masked_text, &hybrid_val, &skip_marker);
+                            doc_title = safe_replace(&doc_title, &hybrid_val, &skip_marker);
+                            doc_desc = safe_replace(&doc_desc, &hybrid_val, &skip_marker);
+                            matched_context = safe_replace(&matched_context, &hybrid_val, &skip_marker); 
                             
                             skip_map.insert(skip_marker.clone(), final_replacement);
                             replacement_history.push((extracted_val.clone(), skip_marker.clone())); 
