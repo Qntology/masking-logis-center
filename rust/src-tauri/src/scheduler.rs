@@ -1249,21 +1249,75 @@ async fn process_task(
                     let task_marker_hash = crate::utils::hash::crc32(&task.id); // 🌟 [CRITICAL FIX] CRC32 해싱 기반 고유 마커 뼈대 생성
 
                     // 🌟 [CRITICAL FIX] 일반 텍스트 교체 시 [___REDACTED_x___] 마커 내부의 숫자가 오염되는 현상을 방지하는 안전한 교체 함수
+                    // (정규식을 완전히 제거하고, 단어 중간에 낀 파편 오작동을 방어하는 순수 Rust 탐색 로직으로 개선)
                     let safe_replace = |text: &str, target: &str, replacement: &str| -> String {
                         if target.is_empty() { return text.to_string(); }
-                        let escaped_target = regex::escape(target);
-                        let pattern = format!(r"(\[___REDACTED_[0-9]+___\])|({})", escaped_target);
-                        if let Ok(re) = regex::Regex::new(&pattern) {
-                            re.replace_all(text, |caps: &regex::Captures| {
-                                if caps.get(1).is_some() {
-                                    caps[0].to_string() // 마커는 그대로 보존
-                                } else {
-                                    replacement.to_string() // 타겟만 치환
+                        
+                        let mut result = String::with_capacity(text.len());
+                        let mut current_idx = 0;
+                        let target_char_count = target.chars().count();
+
+                        while current_idx < text.len() {
+                            let text_slice = &text[current_idx..];
+                            let marker_idx = text_slice.find("[___REDACTED_");
+                            let target_idx = text_slice.find(target);
+
+                            match (marker_idx, target_idx) {
+                                (Some(m_idx), Some(t_idx)) if m_idx <= t_idx => {
+                                    let absolute_m_idx = current_idx + m_idx;
+                                    if let Some(end_offset) = text[absolute_m_idx..].find("___]") {
+                                        let absolute_end_idx = absolute_m_idx + end_offset + 4;
+                                        result.push_str(&text[current_idx..absolute_end_idx]);
+                                        current_idx = absolute_end_idx;
+                                    } else {
+                                        result.push_str(&text[current_idx..=absolute_m_idx]);
+                                        current_idx = absolute_m_idx + 1;
+                                    }
+                                },
+                                (Some(_), Some(t_idx)) | (None, Some(t_idx)) => {
+                                    let absolute_t_idx = current_idx + t_idx;
+                                    
+                                    // 🌟 [Infix 방어 로직] 외래어나 다른 단어의 중간에 낀 파편(예: 에'이전'트) 치환 방지
+                                    let mut is_infix = false;
+                                    let char_before = text[..absolute_t_idx].chars().next_back();
+                                    let char_after = text[absolute_t_idx + target.len()..].chars().next();
+                                    
+                                    if let (Some(cb), Some(ca)) = (char_before, char_after) {
+                                        if cb.is_alphanumeric() && ca.is_alphanumeric() {
+                                            // 앞뒤가 모두 문자(한글, 영문 등)로 둘러싸여 있으면서,
+                                            // 타겟이 2글자 이하로 짧은 경우 다른 단어의 파편으로 간주하여 치환 스킵
+                                            if target_char_count <= 2 {
+                                                is_infix = true;
+                                            }
+                                        }
+                                    }
+                                    
+                                    if is_infix {
+                                        result.push_str(&text[current_idx..absolute_t_idx + target.len()]);
+                                    } else {
+                                        result.push_str(&text[current_idx..absolute_t_idx]);
+                                        result.push_str(replacement);
+                                    }
+                                    current_idx = absolute_t_idx + target.len();
+                                },
+                                (Some(m_idx), None) => {
+                                    let absolute_m_idx = current_idx + m_idx;
+                                    if let Some(end_offset) = text[absolute_m_idx..].find("___]") {
+                                        let absolute_end_idx = absolute_m_idx + end_offset + 4;
+                                        result.push_str(&text[current_idx..absolute_end_idx]);
+                                        current_idx = absolute_end_idx;
+                                    } else {
+                                        result.push_str(&text[current_idx..=absolute_m_idx]);
+                                        current_idx = absolute_m_idx + 1;
+                                    }
+                                },
+                                (None, None) => {
+                                    result.push_str(&text[current_idx..]);
+                                    break;
                                 }
-                            }).to_string()
-                        } else {
-                            text.replace(target, replacement)
+                            }
                         }
+                        result
                     };
 
                     // 🌟 [사전 정규식 추출] email 먼저 마스킹 (1차 패스 전)
@@ -1313,6 +1367,8 @@ async fn process_task(
 
                     // 🌟 [CRITICAL FIX] masked_text의 들여쓰기 구조를 영구 파괴하던 덮어쓰기를 제거하고, 평가용 텍스트만 별도 생성합니다.
                     let eval_masked_text = clean_text_fn(&masked_text);
+                    let eval_doc_title = clean_text_fn(&doc_title);
+                    let eval_doc_desc = clean_text_fn(&doc_desc);
 
                     // 🌟 1차 패스용 라인 분할 (평가용 텍스트 기반)
                     let structural_tags = ["html", "body", "div", "p", "span", "thead", "tbody", "tr", "td", "th", "table", "ul", "li", "a", "img", "br", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "em", "b", "i", "u", "s", "nav", "header", "footer", "main", "section", "article", "aside", "figure", "figcaption", "button", "input", "form", "label", "select", "textarea", "option", "iframe", "script", "style", "meta", "link", "head", "title", "svg", "path", "dl", "ol", "dd", "dt"];
@@ -1323,6 +1379,10 @@ async fn process_task(
                             s.len() > 2 && !structural_tags.contains(&s_lower.as_str())
                         })
                         .collect();
+                        
+                    // 🌟 [추가] 제목과 요약 텍스트도 마스킹 탐색 라인업에 추가합니다.
+                    if !eval_doc_title.trim().is_empty() { lines.push(eval_doc_title.trim().to_string()); }
+                    if !eval_doc_desc.trim().is_empty() { lines.push(eval_doc_desc.trim().to_string()); }
 
                     // =====================================================================
                     // 🌟 [PASS 2: NMS 기반 전체 추출] 동적 접두사 기반 벡터 검색 및 타이브레이커 적용
@@ -1337,7 +1397,11 @@ async fn process_task(
                         })
                         .collect();
                         
-                    emit_term(&format!("[EXTRACTION] 본문을 {}개의 라인으로 분할하여 순차 임베딩 및 NMS 배틀 진행 중...", lines.len()));
+                    // 🌟 [추가] 2차 패스 초기화 직후에도 제목과 요약 텍스트를 재장전합니다.
+                    if !eval_doc_title.trim().is_empty() { lines.push(eval_doc_title.trim().to_string()); }
+                    if !eval_doc_desc.trim().is_empty() { lines.push(eval_doc_desc.trim().to_string()); }
+                        
+                    emit_term(&format!("[EXTRACTION] 문서 제목, 요약, 본문을 총 {}개의 라인으로 분할하여 순차 임베딩 및 NMS 배틀 진행 중...", lines.len()));
 
                     // 🌟 1. 다국어 접두사가 결합된 타겟(도메인) 및 서술어(verb_expression) 임베딩 장전
                     let mut target_biases_embs = Vec::new();
@@ -2013,38 +2077,75 @@ async fn process_task(
                                 
                                 let ext_words: Vec<&str> = ext_words_string.iter().map(|s| s.as_str()).collect();
 
-                                if let Ok(inputs) = stanza.preprocessor.encode_to_tensor(&ext_words, &stanza.pos_session) {
-                                    match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
-                                        Ok(outputs) => {
-                                            let output_tensor = &outputs[0];
-                                            let shape = output_tensor.shape();
-                                            let mut tags = Vec::new();
-                                            if shape.len() == 3 {
-                                                let seq_len = shape[1] as usize;
-                                                let num_classes = shape[2] as usize;
-                                                for i in 0..seq_len {
-                                                    let mut max_val = std::f32::MIN;
-                                                    let mut max_idx = 0;
-                                                    for c in 0..num_classes {
-                                                        let val = output_tensor[[0, i, c]];
-                                                        if val > max_val { max_val = val; max_idx = c; }
-                                                    }
-                                                    tags.push(max_idx);
-                                                }
-                                            } else if shape.len() == 2 {
-                                                let seq_len = shape[0] as usize;
-                                                let num_classes = shape[1] as usize;
-                                                for i in 0..seq_len {
-                                                    let mut max_val = std::f32::MIN;
-                                                    let mut max_idx = 0;
-                                                    for c in 0..num_classes {
-                                                        let val = output_tensor[[i, c]];
-                                                        if val > max_val { max_val = val; max_idx = c; }
-                                                    }
-                                                    tags.push(max_idx);
-                                                }
-                                            }
+                                let mut chunk_size = ext_words.len();
+                                for input_meta in &stanza.pos_session.inputs {
+                                    let dims = &input_meta.dimensions;
+                                    if dims.len() == 2 && dims.get(1) == Some(&Some(32)) {
+                                        if let Some(&Some(fixed_seq)) = dims.get(0) {
+                                            chunk_size = fixed_seq as usize;
+                                        }
+                                    }
+                                }
+                                if chunk_size == 0 { chunk_size = ext_words.len(); }
 
+                                let mut all_tags = Vec::new();
+                                let mut run_success = true;
+                                let mut run_error = String::new();
+
+                                if chunk_size > 0 && !ext_words.is_empty() {
+                                    for chunk in ext_words.chunks(chunk_size) {
+                                        let mut padded_chunk = chunk.to_vec();
+                                        let valid_len = chunk.len();
+                                        while padded_chunk.len() < chunk_size {
+                                            padded_chunk.push("<pad>");
+                                        }
+
+                                        match stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session) {
+                                            Ok(inputs) => {
+                                                match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
+                                                    Ok(outputs) => {
+                                                        let output_tensor = &outputs[0];
+                                                        let shape = output_tensor.shape();
+                                                        if shape.len() == 3 {
+                                                            let num_classes = shape[2] as usize;
+                                                            for i in 0..valid_len {
+                                                                let mut max_val = std::f32::MIN;
+                                                                let mut max_idx = 0;
+                                                                for c in 0..num_classes {
+                                                                    let val = output_tensor[[0, i, c]];
+                                                                    if val > max_val { max_val = val; max_idx = c; }
+                                                                }
+                                                                all_tags.push(max_idx as i64);
+                                                            }
+                                                        } else if shape.len() == 2 {
+                                                            let num_classes = shape[1] as usize;
+                                                            for i in 0..valid_len {
+                                                                let mut max_val = std::f32::MIN;
+                                                                let mut max_idx = 0;
+                                                                for c in 0..num_classes {
+                                                                    let val = output_tensor[[i, c]];
+                                                                    if val > max_val { max_val = val; max_idx = c; }
+                                                                }
+                                                                all_tags.push(max_idx as i64);
+                                                            }
+                                                        }
+                                                    },
+                                                    Err(e) => { run_success = false; run_error = format!("{:?}", e); break; }
+                                                }
+                                            },
+                                            Err(e) => { run_success = false; run_error = format!("{:?}", e); break; }
+                                        }
+                                    }
+                                } else {
+                                    run_success = false;
+                                    run_error = "Invalid sequence length for ONNX inputs".to_string();
+                                }
+
+                                let simulated_result: Result<Vec<i64>, String> = if run_success { Ok(all_tags) } else { Err(run_error) };
+
+                                if true {
+                                    match simulated_result {
+                                        Ok(tags) => {
                                             let tag_names: Vec<&str> = tags.into_iter()
                                                     .map(|id| stanza.preprocessor.upos_vocab.get(id as usize).map(|s| s.as_str()).unwrap_or("X"))
                                                     .collect();
@@ -2122,6 +2223,11 @@ async fn process_task(
                                                 if !is_id_domain {
                                                     while let Some(first_tag) = valid_tags_clone.first() {
                                                         if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
+                                                            // 🌟 [예외 추가] 만약 잘려나가는 단어가 영어/숫자 등 고유명사의 특징을 띤다면 보호합니다.
+                                                            let first_word = &trimmed_words[0];
+                                                            if first_word.chars().any(|c| c.is_ascii_alphanumeric()) {
+                                                                break;
+                                                            }
                                                             trimmed_words.remove(0);
                                                             valid_tags_clone.remove(0);
                                                             is_trimmed = true;
@@ -2130,13 +2236,17 @@ async fn process_task(
                                                         }
                                                     }
                                                 }
-                                                
+
                                                 // 🌟 [CRITICAL FIX] 추출 단어 끝에 꼬리로 잘못 붙은 동사(VERB), 형용사(ADJ), 부사(ADV)도 잘라내도록 꼬리 절단 태그를 대폭 보강합니다.
                                                 let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV"];
-                                                
                                                 if !is_id_domain {
                                                     while let Some(last_tag) = valid_tags_clone.last() {
                                                         if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
+                                                            // 🌟 [예외 추가] 만약 잘려나가는 단어가 영어/숫자 등 고유명사의 특징을 띤다면 보호합니다.
+                                                            let last_word = trimmed_words.last().unwrap();
+                                                            if last_word.chars().any(|c| c.is_ascii_alphanumeric()) {
+                                                                break;
+                                                            }
                                                             trimmed_words.pop();
                                                             valid_tags_clone.pop();
                                                             is_trimmed = true;
@@ -2475,37 +2585,74 @@ async fn process_task(
                                         
                                         let ext_words: Vec<&str> = ext_words_string.iter().map(|s| s.as_str()).collect();
 
-                                        if let Ok(inputs) = stanza.preprocessor.encode_to_tensor(&ext_words, &stanza.pos_session) {
-                                            if let Ok(outputs) = stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
-                                                let output_tensor = &outputs[0];
-                                                let shape = output_tensor.shape();
-                                                let mut tags = Vec::new();
-                                                if shape.len() == 3 {
-                                                    let seq_len = shape[1] as usize;
-                                                    let num_classes = shape[2] as usize;
-                                                    for i in 0..seq_len {
-                                                        let mut max_val = std::f32::MIN;
-                                                        let mut max_idx = 0;
-                                                        for c in 0..num_classes {
-                                                            let val = output_tensor[[0, i, c]];
-                                                            if val > max_val { max_val = val; max_idx = c; }
-                                                        }
-                                                        tags.push(max_idx);
-                                                    }
-                                                } else if shape.len() == 2 {
-                                                    let seq_len = shape[0] as usize;
-                                                    let num_classes = shape[1] as usize;
-                                                    for i in 0..seq_len {
-                                                        let mut max_val = std::f32::MIN;
-                                                        let mut max_idx = 0;
-                                                        for c in 0..num_classes {
-                                                            let val = output_tensor[[i, c]];
-                                                            if val > max_val { max_val = val; max_idx = c; }
-                                                        }
-                                                        tags.push(max_idx);
-                                                    }
+                                        let mut chunk_size = ext_words.len();
+                                        for input_meta in &stanza.pos_session.inputs {
+                                            let dims = &input_meta.dimensions;
+                                            if dims.len() == 2 && dims.get(1) == Some(&Some(32)) {
+                                                if let Some(&Some(fixed_seq)) = dims.get(0) {
+                                                    chunk_size = fixed_seq as usize;
                                                 }
-                                                
+                                            }
+                                        }
+                                        if chunk_size == 0 { chunk_size = ext_words.len(); }
+
+                                        let mut all_tags = Vec::new();
+                                        let mut run_success = true;
+                                        let mut run_error = String::new();
+
+                                        if chunk_size > 0 && !ext_words.is_empty() {
+                                            for chunk in ext_words.chunks(chunk_size) {
+                                                let mut padded_chunk = chunk.to_vec();
+                                                let valid_len = chunk.len();
+                                                while padded_chunk.len() < chunk_size {
+                                                    padded_chunk.push("<pad>");
+                                                }
+
+                                                match stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session) {
+                                                    Ok(inputs) => {
+                                                        match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
+                                                            Ok(outputs) => {
+                                                                let output_tensor = &outputs[0];
+                                                                let shape = output_tensor.shape();
+                                                                if shape.len() == 3 {
+                                                                    let num_classes = shape[2] as usize;
+                                                                    for i in 0..valid_len {
+                                                                        let mut max_val = std::f32::MIN;
+                                                                        let mut max_idx = 0;
+                                                                        for c in 0..num_classes {
+                                                                            let val = output_tensor[[0, i, c]];
+                                                                            if val > max_val { max_val = val; max_idx = c; }
+                                                                        }
+                                                                        all_tags.push(max_idx as i64);
+                                                                    }
+                                                                } else if shape.len() == 2 {
+                                                                    let num_classes = shape[1] as usize;
+                                                                    for i in 0..valid_len {
+                                                                        let mut max_val = std::f32::MIN;
+                                                                        let mut max_idx = 0;
+                                                                        for c in 0..num_classes {
+                                                                            let val = output_tensor[[i, c]];
+                                                                            if val > max_val { max_val = val; max_idx = c; }
+                                                                        }
+                                                                        all_tags.push(max_idx as i64);
+                                                                    }
+                                                                }
+                                                            },
+                                                            Err(e) => { run_success = false; run_error = format!("{:?}", e); break; }
+                                                        }
+                                                    },
+                                                    Err(e) => { run_success = false; run_error = format!("{:?}", e); break; }
+                                                }
+                                            }
+                                        } else {
+                                            run_success = false;
+                                            run_error = "Invalid sequence length for ONNX inputs".to_string();
+                                        }
+
+                                        let simulated_result: Result<Vec<i64>, String> = if run_success { Ok(all_tags) } else { Err(run_error) };
+
+                                        if true {
+                                            if let Ok(tags) = simulated_result {
                                                 let tag_names: Vec<&str> = tags.into_iter()
                                                         .map(|id| stanza.preprocessor.upos_vocab.get(id as usize).map(|s| s.as_str()).unwrap_or("X"))
                                                         .collect();
@@ -2581,6 +2728,11 @@ async fn process_task(
                                                     if !is_id_domain {
                                                         while let Some(first_tag) = valid_tags_clone.first() {
                                                             if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
+                                                                // 🌟 [예외 추가] 만약 잘려나가는 단어가 영어/숫자 등 고유명사의 특징을 띤다면 보호합니다.
+                                                                let first_word = &trimmed_words[0];
+                                                                if first_word.chars().any(|c| c.is_ascii_alphanumeric()) {
+                                                                    break;
+                                                                }
                                                                 trimmed_words.remove(0);
                                                                 valid_tags_clone.remove(0);
                                                                 is_trimmed = true;
@@ -2589,13 +2741,17 @@ async fn process_task(
                                                             }
                                                         }
                                                     }
-                                                    
+
                                                     // 🌟 [CRITICAL FIX] 추출 단어 끝에 꼬리로 잘못 붙은 동사(VERB), 형용사(ADJ), 부사(ADV)도 잘라내도록 꼬리 절단 태그를 대폭 보강합니다.
                                                     let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV"];
-                                                    
                                                     if !is_id_domain {
                                                         while let Some(last_tag) = valid_tags_clone.last() {
                                                             if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
+                                                                // 🌟 [예외 추가] 만약 잘려나가는 단어가 영어/숫자 등 고유명사의 특징을 띤다면 보호합니다.
+                                                                let last_word = trimmed_words.last().unwrap();
+                                                                if last_word.chars().any(|c| c.is_ascii_alphanumeric()) {
+                                                                    break;
+                                                                }
                                                                 trimmed_words.pop();
                                                                 valid_tags_clone.pop();
                                                                 is_trimmed = true;
@@ -2886,7 +3042,35 @@ async fn process_task(
                             for (orig, _) in &replacement_history {
                                 // 길이가 2글자 이상인 경우에 한해서 부분 일치 검사 (너무 짧은 단어 오작동 방지)
                                 if orig.chars().count() >= 2 && extracted_val.chars().count() >= 2 {
-                                    if extracted_val.contains(orig) || orig.contains(&extracted_val) {
+                                    let mut is_valid_overlap = false;
+
+                                    if extracted_val.contains(orig) {
+                                        if let Some(idx) = extracted_val.find(orig) {
+                                            let cb = extracted_val[..idx].chars().next_back();
+                                            let ca = extracted_val[idx + orig.len()..].chars().next();
+                                            let mut is_infix = false;
+                                            if let (Some(char_before), Some(char_after)) = (cb, ca) {
+                                                if char_before.is_alphanumeric() && char_after.is_alphanumeric() && orig.chars().count() <= 2 {
+                                                    is_infix = true;
+                                                }
+                                            }
+                                            if !is_infix { is_valid_overlap = true; }
+                                        }
+                                    } else if orig.contains(&extracted_val) {
+                                        if let Some(idx) = orig.find(&extracted_val) {
+                                            let cb = orig[..idx].chars().next_back();
+                                            let ca = orig[idx + extracted_val.len()..].chars().next();
+                                            let mut is_infix = false;
+                                            if let (Some(char_before), Some(char_after)) = (cb, ca) {
+                                                if char_before.is_alphanumeric() && char_after.is_alphanumeric() && extracted_val.chars().count() <= 2 {
+                                                    is_infix = true;
+                                                }
+                                            }
+                                            if !is_infix { is_valid_overlap = true; }
+                                        }
+                                    }
+
+                                    if is_valid_overlap {
                                         // 🌟 [CRITICAL FIX] 본문(masked_text)에 해당 파생어가 마커에 종속되지 않고 독립적으로 살아있다면 허용합니다.
                                         if masked_text.contains(&extracted_val) {
                                             emit_term(&format!("[DEBUG] 파생어 '{}'가 본문에 독립적으로 존재하여 마스킹을 허용합니다. (원본: '{}')", extracted_val, orig));
@@ -3213,10 +3397,9 @@ async fn process_task(
                             let final_replacement = format!("[{}]", mnemonic);
                             
                             // 🌟 [CRITICAL FIX] 추출된 단어(extracted_val)가 본문에는 존재하지만, 
-                            // 제목(doc_title)이나 요약(doc_desc)에는 조사/수식어가 포함된 전체 형태가 아닌 
-                            // 핵심 명사(예: "이동건")만 단독으로 존재하여 마스킹이 누락되는 현상을 방지합니다.
-                            // 문자열 강제 절단(String Trimming) 없이, 해당 단어의 모든 문자열 조합(Sub-strings) 중 
-                            // 대상 필드에 존재하는 단어를 찾아 벡터 점수로 검증하여 가장 강력한 핵심 단어를 구출합니다.
+                            // 제목이나 요약에 조사/수식어가 붙은 형태가 아닌 핵심 명사만 존재할 때 구출하는 로직입니다.
+                            // 무분별한 문자 조합(O(N^2))으로 "니다" 같은 접미사가 추출되는 대참사를 막기 위해,
+                            // 단어 단위(어절) 조합 및 접두사(Prefix) 기반 슬라이싱으로 안전한 청크만 생성합니다.
                             let chars_vec: Vec<char> = extracted_val.chars().collect();
                             if chars_vec.len() >= 2 {
                                 let lang_prefix = target_name.split('_').next().unwrap_or("english");
@@ -3225,35 +3408,57 @@ async fn process_task(
                                 let bias_emb = model.get_embedding(prefixed_b_val.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                 let prej_emb = model.get_embedding(prefixed_p_val.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
 
+                                // 🌟 안전한 후보군(Candidate Chunks) 동적 생성 (어절 단위 및 접두사 한정)
+                                let mut safe_chunks = Vec::new();
+                                let words: Vec<&str> = extracted_val.split_whitespace().collect();
+                                for i in 0..words.len() {
+                                    for j in i..words.len() {
+                                        let base_chunk = words[i..=j].join(" ");
+                                        if base_chunk.chars().count() >= 2 {
+                                            safe_chunks.push(base_chunk.clone());
+                                        }
+                                        
+                                        // 단일 어절일 경우, 조사/접미사를 떼어내기 위해 접두사(Prefix) 파생 단어 생성
+                                        if i == j {
+                                            let w_chars: Vec<char> = words[i].chars().collect();
+                                            if w_chars.len() > 2 {
+                                                // 앞에서부터 자르므로 "안전합니다" -> "안전", "안전합" (뒤에서 잘리는 "니다" 발생 원천 차단)
+                                                for end in 2..w_chars.len() {
+                                                    let prefix: String = w_chars[0..end].iter().collect();
+                                                    safe_chunks.push(prefix);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                safe_chunks.sort();
+                                safe_chunks.dedup();
+
                                 // Title 검증
                                 if !doc_title.contains(&extracted_val) {
                                     let mut best_chunk = String::new();
                                     let mut best_score = 0.3_f32; 
-                                    for start in 0..chars_vec.len() {
-                                        for end in (start + 2)..=chars_vec.len() {
-                                            let chunk_text: String = chars_vec[start..end].iter().collect();
-                                            let chunk_trim = chunk_text.trim().to_string(); 
+                                    
+                                    for chunk_trim in &safe_chunks {
+                                        if doc_title.contains(chunk_trim) {
+                                            let p_emb = model.get_embedding(chunk_trim.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                            let b_score = cosine_similarity(&p_emb, &bias_emb);
+                                            let p_score = cosine_similarity(&p_emb, &prej_emb);
+                                            let v_sim = cosine_similarity(&p_emb, &verb_emb);
                                             
-                                            if chunk_trim.chars().count() >= 2 && doc_title.contains(&chunk_trim) {
-                                                let p_emb = model.get_embedding(chunk_trim.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
-                                                let b_score = cosine_similarity(&p_emb, &bias_emb);
-                                                let p_score = cosine_similarity(&p_emb, &prej_emb);
-                                                let v_sim = cosine_similarity(&p_emb, &verb_emb);
-                                                
-                                                let word_count = chunk_trim.split_whitespace().count();
-                                                let beta = if word_count <= 2 { 0.05 } else { 0.10 };
-                                                let verb_penalty = v_sim * beta;
-                                                let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
-                                                
-                                                let mut t_bonus = 0.0;
-                                                let t_sim = cosine_similarity(&p_emb, &title_emb);
-                                                if t_sim > 0.0 { t_bonus = t_sim * 0.15; }
-                                                
-                                                let score = b_score - (p_score * penalty_weight) - verb_penalty + t_bonus;
-                                                if score > best_score {
-                                                    best_score = score;
-                                                    best_chunk = chunk_trim;
-                                                }
+                                            let word_count = chunk_trim.split_whitespace().count();
+                                            let beta = if word_count <= 2 { 0.05 } else { 0.10 };
+                                            let verb_penalty = v_sim * beta;
+                                            let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
+                                            
+                                            let mut t_bonus = 0.0;
+                                            let t_sim = cosine_similarity(&p_emb, &title_emb);
+                                            if t_sim > 0.0 { t_bonus = t_sim * 0.15; }
+                                            
+                                            let score = b_score - (p_score * penalty_weight) - verb_penalty + t_bonus;
+                                            if score > best_score {
+                                                best_score = score;
+                                                best_chunk = chunk_trim.clone();
                                             }
                                         }
                                     }
@@ -3282,31 +3487,27 @@ async fn process_task(
                                 if !doc_desc.contains(&extracted_val) {
                                     let mut best_chunk = String::new();
                                     let mut best_score = 0.3_f32; 
-                                    for start in 0..chars_vec.len() {
-                                        for end in (start + 2)..=chars_vec.len() {
-                                            let chunk_text: String = chars_vec[start..end].iter().collect();
-                                            let chunk_trim = chunk_text.trim().to_string(); 
+                                    
+                                    for chunk_trim in &safe_chunks {
+                                        if doc_desc.contains(chunk_trim) {
+                                            let p_emb = model.get_embedding(chunk_trim.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                            let b_score = cosine_similarity(&p_emb, &bias_emb);
+                                            let p_score = cosine_similarity(&p_emb, &prej_emb);
+                                            let v_sim = cosine_similarity(&p_emb, &verb_emb);
                                             
-                                            if chunk_trim.chars().count() >= 2 && doc_desc.contains(&chunk_trim) {
-                                                let p_emb = model.get_embedding(chunk_trim.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
-                                                let b_score = cosine_similarity(&p_emb, &bias_emb);
-                                                let p_score = cosine_similarity(&p_emb, &prej_emb);
-                                                let v_sim = cosine_similarity(&p_emb, &verb_emb);
-                                                
-                                                let word_count = chunk_trim.split_whitespace().count();
-                                                let beta = if word_count <= 2 { 0.05 } else { 0.10 };
-                                                let verb_penalty = v_sim * beta;
-                                                let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
-                                                
-                                                let mut t_bonus = 0.0;
-                                                let t_sim = cosine_similarity(&p_emb, &title_emb);
-                                                if t_sim > 0.0 { t_bonus = t_sim * 0.15; }
-                                                
-                                                let score = b_score - (p_score * penalty_weight) - verb_penalty + t_bonus;
-                                                if score > best_score {
-                                                    best_score = score;
-                                                    best_chunk = chunk_trim;
-                                                }
+                                            let word_count = chunk_trim.split_whitespace().count();
+                                            let beta = if word_count <= 2 { 0.05 } else { 0.10 };
+                                            let verb_penalty = v_sim * beta;
+                                            let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
+                                            
+                                            let mut t_bonus = 0.0;
+                                            let t_sim = cosine_similarity(&p_emb, &title_emb);
+                                            if t_sim > 0.0 { t_bonus = t_sim * 0.15; }
+                                            
+                                            let score = b_score - (p_score * penalty_weight) - verb_penalty + t_bonus;
+                                            if score > best_score {
+                                                best_score = score;
+                                                best_chunk = chunk_trim.clone();
                                             }
                                         }
                                     }
@@ -3341,8 +3542,26 @@ async fn process_task(
                             let mut subsumed_markers = std::collections::HashSet::new();
                             for (orig, marker) in &replacement_history {
                                 if extracted_val.contains(orig) && orig.chars().count() >= 2 {
-                                    hybrid_val = hybrid_val.replace(orig, marker);
-                                    subsumed_markers.insert(marker.clone());
+                                    // 🌟 [CRITICAL FIX] '에이전트가' 내부에 있는 '이전'처럼 단어 중간에 공백 없이 낀 파편(Infix)은 
+                                    // safe_replace에서 마스킹 대상이 아니었으므로 역산(Subsumption)에서도 안전하게 제외합니다.
+                                    let mut is_infix = false;
+                                    if let Some(idx) = extracted_val.find(orig) {
+                                        let cb = extracted_val[..idx].chars().next_back();
+                                        let ca = extracted_val[idx + orig.len()..].chars().next();
+                                        
+                                        if let (Some(char_before), Some(char_after)) = (cb, ca) {
+                                            if char_before.is_alphanumeric() && char_after.is_alphanumeric() {
+                                                if orig.chars().count() <= 2 {
+                                                    is_infix = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    if !is_infix {
+                                        hybrid_val = hybrid_val.replace(orig, marker);
+                                        subsumed_markers.insert(marker.clone());
+                                    }
                                 }
                             }
 
@@ -3456,38 +3675,45 @@ async fn process_task(
                                 if val.chars().count() >= 2 && !val.starts_with("[___REDACTED") {
                                     let final_repl = format!("[{}]", mnemonic);
                                     
-                                    // 1. 단순 교체 (노이즈/링크 복원 과정에서 튀어나온 텍스트 등 즉시 교체)
-                                    if masked_text.contains(val) { masked_text = masked_text.replace(val, &final_repl); final_sweep_count += 1; }
-                                    if doc_title.contains(val) { doc_title = doc_title.replace(val, &final_repl); final_sweep_count += 1; }
-                                    if doc_desc.contains(val) { doc_desc = doc_desc.replace(val, &final_repl); final_sweep_count += 1; }
+                                    // 1. 단순 교체 (노이즈/링크 복원 과정에서 튀어나온 텍스트 등 즉시 교체) - 중첩 마스킹 방지 적용
+                                    let escaped_val = regex::escape(val);
+                                    let pattern1 = format!(r"(\[[^\]]+\])|({})", escaped_val);
+                                    if let Ok(re) = regex::Regex::new(&pattern1) {
+                                        let replacer = |caps: &regex::Captures| {
+                                            if caps.get(1).is_some() {
+                                                caps[0].to_string() // 이미 마스킹된 [니모닉] 내부는 보존
+                                            } else {
+                                                final_repl.clone()
+                                            }
+                                        };
+                                        let new_text = re.replace_all(&masked_text, replacer).to_string();
+                                        if new_text != masked_text { masked_text = new_text; final_sweep_count += 1; }
+                                        let new_title = re.replace_all(&doc_title, replacer).to_string();
+                                        if new_title != doc_title { doc_title = new_title; final_sweep_count += 1; }
+                                        let new_desc = re.replace_all(&doc_desc, replacer).to_string();
+                                        if new_desc != doc_desc { doc_desc = new_desc; final_sweep_count += 1; }
+                                    }
 
-                                    // 2. 띄어쓰기/특수기호 변형 누락분 추적 교체 (Space-Agnostic Sweep)
+                                    // 2. 띄어쓰기/특수기호 변형 누락분 추적 교체 (Space-Agnostic Sweep) - 중첩 마스킹 방지 적용
                                     let no_space_val: String = val.chars().filter(|c| c.is_alphanumeric()).collect();
                                     if no_space_val.len() >= 2 && no_space_val.len() <= 100 {
                                         let escaped_chars: Vec<String> = no_space_val.chars().map(|c| regex::escape(&c.to_string())).collect();
                                         let regex_pattern = escaped_chars.join(r"[^\p{L}\p{N}_]+"); 
-                                        if let Ok(re) = regex::Regex::new(&regex_pattern) {
-                                            masked_text = re.replace_all(&masked_text, |caps: &regex::Captures| {
-                                                let matched_str = caps[0].to_string();
-                                                if !matched_str.contains("[") && !matched_str.contains("]") {
-                                                    final_sweep_count += 1;
+                                        let pattern2 = format!(r"(\[[^\]]+\])|({})", regex_pattern);
+                                        if let Ok(re) = regex::Regex::new(&pattern2) {
+                                            let replacer = |caps: &regex::Captures| {
+                                                if caps.get(1).is_some() {
+                                                    caps[0].to_string() // 이미 마스킹된 [니모닉] 내부는 보존
+                                                } else {
                                                     final_repl.clone()
-                                                } else { matched_str }
-                                            }).to_string();
-                                            doc_title = re.replace_all(&doc_title, |caps: &regex::Captures| {
-                                                let matched_str = caps[0].to_string();
-                                                if !matched_str.contains("[") && !matched_str.contains("]") {
-                                                    final_sweep_count += 1;
-                                                    final_repl.clone()
-                                                } else { matched_str }
-                                            }).to_string();
-                                            doc_desc = re.replace_all(&doc_desc, |caps: &regex::Captures| {
-                                                let matched_str = caps[0].to_string();
-                                                if !matched_str.contains("[") && !matched_str.contains("]") {
-                                                    final_sweep_count += 1;
-                                                    final_repl.clone()
-                                                } else { matched_str }
-                                            }).to_string();
+                                                }
+                                            };
+                                            let new_text = re.replace_all(&masked_text, replacer).to_string();
+                                            if new_text != masked_text { masked_text = new_text; final_sweep_count += 1; }
+                                            let new_title = re.replace_all(&doc_title, replacer).to_string();
+                                            if new_title != doc_title { doc_title = new_title; final_sweep_count += 1; }
+                                            let new_desc = re.replace_all(&doc_desc, replacer).to_string();
+                                            if new_desc != doc_desc { doc_desc = new_desc; final_sweep_count += 1; }
                                         }
                                     }
                                 }
