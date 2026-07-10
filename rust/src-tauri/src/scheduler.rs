@@ -1277,16 +1277,33 @@ async fn process_task(
                                 (Some(_), Some(t_idx)) | (None, Some(t_idx)) => {
                                     let absolute_t_idx = current_idx + t_idx;
                                     
-                                    // 🌟 [Infix 방어 로직] 외래어나 다른 단어의 중간에 낀 파편(예: 에'이전'트) 치환 방지
+                                    // 🌟 [Infix 방어 로직] 외래어나 다른 단어의 중간에 낀 파편(예: 에'이전'트) 치환 방지 및 영문 띄어쓰기(부분 일치) 방어
                                     let mut is_infix = false;
                                     let char_before = text[..absolute_t_idx].chars().next_back();
                                     let char_after = text[absolute_t_idx + target.len()..].chars().next();
                                     
-                                    if let (Some(cb), Some(ca)) = (char_before, char_after) {
-                                        if cb.is_alphanumeric() && ca.is_alphanumeric() {
-                                            // 앞뒤가 모두 문자(한글, 영문 등)로 둘러싸여 있으면서,
-                                            // 타겟이 2글자 이하로 짧은 경우 다른 단어의 파편으로 간주하여 치환 스킵
+                                    let is_ascii_target = target.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || c == '-' || c == '_');
+
+                                    if is_ascii_target {
+                                        // 영문/숫자 타겟인 경우, 앞이나 뒤에 영문자/숫자가 하나라도 붙어있으면 독립 단어가 아닌 파편(Prefix/Suffix/Infix)으로 간주
+                                        let prev_is_alpha = char_before.map_or(false, |c| c.is_ascii_alphanumeric());
+                                        let next_is_alpha = char_after.map_or(false, |c| c.is_ascii_alphanumeric());
+                                        if prev_is_alpha || next_is_alpha {
+                                            is_infix = true;
+                                        }
+                                    } else {
+                                        // 기존 한글 및 기타 언어 로직 보완
+                                        let prev_is_alnum = char_before.map_or(false, |c| c.is_alphanumeric());
+                                        let next_is_alnum = char_after.map_or(false, |c| c.is_alphanumeric());
+                                        
+                                        if prev_is_alnum && next_is_alnum {
+                                            // 앞뒤가 모두 문자로 둘러싸여 있는 경우 (예: 에'이전'트)
                                             if target_char_count <= 2 {
+                                                is_infix = true;
+                                            }
+                                        } else if prev_is_alnum || next_is_alnum {
+                                            // 앞이나 뒤 한쪽만 붙어있는 경우, 타겟이 1글자면 무조건 파편으로 간주
+                                            if target_char_count <= 1 {
                                                 is_infix = true;
                                             }
                                         }
@@ -3049,9 +3066,19 @@ async fn process_task(
                                             let cb = extracted_val[..idx].chars().next_back();
                                             let ca = extracted_val[idx + orig.len()..].chars().next();
                                             let mut is_infix = false;
-                                            if let (Some(char_before), Some(char_after)) = (cb, ca) {
-                                                if char_before.is_alphanumeric() && char_after.is_alphanumeric() && orig.chars().count() <= 2 {
-                                                    is_infix = true;
+                                            let is_ascii_orig = orig.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || c == '-' || c == '_');
+                                            
+                                            if is_ascii_orig {
+                                                let prev_is_alpha = cb.map_or(false, |c| c.is_ascii_alphanumeric());
+                                                let next_is_alpha = ca.map_or(false, |c| c.is_ascii_alphanumeric());
+                                                if prev_is_alpha || next_is_alpha { is_infix = true; }
+                                            } else {
+                                                let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
+                                                let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
+                                                if prev_is_alnum && next_is_alnum {
+                                                    if orig.chars().count() <= 2 { is_infix = true; }
+                                                } else if prev_is_alnum || next_is_alnum {
+                                                    if orig.chars().count() <= 1 { is_infix = true; }
                                                 }
                                             }
                                             if !is_infix { is_valid_overlap = true; }
@@ -3061,9 +3088,19 @@ async fn process_task(
                                             let cb = orig[..idx].chars().next_back();
                                             let ca = orig[idx + extracted_val.len()..].chars().next();
                                             let mut is_infix = false;
-                                            if let (Some(char_before), Some(char_after)) = (cb, ca) {
-                                                if char_before.is_alphanumeric() && char_after.is_alphanumeric() && extracted_val.chars().count() <= 2 {
-                                                    is_infix = true;
+                                            let is_ascii_ext = extracted_val.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || c == '-' || c == '_');
+                                            
+                                            if is_ascii_ext {
+                                                let prev_is_alpha = cb.map_or(false, |c| c.is_ascii_alphanumeric());
+                                                let next_is_alpha = ca.map_or(false, |c| c.is_ascii_alphanumeric());
+                                                if prev_is_alpha || next_is_alpha { is_infix = true; }
+                                            } else {
+                                                let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
+                                                let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
+                                                if prev_is_alnum && next_is_alnum {
+                                                    if extracted_val.chars().count() <= 2 { is_infix = true; }
+                                                } else if prev_is_alnum || next_is_alnum {
+                                                    if extracted_val.chars().count() <= 1 { is_infix = true; }
                                                 }
                                             }
                                             if !is_infix { is_valid_overlap = true; }
@@ -3549,11 +3586,18 @@ async fn process_task(
                                         let cb = extracted_val[..idx].chars().next_back();
                                         let ca = extracted_val[idx + orig.len()..].chars().next();
                                         
-                                        if let (Some(char_before), Some(char_after)) = (cb, ca) {
-                                            if char_before.is_alphanumeric() && char_after.is_alphanumeric() {
-                                                if orig.chars().count() <= 2 {
-                                                    is_infix = true;
-                                                }
+                                        let is_ascii_orig = orig.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || c == '-' || c == '_');
+                                        if is_ascii_orig {
+                                            let prev_is_alpha = cb.map_or(false, |c| c.is_ascii_alphanumeric());
+                                            let next_is_alpha = ca.map_or(false, |c| c.is_ascii_alphanumeric());
+                                            if prev_is_alpha || next_is_alpha { is_infix = true; }
+                                        } else {
+                                            let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
+                                            let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
+                                            if prev_is_alnum && next_is_alnum {
+                                                if orig.chars().count() <= 2 { is_infix = true; }
+                                            } else if prev_is_alnum || next_is_alnum {
+                                                if orig.chars().count() <= 1 { is_infix = true; }
                                             }
                                         }
                                     }
