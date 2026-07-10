@@ -925,7 +925,8 @@ async fn process_task(
         emit_term("[PROCESS] Starting batch masking for selected documents...");
 
         // 🌟 [CRITICAL FIX] Granite 모델을 매번 불러오지 않기 위해 마스킹 작업 전체 진입 전 최초 1회만 로드합니다!
-        model.ensure_granite().await?;
+        // 현재는 임베딩 모델만 사용하므로 불필요한 Granite LLM VRAM 할당을 방지하기 위해 주석 처리합니다.
+        // model.ensure_granite().await?;
         
         let uuids = task_data.get("uuids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         if uuids.is_empty() { return Ok(()); }
@@ -3502,6 +3503,9 @@ async fn process_task(
                         // 🌟 마스킹된 전체 텍스트도 masked 오브젝트 내부의 text 필드로 함께 캡슐화합니다.
                         extracted_json = json!({ "matches": all_matches, "text": masked_text, "title": doc_title.clone(), "description": doc_desc.clone() });
                     }
+                    
+                    // 🌟 [VRAM 해제] 단일 문서에 대한 Stanza(ONNX) 추론이 모두 끝났으므로 즉시 메모리를 반환합니다.
+                    drop(stanza_pipeline);
                 }
 
                 // 🌟 [STEP 3] 최종 결과물(마스킹 정보)을 DB에 업데이트합니다.
@@ -3527,6 +3531,18 @@ async fn process_task(
                     ).await;
                 }
             }
+        }
+
+        // 🌟 [VRAM 해제] 마스킹 전체 작업이 종료되었으므로 LLM 및 임베딩 모델의 리소스를 VRAM에서 즉시 비웁니다.
+        emit_term("[PROCESS] 🧹 마스킹 작업 완료. VRAM 반환을 위해 모든 AI 모델 리소스를 즉시 해제합니다.");
+        drop(model); // 지역 변수로 잡혀있던 모델 참조(Arc 클론)를 먼저 끊어줍니다.
+        
+        {
+            let mut model_lock = model_mutex.lock().await;
+            if let Some(m) = model_lock.as_ref() {
+                m.deep_purge_resources().await; // 임베딩 및 생성 모델의 메모리를 완벽 반환합니다.
+            }
+            *model_lock = None; // 전역 Mutex 내 모델 인스턴스 완전 소멸
         }
 
         let summary_msg = "Extraction & Masking complete. Refreshing list...".to_string();
