@@ -350,6 +350,8 @@ export default {
 		// 	region: env.aws_region,
 		// })
 
+		// "English", "German", "Spanish", "French", "Japanese", "Portuguese", "Arabic", "Czech", "Italian", "Korean", "Dutch", "Chinese"
+
 		var {
 			// 도시 (예: "San Jose")
 			city,

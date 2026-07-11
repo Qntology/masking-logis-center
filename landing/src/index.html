@@ -1,688 +1,165 @@
 <!DOCTYPE html>
-<html lang="en" class="scroll-smooth">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>terminal.logis.center | Intelligent Data Bridge & Privacy</title>
-    <!-- Tailwind CSS (Local preferred, CDN fallback) -->
-    <script src="static/js/tailwindcss.js" onerror="this.src='https://cdn.tailwindcss.com'"></script>
-    <!-- FontAwesome (Local preferred, CDN fallback) -->
-    <link rel="stylesheet" href="static/css/styles.css?1">
-    <link rel="stylesheet" href="static/css/fontawesome.css">
-    <link rel="stylesheet" href="static/css/google-fonts.css">
-    
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.1.9/p5.min.js"></script>
-    <script src="static/js/vanta.topology.min.js"></script>
-
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    fontFamily: {
-                        mono: ['JetBrains Mono', 'monospace'],
-                        sans: ['Noto Sans KR', 'sans-serif'],
-                    },
-                    colors: {
-                        glass: {
-                            DEFAULT: 'rgba(255, 255, 255, 0.03)',
-                            border: 'rgba(255, 255, 255, 0.1)',
-                            accent: '#3b82f6'
-                        }
-                    },
-                    borderRadius: {
-                        '3xl': '24px',
-                        '4xl': '32px'
-                    }
-                }
-            }
-        }
-    </script>
-
-    <style type="text/tailwindcss">
-        @layer base {
-            body {
-                @apply bg-black text-white overflow-x-hidden font-sans;
-            }
-        }
-
-        @layer components {
-            /* Video Background Container - Changed to absolute */
-            .video-bg-wrap {
-                @apply absolute inset-0 -z-10 overflow-hidden;
-            }
-            /* Overlay */
-            .video-bg-wrap::before {
-                content: "";
-                @apply absolute inset-0 z-[11];
-                background: linear-gradient(to top, rgba(0, 0, 0, 1) 0%, transparent 100%);
-            }
-            .video-bg-wrap::after {
-                content: "";
-                @apply absolute inset-0 z-10;
-                background-image: conic-gradient(rgba(0,0,0,0.5) 90deg, transparent 90deg 180deg, rgba(0,0,0,0.5) 180deg 270deg, transparent 270deg);
-                background-size: 5px 5px;
-            }
-            .video-bg-wrap #vanta-bg {
-                @apply absolute inset-0 w-full h-full z-0;
-            }
-
-            /* Glass Panel */
-            .glass-panel {
-                @apply bg-white/[0.03] backdrop-blur-[24px] border border-white/[0.08] shadow-2xl;
-                background: linear-gradient(145deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%);
-            }
-            .glass-panel-dark {
-                @apply bg-black/20 backdrop-blur-[24px] border border-white/[0.05];
-            }
-            
-            .nav-glass {
-                @apply absolute top-6 left-6 right-6 md:left-1/2 md:-translate-x-1/2 z-50 w-auto md:w-[95%] max-w-6xl px-6 py-3;
-            }
-            
-            .text-spec { 
-                @apply text-white font-bold text-2xl tracking-tighter;
-                text-shadow: 0 0 20px rgba(59, 130, 246, 0.5);
-            }
-
-            .col-badge {
-                @apply inline-block text-[10px] text-gray-400 bg-white/5 px-2 py-0.5 rounded border border-white/10 mr-1 mb-1 font-mono;
-            }
-            .col-badge-highlight {
-                @apply text-white border-blue-500/30 bg-blue-500/10;
-            }
-
-            .tab-btn {
-                @apply px-6 py-2 rounded-full transition-all duration-300 text-sm font-medium text-gray-400 border border-transparent whitespace-nowrap flex-shrink-0;
-            }
-            .tab-btn.active {
-                @apply glass-panel text-white border-white/20 shadow-lg;
-                background: rgba(255,255,255,0.1);
-            }
-
-            .text-gradient {
-                @apply bg-clip-text text-transparent bg-gradient-to-br from-white via-white to-blue-400;
-            }
-
-            /* Custom Horizontal Scrollbar */
-            .scrollbar-hide::-webkit-scrollbar {
-                height: 4px;
-            }
-            .scrollbar-hide::-webkit-scrollbar-track {
-                background: rgba(255, 255, 255, 0.02);
-                border-radius: 10px;
-            }
-            .scrollbar-hide::-webkit-scrollbar-thumb {
-                background: rgba(255, 255, 255, 0.1);
-                border-radius: 10px;
-                transition: background 0.3s;
-            }
-            .scrollbar-hide::-webkit-scrollbar-thumb:hover {
-                background: rgba(255, 255, 255, 0.2);
-            }
-        }
-    </style>
-
+    <title>terminal.logis.center</title>
     <style>
-        .media{position: relative; z-index: 0;}
-        .media video{position: relative; z-index: -1;}
-        .media .grid{position: relative; z-index: 1;}
+        .area { display: block; margin-left:auto; margin-right:auto; padding: 1em; max-width: 380px; box-sizing:border-box; }
+        .nav a,
+        .nav h1,
+        .nav select { display: inline-block; vertical-align: bottom; font-size:16px; }
+        .nav select { margin-left: 8em; border:0; text-decoration: underline; }
+        h1{margin: 0;}
+        h2,h3,h4{font-weight: 500;}
 
-        .media:before{content: ""; position: absolute; inset: 0 -100vw 0 -100vw; z-index: 11; background: linear-gradient(to top, rgba(0, 0, 0, 1) 0%, transparent 100%); z-index: 0;}
-        .media:after{content: ""; position: absolute; left: -100vw; right: -100vw; top: 100%; height: 100vh; z-index: 11; background: #000; z-index: 0; }
+
+        p{ margin-left: 1.3em; }
     </style>
 </head>
 <body>
-
-    <!-- Navigation -->
-    <nav class="nav-glass flex items-center justify-between max-w-3xl mx-auto pl-3 ">
-        <div class="flex items-center gap-4 px-4 py-1.5">
-            <span class="text-sm font-bold tracking-tighter text-white font-mono">terminal.logis.center</span>
-            <div class="h-4 w-px bg-white/10"></div>
-            <div class="flex items-center gap-2">
-                <span class="relative flex h-2 w-2">
-                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                    <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-                </span>
-                <span class="text-xs text-green-400 font-medium font-mono uppercase" data-i18n="system_status">Status: Ready</span>
-            </div>
-        </div>
-
-        <div class="flex items-center gap-3">
-            <div class="relative flex items-center">
-                <select onchange="changeLanguage(this.value)" class="glass-panel text-xs font-bold font-mono text-white bg-transparent outline-none cursor-pointer rounded-full pl-4 pr-8 py-2.5 border border-white/10 hover:bg-white/10 transition-all appearance-none z-10 relative">
-                    <option value="en" class="bg-[#1a1a1a] text-white">EN</option>
-                    <option value="ja" class="bg-[#1a1a1a] text-white">JA</option>
+    <div class="wrap">
+        <!-- Navigation -->
+        <div class="nav">
+            <div class="area">
+                <h1><a href="/">terminal.logis.center</a></h1>
+                <select id="lang" name="lang" onchange="changeLanguage(this.value)">
+                    <option value="en">EN</option>
+                    <option value="ja">JA</option>
                 </select>
-                <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 z-10 text-white/50">
-                    <i class="fa-solid fa-chevron-down text-[10px]"></i>
-                </div>
-            </div>
-
-            <div class="relative" id="download-wrapper">
-                <div class="flex items-center bg-white rounded-full overflow-hidden shadow-xl shadow-blue-900/10">
-                    <button id="main-dl-btn" onclick="executeDownload()" class="text-xs bg-white text-black pl-5 pr-3 py-2.5 font-bold hover:bg-gray-100 transition-colors flex items-center gap-2">
-                        <i id="main-dl-icon" class="fa-brands fa-windows"></i>
-                        <span id="main-dl-text" data-i18n="nav_download">Download Installer</span>
-                    </button>
-                    <button onclick="toggleDlMenu(event)" class="bg-white text-black pr-4 py-2.5 border-l border-gray-100 hover:bg-gray-100 transition-colors">
-                        <i class="fa-solid fa-chevron-down text-[10px]"></i>
-                    </button>
-                </div>
-                <!-- Dropdown Menu -->
-                <div id="dl-menu" class="hidden absolute right-0 mt-3 w-56 glass-panel rounded-2xl p-2 border-white/10 shadow-3xl z-[100]">
-                    <div id="dl-options-list" class="flex flex-col gap-1">
-                        <!-- Options injected by JS -->
-                    </div>
-                </div>
             </div>
         </div>
-    </nav>
 
-    <!-- Hero Section (Video Background is now INSIDE this section) -->
-    <section class="pt-40 pb-24 px-6 relative z-10 overflow-hidden min-h-[85vh] flex items-center">
-        <div class="video-bg-wrap">
-            <div id="vanta-bg"></div>
-        </div>
-
-        <div class="max-w-3xl mx-auto w-full">
-            <!-- Main Title & Desc -->
-            <div class="text-center space-y-6 mb-16 py-2">
-                <h1 class="text-3xl md:text-5xl font-bold tracking-tighter text-gradient mb-4" data-i18n="hero_title">Start difficult data management<br>keep it safe with privacy filters</h1>
-                <p class="text-gray-400 text-lg leading-relaxed break-keep" style="text-shadow: 0 0 20px #000;" data-i18n="hero_desc">
-                    Now, just drag and drop complex data to AI.
-                </p>
-            </div>
-
-            <div class="media">
-                <video style="border-radius: 1em;" autoplay loop muted playsinline>
-                    <source src="/video/temp2.mp4" type="video/mp4">
-                </video>
-
-                <!-- Main Title & Desc -->
-                <div class="max-w-xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-4" style="position: relative; top: -90px;">
-                    <button class="glass-panel px-2 py-4 rounded-2xl flex items-center justify-center gap-3 opacity-50 cursor-not-allowed border-white/5 text-gray-500 w-full">
-                        <i class="fa-brands fa-linux text-xl"></i>
-                        <span data-i18n="btn_linux">Coming Soon</span>
-                    </button>
-                    <button class="glass-panel px-2 py-4 rounded-2xl flex items-center justify-center gap-3 opacity-50 cursor-not-allowed border-white/5 text-gray-500 w-full">
-                        <i class="fa-brands fa-apple text-xl"></i>
-                        <span data-i18n="btn_mac">Coming Soon</span>
-                    </button>
-                    <button onclick="executeDownload()" class="glass-panel bg-blue-600/20 hover:bg-blue-600/40 border-blue-500/30 text-white font-bold px-2 py-4 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 w-full">
-                        <i class="fa-brands fa-windows text-xl"></i>
-                        <span data-i18n="btn_win">Download</span>
-                    </button>
+        <div class="section">
+            <div class="area">
+                <div>
+                    <h2 data-i18n="how_it_works_title">Quick Start</h2>
+                    <div></div>
                 </div>
-            </div>
-
-            <div class="max-w-xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-3 mb-16">
-                <div class="glass-panel p-3 rounded-3xl group border-white/0 transition-colors">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_speed">Data Collection</span>
-                    <div class="text-spec text-blue-400 group-hover:scale-105 transition-transform duration-500">
-                        One-Click <br><span class="text-sm font-normal text-gray-500 ml-1">Integration</span>
-                    </div>
-                </div>
-        
-                <div class="glass-panel p-3 rounded-3xl group border-white/0 transition-colors">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_security">Privacy</span>
-                    <div class="text-spec text-green-400 group-hover:scale-105 transition-transform duration-500">
-                        Auto <br><span class="text-sm font-normal text-gray-500 ml-1">Masking</span>
-                    </div>
-                </div>
-
-                <div class="glass-panel p-3 rounded-3xl group border-white/0 transition-colors">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-widest block mb-3 font-mono" data-i18n="spec_capability">AI Analysis</span>
-                    <div class="text-spec text-white group-hover:scale-105 transition-transform duration-500">
-                        Ask <br><span class="text-sm font-normal text-gray-500 ml-1">Anything</span>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <section class="py-24 border-t border-white/5 bg-[#030303] relative z-20">
-        <div class="max-w-3xl mx-auto px-6">
-            
-            <div class="mb-12 flex items-center gap-4">
-                <h2 class="text-xs font-bold text-gray-500 uppercase tracking-[0.3em] font-mono" data-i18n="how_it_works_title">How It Works</h2>
-                <div class="flex-1 h-[1px] bg-gradient-to-r from-white/10 to-transparent"></div>
-            </div>
-            
-            <div class="gap-8">
-                <div class="glass-panel p-8 rounded-3xl flex flex-col justify-between gap-6 hover:bg-white/[0.04] transition-colors duration-300">
-                    <div>
-                        <div class="flex items-center gap-3 mb-4">
-                            <span class="flex items-center justify-center w-8 h-8 rounded-full bg-blue-500/10 text-blue-400 font-mono text-xs font-bold border border-blue-500/20">01</span>
-                            <h3 class="text-xl font-bold text-white tracking-tight" data-i18n="scan_title">1. Scan</h3>
-                        </div>
-                        <p class="text-sm text-gray-400 leading-relaxed break-keep" data-i18n="scan_desc">
-                            Scan documents, images, or webpages to automatically extract data.
-                        </p>
-                    </div>
-                    <div class="aspect-video w-full bg-black/40 border border-white/10 rounded-2xl flex flex-col items-center justify-center gap-2 text-gray-500 hover:border-blue-500/40 transition-colors group cursor-pointer shadow-inner">
-                        <i class="fa-solid fa-expand text-xl group-hover:text-blue-400 transition-colors"></i>
-                        <span class="text-xs font-mono tracking-wider group-hover:text-gray-400 transition-colors" data-i18n="scan_video">[ Scan Demonstration Video ]</span>
-                    </div>
-                </div>
-
-                <div class="glass-panel p-8 rounded-3xl flex flex-col justify-between gap-6 hover:bg-white/[0.04] transition-colors duration-300">
-                    <div>
-                        <div class="flex items-center gap-3 mb-4">
-                            <span class="flex items-center justify-center w-8 h-8 rounded-full bg-green-500/10 text-green-400 font-mono text-xs font-bold border border-green-500/20">02</span>
-                            <h3 class="text-xl font-bold text-white tracking-tight" data-i18n="drag_title">2. Drag & Drop</h3>
-                        </div>
-                        <p class="text-sm text-gray-400 leading-relaxed break-keep" data-i18n="drag_desc">
-                            Simply drag and drop files onto the screen to start AI analysis instantly.
-                        </p>
-                    </div>
-                    <div class="aspect-video w-full bg-black/40 border border-white/10 rounded-2xl flex flex-col items-center justify-center gap-2 text-gray-500 hover:border-green-500/40 transition-colors group cursor-pointer shadow-inner">
-                        <i class="fa-solid fa-arrow-down-line text-xl group-hover:text-green-400 transition-colors"></i>
-                        <span class="text-xs font-mono tracking-wider group-hover:text-gray-400 transition-colors" data-i18n="drag_video">[ Drag & Drop Demonstration Video ]</span>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <section class="py-24 border-t border-white/0 bg-black relative z-20">
-        <div class="max-w-3xl mx-auto px-6">
-            
-            <div class="mb-12 flex items-center gap-4">
-                <h2 class="text-xs font-bold text-gray-500 uppercase tracking-[0.3em] font-mono" data-i18n="core_docs_title">Core Supported Documents</h2>
-                <div class="flex-1 h-[1px] bg-gradient-to-r from-white/10 to-transparent"></div>
-            </div>
-            
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <!-- CI -->
-                <div class="glass-panel p-8 rounded-3xl hover:bg-white/[0.05] transition-colors">
-                    <div class="flex justify-between items-start mb-6">
-                        <div>
-                            <h3 class="text-xl font-bold text-white flex items-center gap-2">
-                                <i class="fa-solid fa-file-invoice text-blue-400"></i> CI
-                            </h3>
-                            <p class="text-xs text-gray-400 mt-1 font-mono">Commercial Invoice</p>
-                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_ci">Commercial Invoice: Standard for payment and customs</p>
-                        </div>
-                        <span class="text-[10px] font-mono text-blue-400 border border-blue-500/30 bg-blue-500/10 px-2 py-1 rounded-full uppercase">Essential</span>
-                    </div>
-                    <div class="flex flex-wrap gap-1">
-                        <span class="col-badge col-badge-highlight">Invoice No</span>
-                        <span class="col-badge">Issue Date</span>
-                        <span class="col-badge col-badge-highlight">Incoterms</span>
-                        <span class="col-badge">Payment Terms</span>
-                        <span class="col-badge">Total Amount</span>
-                        <span class="col-badge">Shipper/Consignee</span>
-                    </div>
-                </div>
-
-                <div class="glass-panel p-8 rounded-3xl hover:bg-white/[0.05] transition-colors">
-                    <div class="flex justify-between items-start mb-6">
-                        <div>
-                            <h3 class="text-xl font-bold text-white flex items-center gap-2">
-                                <i class="fa-solid fa-boxes-packing text-blue-400"></i> PL
-                            </h3>
-                            <p class="text-xs text-gray-400 mt-1 font-mono">Packing List</p>
-                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_pl">Packing List: Cargo physical information</p>
-                        </div>
-                        <span class="text-[10px] font-mono text-blue-400 border border-blue-500/30 bg-blue-500/10 px-2 py-1 rounded-full uppercase">Essential</span>
-                    </div>
-                    <div class="flex flex-wrap gap-1">
-                        <span class="col-badge col-badge-highlight">Container No</span>
-                        <span class="col-badge">Seal No</span>
-                        <span class="col-badge col-badge-highlight">Gross/Net Weight</span>
-                        <span class="col-badge">Package Count</span>
-                        <span class="col-badge">Volume</span>
-                    </div>
-                </div>
-
-                <div class="glass-panel p-8 rounded-3xl hover:bg-white/[0.05] transition-colors">
-                    <div class="flex justify-between items-start mb-6">
-                        <div>
-                            <h3 class="text-xl font-bold text-white flex items-center gap-2">
-                                <i class="fa-solid fa-ship text-blue-400"></i> BL
-                            </h3>
-                            <p class="text-xs text-gray-400 mt-1 font-mono">Bill of Lading</p>
-                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_bl">Bill of Lading: Ocean transport document of title</p>
-                        </div>
-                        <span class="text-[10px] font-mono text-blue-400 border border-blue-500/30 bg-blue-500/10 px-2 py-1 rounded-full uppercase">Essential</span>
-                    </div>
-                    <div class="flex flex-wrap gap-1">
-                        <span class="col-badge col-badge-highlight">B/L Number</span>
-                        <span class="col-badge">Vessel/Voyage</span>
-                        <span class="col-badge col-badge-highlight">On Board Date</span>
-                        <span class="col-badge">POL / POD</span>
-                        <span class="col-badge">Freight Term</span>
-                    </div>
-                </div>
-
-                <div class="glass-panel p-8 rounded-3xl hover:bg-white/[0.05] transition-colors">
-                    <div class="flex justify-between items-start mb-6">
-                        <div>
-                            <h3 class="text-xl font-bold text-white flex items-center gap-2">
-                                <i class="fa-solid fa-file-contract text-blue-400"></i> PO
-                            </h3>
-                            <p class="text-xs text-gray-400 mt-1 font-mono">Purchase Order</p>
-                            <p class="text-sm text-gray-500 mt-2" data-i18n="desc_po">Purchase Order: Ordering and contract base</p>
-                        </div>
-                        <span class="text-[10px] font-mono text-blue-400 border border-blue-500/30 bg-blue-500/10 px-2 py-1 rounded-full uppercase">Essential</span>
-                    </div>
-                    <div class="flex flex-wrap gap-1">
-                        <span class="col-badge col-badge-highlight">PO Number</span>
-                        <span class="col-badge">SKU / Code</span>
-                        <span class="col-badge col-badge-highlight">Unit Price</span>
-                        <span class="col-badge">Quantity</span>
-                        <span class="col-badge">Delivery Date</span>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Full Catalog Section (Tabs) -->
-    <section class="py-24 px-6 relative z-20 bg-[#050505]">
-        <div class="max-w-3xl px-6 mx-auto">
-            
-            <div class="mb-10 flex items-center gap-4">
-                <h2 class="text-xs font-bold text-gray-500 uppercase tracking-[0.3em] font-mono" data-i18n="full_catalog_title">Full Support Catalog</h2>
-                <div class="flex-1 h-[1px] bg-gradient-to-r from-white/10 to-transparent"></div>
-            </div>
-
-            <!-- Tabs -->
-            <div class="flex items-center mb-8 overflow-x-auto pb-4 scrollbar-hide gap-2 flex-nowrap justify-start md:justify-start">
-                <button class="tab-btn active" onclick="openTab(event, 'tab-contract')" data-i18n="tab_contract">Contract / Payment</button>
-                <button class="tab-btn" onclick="openTab(event, 'tab-logis')" data-i18n="tab_logis">Shipping / Logistics</button>
-                <button class="tab-btn" onclick="openTab(event, 'tab-customs')" data-i18n="tab_customs">Customs / Declaration</button>
-                <button class="tab-btn" onclick="openTab(event, 'tab-cert')" data-i18n="tab_cert">Certification / Special</button>
-            </div>
-
-            <!-- Tab Content Container -->
-            <div class="glass-panel p-8 rounded-3xl min-h-[400px]">
                 
-                <!-- 1. Contract / Payment -->
-                <div id="tab-contract" class="tab-content block space-y-4">
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                    <div>
                         <div>
-                            <span class="text-white font-bold text-lg block">LC (Letter of Credit)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_lc">Letter of Credit: Bank payment guarantee document</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">LC No</span><span class="col-badge">Expiry Date</span><span class="col-badge">Latest Shipment</span><span class="col-badge">Partial/Transship</span>
+                            <h4 data-i18n="down_title">1. Download</h4>
+                            <p data-i18n="down_desc">
+                                <a onclick="executeDownload()" style="cursor: pointer; text-decoration: underline;">Download</a>
+                            </p>
                         </div>
                     </div>
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+
+                    <div>
                         <div>
-                            <span class="text-white font-bold text-lg block">SC (Sales Contract)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_sc">Sales Contract: Official transaction contract</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">Contract No</span><span class="col-badge">Validity</span><span class="col-badge">Claim Period</span>
+                            <h4 data-i18n="scan_title">2. Scan</h4>
+                            <p data-i18n="scan_desc">
+                                Scan documents, images, or webpages to automatically extract data.
+                            </p>
                         </div>
                     </div>
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+
+                    <div>
                         <div>
-                            <span class="text-white font-bold text-lg block">PI (Proforma Invoice)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_pi">Proforma Invoice: Advance payment proof</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">Ref No</span><span class="col-badge">Bank Info</span><span class="col-badge">Swift Code</span>
+                            <h4 data-i18n="drag_title">3. Drag & Drop</h4>
+                            <p data-i18n="drag_desc">
+                                Simply drag and drop files onto the screen to start AI analysis instantly.
+                            </p>
                         </div>
                     </div>
                 </div>
-
-                <div id="tab-logis" class="tab-content hidden space-y-4">
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div>
-                            <span class="text-white font-bold text-lg block">SA (Shipping Advice)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_sa">Shipping Advice: Post-shipment notification</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">Advice No</span><span class="col-badge">Vessel</span><span class="col-badge">BL No</span>
-                        </div>
-                    </div>
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div>
-                            <span class="text-white font-bold text-lg block">AN / DO</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_an">Arrival Notice and Delivery Order</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">Arrival Date</span><span class="col-badge">Free Time</span><span class="col-badge">CY Location</span>
-                        </div>
-                    </div>
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div>
-                            <span class="text-white font-bold text-lg block">AWB (Airway Bill)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_awb">Airway Bill: Air cargo proof</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">AWB No</span><span class="col-badge">Flight No</span><span class="col-badge">Handling Info</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 3. Customs -->
-                <div id="tab-customs" class="tab-content hidden space-y-4">
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div>
-                            <span class="text-white font-bold text-lg block">ED / ID (Export/Import Dec)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_ed">Export/Import Declaration: Official customs declaration document</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">Dec No</span><span class="col-badge">Customs Value</span><span class="col-badge">Tax Amount</span>
-                        </div>
-                    </div>
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div>
-                            <span class="text-white font-bold text-lg block">CO (Cert of Origin)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_co">Certificate of Origin: Verification of origin and FTA application document</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">Ref No</span><span class="col-badge">Criteria</span><span class="col-badge">Authority</span>
-                        </div>
-                    </div>
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div>
-                            <span class="text-white font-bold text-lg block">CINV (Customs Invoice)</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_cinv">Customs Invoice: Customs valuation proof</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">Origin</span><span class="col-badge">Market Value</span><span class="col-badge">Unit Price</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div id="tab-cert" class="tab-content hidden space-y-4">
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div>
-                            <span class="text-white font-bold text-lg block">IC / CA / WC</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_ic">Quality and ingredient analysis certificate</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">Result</span><span class="col-badge">Specification</span><span class="col-badge">Method</span>
-                        </div>
-                    </div>
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div>
-                            <span class="text-white font-bold text-lg block">DGD / MSDS</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_dgd">Dangerous goods declaration and MSDS</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">UN No</span><span class="col-badge">Flash Point</span><span class="col-badge">CAS No</span>
-                        </div>
-                    </div>
-                    <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div>
-                            <span class="text-white font-bold text-lg block">PHYTO / HC</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_phyto">Phytosanitary and health certificate</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">Scientific Name</span><span class="col-badge">Treatment</span><span class="col-badge">Org</span>
-                        </div>
-                    </div>
-                     <div class="glass-panel-dark p-6 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div>
-                            <span class="text-white font-bold text-lg block">POA / BIZ / INS</span>
-                            <span class="text-xs text-gray-400" data-i18n="desc_poa">Power of attorney, business registration, insurance policy</span>
-                        </div>
-                        <div class="flex flex-wrap gap-1 max-w-md md:justify-end">
-                            <span class="col-badge">Reg No</span><span class="col-badge">Policy No</span><span class="col-badge">Authority</span>
-                        </div>
-                    </div>
-                </div>
-
             </div>
         </div>
-    </section>
 
-    <section class="py-24 border-t border-white/5 bg-[#020202] relative z-20">
-        <div class="max-w-3xl mx-auto px-6">
-            <div class="mb-12 flex items-center gap-4">
-                <h2 class="text-xs font-bold text-gray-500 uppercase tracking-[0.3em] font-mono" data-i18n="enterprise_title">Enterprise Service</h2>
-                <div class="flex-1 h-[1px] bg-gradient-to-r from-white/10 to-transparent"></div>
-            </div>
-
-            <div class="text-center space-y-6 mb-12 py-2">
-                <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 font-mono text-xs mx-auto">
-                    <i class="fa-solid fa-server"></i> On-Premise CPU Dedicated
+        <div class="section">
+            <div class="area">
+                <div>
+                    <h2 data-i18n="intro_title">Introduction</h2>
+                    <div></div>
                 </div>
-                <h3 class="text-3xl md:text-5xl font-bold tracking-tighter text-gradient mb-4" data-i18n="pii_headline">Enterprise PII Masking</h3>
-                <p class="text-gray-400 text-lg leading-relaxed break-keep max-w-2xl mx-auto" style="text-shadow: 0 0 20px #000;" data-i18n="pii_desc">
-                    Protect corporate confidentiality and personal data with multi-language support. We deliver ultra-fast CPU-powered PII masking with stable enterprise-grade performance.
-                </p>
-            </div>
-
-            <div class="max-w-xl mx-auto grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
-                <div class="glass-panel border border-white/10 rounded-2xl p-4 text-center hover:bg-white/[0.04] transition-colors duration-300">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-wider block font-mono mb-1" data-i18n="meta_infra">Infrastructure</span>
-                    <span class="text-base font-bold text-white font-mono">On-Premise CPU</span>
+                
+                <div>
+                    <div>
+                        <h4 data-i18n="spec_speed">Data Collection</h4>
+                        <p>
+                            One-Click Integration
+                        </p>
+                    </div>
+            
+                    <div>
+                        <h4 data-i18n="spec_security">Privacy</h4>
+                        <p>
+                            Auto Masking
+                        </p>
+                    </div>
                 </div>
-                <div class="glass-panel border border-white/10 rounded-2xl p-4 text-center hover:bg-white/[0.04] transition-colors duration-300">
-                    <span class="text-[10px] text-gray-500 uppercase font-bold tracking-wider block font-mono mb-1" data-i18n="meta_tps">Performance Speed</span>
-                    <span class="text-base font-bold text-green-400 font-mono">25 <span class="text-xs font-normal text-gray-400">tokens / TPS</span></span>
-                </div>
-            </div>
-
-            <div class="max-w-xl mx-auto">
-                <a href="mailto:contact@logis.center" class="glass-panel bg-blue-600/20 hover:bg-blue-600/40 border-blue-500/30 text-white font-bold px-6 py-4 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 text-center w-full" data-i18n="btn_contact">
-                    <i class="fa-solid fa-envelope text-base"></i>
-                    <span>Contact Us</span>
-                </a>
             </div>
         </div>
-    </section>
 
-    <!-- Footer -->
-    <footer class="py-12 border-t border-white/5 text-center text-gray-500 text-sm bg-black relative z-30">
-        <div class="max-w-6xl mx-auto px-6 flex flex-col md:flex-row justify-between items-center gap-4">
-            <div class="text-[10px] text-gray-600 font-mono uppercase tracking-widest">
-                terminal.logis.center &copy; 2026 / DATA_ONTOLOGY_AGENT_V3
-            </div>
-            <div class="flex gap-6">
-                <a href="#" class="text-[10px] text-gray-500 hover:text-white transition-colors uppercase tracking-widest">Documentation</a>
-                <a href="#" class="text-[10px] text-gray-500 hover:text-white transition-colors uppercase tracking-widest">Contact</a>
+
+        <div class="section">
+            <div class="area">
+                <div>
+                    <h2>Support Language</h2>
+                    <div></div>
+                </div>
+                
+                <div>
+                    <div>
+                        <p style="line-height:1.8;"></p>
+                    </div>
+                </div>
             </div>
         </div>
-    </footer>
 
+
+        <!-- Footer -->
+        <div class="footer">
+            <div class="area">
+                <div>
+                    <h2>
+                        <a href="https://www.linkedin.com/in/flankton/" data-i18n="btn_contact">
+                            <span>Contact Us</span>
+                        </a>
+                    </h2>
+                </div>
+                <div>
+                    <div>
+                        <h4>* Required</h4>
+                        <p style="margin-left: 0.8em;">
+                            Business Registration Certificate
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+        
     <script>
         const i18n = {
             "en": {
-                "nav_download": "Download Installer",
-                "system_status": "Status: Ready",
+                "how_it_works_title": "Quick Start",
+                "down_title": "1. Download",
+                "down_desc": "<a onclick=\"executeDownload()\" style=\"cursor:pointer; text-decoration:underline;\">Download</a>",
+                "scan_title": "2. Scan",
+                "scan_desc": "Scan documents, images, or webpages to automatically extract data.",
+                "drag_title": "3. Drag & Drop",
+                "drag_desc": "Simply drag and drop files onto the screen to start AI analysis instantly.",
+                "intro_title": "Introduction",
                 "spec_speed": "Easy Data Collection",
                 "spec_security": "Privacy Filter",
                 "spec_capability": "Chat Directly with AI",
-                "hero_title": "Start difficult data management\nkeep it safe with privacy filters",
-                "hero_desc": "Now, just drag and drop complex data to AI.",
-                "btn_win": "Download",
-                "btn_mac": "Coming Soon",
-                "btn_linux": "Coming Soon",
-                "how_it_works_title": "How It Works",
-                "scan_title": "Intelligent Scan",
-                "scan_desc": "Scan documents, images, or webpages to automatically extract data.",
-                "scan_video": "[ Scan Demonstration Video ]",
-                "drag_title": "Drag & Drop",
-                "drag_desc": "Simply drag and drop files onto the screen to start AI analysis instantly.",
-                "drag_video": "[ Drag & Drop Demonstration Video ]",
-                "core_docs_title": "Core Supported Documents",
-                "full_catalog_title": "Full Support Catalog",
-                "tab_contract": "Contract / Payment",
-                "tab_logis": "Shipping / Logistics",
-                "tab_customs": "Customs / Declaration",
-                "tab_cert": "Certification / Special",
-                "desc_ci": "Commercial Invoice: Standard for payment and customs",
-                "desc_pl": "Packing List: Cargo physical information",
-                "desc_bl": "Bill of Lading: Ocean transport document of title",
-                "desc_po": "Purchase Order: Ordering and contract base",
-                "desc_lc": "Letter of Credit: Bank payment guarantee document",
-                "desc_sc": "Sales Contract: Official transaction contract",
-                "desc_pi": "Proforma Invoice: Advance payment proof",
-                "desc_sa": "Shipping Advice: Post-shipment notification",
-                "desc_an": "Arrival Notice and Delivery Order",
-                "desc_awb": "Airway Bill: Air cargo proof",
-                "desc_ed": "Export/Import Declaration: Official customs declaration document",
-                "desc_co": "Certificate of Origin: Verification of origin and FTA application document",
-                "desc_cinv": "Customs Invoice: Customs valuation proof",
-                "desc_ic": "Quality and ingredient analysis certificate",
-                "desc_dgd": "Dangerous goods declaration and MSDS",
-                "desc_phyto": "Phytosanitary and health certificate",
-                "desc_poa": "Power of attorney, business registration, insurance policy",
-                "status_ready": "Ready",
-                "status_wait": "Preparing",
-                "enterprise_title": "Enterprise Service",
-                "pii_headline": "Enterprise PII Masking",
-                "pii_desc": "Protect corporate confidentiality and personal data with multi-language support. We deliver ultra-fast CPU-powered PII masking with stable enterprise-grade performance.",
-                "meta_infra": "Infrastructure",
-                "meta_tps": "Performance Speed",
                 "btn_contact": "Contact Us"
             },
             "ja": {
-                "nav_download": "インストーラーをダウンロード",
-                "system_status": "ステータス: 準備完了",
+                "how_it_works_title": "クイックスタート",
+                "down_title": "1. ダウンロード",
+                "down_desc": "<a onclick=\"executeDownload()\" style=\"cursor:pointer; text-decoration:underline;\">ダウンロード</a>",
+                "scan_title": "2. スキャン",
+                "scan_desc": "文書、画像、またはウェブページをスキャンして、データを自動的に抽出します。",
+                "drag_title": "3. ドラッグ＆ドロップ",
+                "drag_desc": "ファイルを画面にドラッグ＆ドロップするだけで、すぐにAI分析を開始します。",
+                "intro_title": "イントロダクション",
                 "spec_speed": "簡単なデータ収集",
                 "spec_security": "プライバシーフィルター",
                 "spec_capability": "AIと直接チャット",
-                "hero_title": "複雑なデータ管理を会話から始め、\nプライバシーフィルターで安全に守ります。",
-                "hero_desc": "複雑なデータをAIにドラッグ＆ドロップするだけです。",
-                "btn_win": "ダウンロード",
-                "btn_mac": "準備中",
-                "btn_linux": "準備中",
-                "how_it_works_title": "機能のご案内",
-                "scan_title": "インテリジェントスキャン",
-                "scan_desc": "文書、画像、またはウェブページをスキャンして、データを自動的に抽出します。",
-                "scan_video": "[ スキャンデモ映像 ]",
-                "drag_title": "ドラッグ＆ドロップ",
-                "drag_desc": "ファイルを画面にドラッグ＆ドロップするだけで、すぐにAI分析を開始します。",
-                "drag_video": "[ ドラッグ＆ドロップデモ映像 ]",
-                "core_docs_title": "主要対応文書",
-                "full_catalog_title": "対応カタログ一覧",
-                "tab_contract": "契約 / 決済",
-                "tab_logis": "配送 / 物流",
-                "tab_customs": "通関 / 申告",
-                "tab_cert": "証明書 / 特殊",
-                "desc_ci": "商業インボイス: 決済と通関の基準",
-                "desc_pl": "パッキングリスト: 貨物の物理情報",
-                "desc_bl": "船荷証券: 海上輸送の権利証券",
-                "desc_po": "発注書: 発注と契約の基盤",
-                "desc_lc": "信用状: 銀行の支払保証書類",
-                "desc_sc": "売買契約書: 公式な取引契約書",
-                "desc_pi": "プロフォルマインボイス: 事前決済の証憑",
-                "desc_sa": "船積み通知書: 出荷後の通知",
-                "desc_an": "到着案内書および貨物引渡指示書",
-                "desc_awb": "航空運送状: 航空貨物の証憑",
-                "desc_ed": "輸出入申告書: 税関申告の公式文書",
-                "desc_co": "原産地証明書: 原産地の確認とFTA適用書類",
-                "desc_cinv": "税関インボイス: 通関用の価格証憑",
-                "desc_ic": "品質および成分分析証明書",
-                "desc_dgd": "危険物申告書およびMSDS",
-                "desc_phyto": "植物検疫および衛生証明書",
-                "desc_poa": "委任状、事業者登録証、保険証券",
-                "status_ready": "準備完了",
-                "status_wait": "準備中",
-                "enterprise_title": "エンタープライズサービス",
-                "pii_headline": "高性能 PII マスキング",
-                "pii_desc": "多言語対応で企業の機密情報や個人情報を安全に保護。完全CPU環境で、高速かつ安定したエンタープライズ向けPIIマスキングを提供します。",
-                "meta_infra": "インフラ基盤",
-                "meta_tps": "処理速度",
                 "btn_contact": "お問い合わせ"
             }
         };
@@ -692,9 +169,9 @@
         let currentLang = langOrder[currentLangIndex];
 
         const OS_TYPES = {
-            WIN: { id: 'win', name: 'Windows', icon: 'fa-brands fa-windows', file: 'logis_setup.exe', available: true },
-            MAC: { id: 'mac', name: 'macOS', icon: 'fa-brands fa-apple', file: '#', available: false },
-            LINUX: { id: 'linux', name: 'Linux', icon: 'fa-brands fa-linux', file: '#', available: false }
+            WIN: { id: 'win', name: 'Windows', file: 'logis_setup.exe', available: true },
+            MAC: { id: 'mac', name: 'macOS', file: '#', available: false },
+            LINUX: { id: 'linux', name: 'Linux', file: '#', available: false }
         };
         let detectedOS = OS_TYPES.WIN;
 
@@ -702,7 +179,6 @@
             currentLang = langCode;
             currentLangIndex = langOrder.indexOf(langCode);
             applyLanguage();
-            renderDownloadButton();
         }
 
         function applyLanguage() {
@@ -714,21 +190,6 @@
             });
         }
 
-        function openTab(evt, tabName) {
-            const contents = document.getElementsByClassName("tab-content");
-            for (let i = 0; i < contents.length; i++) {
-                contents[i].classList.add("hidden");
-                contents[i].classList.remove("block");
-            }
-            const links = document.getElementsByClassName("tab-btn");
-            for (let i = 0; i < links.length; i++) {
-                links[i].classList.remove("active");
-            }
-            document.getElementById(tabName).classList.remove("hidden");
-            document.getElementById(tabName).classList.add("block");
-            evt.currentTarget.classList.add("active");
-        }
-
         function detectOS() {
             const ua = window.navigator.userAgent;
             if (ua.indexOf("Win") !== -1) detectedOS = OS_TYPES.WIN;
@@ -736,69 +197,14 @@
             else if (ua.indexOf("Linux") !== -1) detectedOS = OS_TYPES.LINUX;
         }
 
-        function renderDownloadButton() {
-            const mainText = document.getElementById('main-dl-text');
-            const mainIcon = document.getElementById('main-dl-icon');
-            const optionsList = document.getElementById('dl-options-list');
-
-            if (detectedOS.id === 'win') {
-                mainText.innerHTML = i18n[currentLang]['nav_download'];
-            } else {
-                mainText.innerHTML = i18n[currentLang][`btn_${detectedOS.id}`];
-            }
-            mainIcon.className = detectedOS.icon;
-
-            optionsList.innerHTML = '';
-            Object.values(OS_TYPES).forEach(os => {
-                if (os.id === detectedOS.id) return;
-                const item = document.createElement('button');
-                item.className = "flex items-center justify-between w-full px-4 py-3 rounded-xl hover:bg-white/10 transition-all text-left group";
-                item.onclick = () => { detectedOS = os; renderDownloadButton(); closeDlMenu(); };
-                const statusLabel = os.available ? i18n[currentLang].status_ready : i18n[currentLang].status_wait;
-                const statusClass = os.available ? "text-blue-400" : "text-gray-500";
-                item.innerHTML = `
-                    <div class="flex items-center gap-3">
-                        <i class="${os.icon} text-lg ${os.available ? 'text-white' : 'text-gray-600'}"></i>
-                        <div class="flex flex-col">
-                            <span class="text-sm font-medium ${os.available ? 'text-white' : 'text-gray-500'}">${os.name}</span>
-                            <span class="text-[10px] ${statusClass}">${statusLabel}</span>
-                        </div>
-                    </div>
-                `;
-                optionsList.appendChild(item);
-            });
-        }
-
-        function toggleDlMenu(e) {
-            e.stopPropagation();
-            document.getElementById('dl-menu').classList.toggle('hidden');
-        }
-
-        function closeDlMenu() {
-            document.getElementById('dl-menu').classList.add('hidden');
-        }
-
         function executeDownload() {
             if (detectedOS.available) alert(`Downloading ${detectedOS.file}...`);
             else alert(`Coming Soon!`);
         }
 
-        window.onclick = () => closeDlMenu();
+        // Initialize
         detectOS();
         applyLanguage();
-        renderDownloadButton();
-
-        // Initialize Vanta Topology Background
-        VANTA.TOPOLOGY({
-            el: "#vanta-bg",
-            mouseControls: true,
-            touchControls: true,
-            gyroControls: false,
-            minHeight: 200.00,
-            minWidth: 200.00,
-            scale: 1.00,
-            scaleMobile: 1.00
-        })
     </script>
 </body>
 </html>

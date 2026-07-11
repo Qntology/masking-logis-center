@@ -53,7 +53,7 @@ async fn start_file_drag(
     filter: Option<String>,
 ) -> Result<(), String> {
     // 🌟 [변경] PUG 전체를 완벽한 Markdown으로 변환하는 파서 엔진
-    fn convert_pug_to_md(pug: &str) -> String {
+    fn convert_pug_to_md(pug: &str, is_masked: bool) -> String {
         let mut output = String::new();
         let mut in_table = false;
         let mut table_indent = 0;
@@ -182,8 +182,9 @@ async fn start_file_drag(
                                 url = &trimmed[start+1..start+1+end];
                             }
                         }
+                        let final_url = if is_masked { "[MASKED_URL]" } else { url };
                         if !current_cell.is_empty() { current_cell.push(' '); }
-                        current_cell.push_str(&format!("[IMAGE]({})", url));
+                        current_cell.push_str(&format!("[IMAGE]({})", final_url));
                     } else if trimmed.starts_with("input") || trimmed.starts_with("label") || trimmed.starts_with("span") {
                         let text_part = trimmed.splitn(2, ' ').nth(1).unwrap_or("").trim();
                         if !text_part.is_empty() {
@@ -232,13 +233,15 @@ async fn start_file_drag(
                 }
                 if text.is_empty() { text = url; }
                 
+                let final_url = if is_masked { "[MASKED_URL]" } else { url };
+                
                 // 🌟 [CRITICAL FIX] 무의미한 더미 앵커(#)나 javascript 링크, 잘못 병합된 빈 주소는 링크를 해제하고 텍스트만 출력합니다.
-                if url.is_empty() || url == "#" || url.starts_with("javascript:") || url.ends_with("/#") {
-                    if text != "#" && !text.starts_with("javascript:") && text != url {
+                if final_url.is_empty() || final_url == "#" || final_url.starts_with("javascript:") || final_url.ends_with("/#") {
+                    if text != "#" && !text.starts_with("javascript:") && text != final_url {
                         output.push_str(&format!("{}\n\n", text));
                     }
                 } else {
-                    output.push_str(&format!("[{}]({})\n\n", text, url));
+                    output.push_str(&format!("[{}]({})\n\n", text, final_url));
                 }
             } else if trimmed.starts_with("img[src=") {
                 let mut url = "";
@@ -247,7 +250,8 @@ async fn start_file_drag(
                         url = &trimmed[start+1..start+1+end];
                     }
                 }
-                output.push_str(&format!("[IMAGE]({})\n\n", url));
+                let final_url = if is_masked { "[MASKED_URL]" } else { url };
+                output.push_str(&format!("[IMAGE]({})\n\n", final_url));
             } else if trimmed.starts_with("input") || trimmed.starts_with("label") || trimmed.starts_with("strong") || trimmed.starts_with("b") {
                 let text_part = trimmed.splitn(2, ' ').nth(1).unwrap_or("").trim();
                 if !text_part.is_empty() {
@@ -280,11 +284,16 @@ async fn start_file_drag(
                     .or_else(|| json_val.get("masked").and_then(|m| m.get("title")).and_then(|v| v.as_str()))
                     .or_else(|| json_val.get("title").and_then(|v| v.as_str()))
                     .unwrap_or("");
-                let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("");
+                let mut url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("");
                 let desc = json_val.get("data").and_then(|d| d.get("masked_description")).and_then(|v| v.as_str())
                     .or_else(|| json_val.get("masked").and_then(|m| m.get("description")).and_then(|v| v.as_str()))
                     .or_else(|| json_val.get("description").and_then(|v| v.as_str()))
                     .unwrap_or("");
+                
+                let is_masked = json_val.get("is_masked").and_then(|v| v.as_bool()).unwrap_or(false);
+                if is_masked {
+                    url = "[MASKED_URL]";
+                }
                 
                 // 🌟 최상단에 Markdown 문서 정보(Frontmatter) 블록 주입
                 let frontmatter = format!(
@@ -293,7 +302,7 @@ async fn start_file_drag(
                 );
                 
                 // 🌟 PUG 템플릿 전체를 깔끔한 Markdown 형식으로 변경
-                let markdown_body = convert_pug_to_md(yaml);
+                let markdown_body = convert_pug_to_md(yaml, is_masked);
                 
                 Some(format!("{}{}", frontmatter, markdown_body))
             } else {
