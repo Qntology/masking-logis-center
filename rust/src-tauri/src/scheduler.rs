@@ -1107,39 +1107,35 @@ async fn process_task(
                     let bias_str = include_str!("bias.json");
                     let bias_json: Value = serde_json::from_str(bias_str).unwrap_or(json!({}));
 
-                    // 🌟 [수정] 다국어 유니코드 감지 및 빈도수 기반 Local 언어 확정 로직
-                    let mut language_counts = std::collections::HashMap::new();
-                    
-                    for c in target_text.chars() {
-                        let u = c as u32;
-                        let lang = if (u >= 0x0041 && u <= 0x005A) || (u >= 0x0061 && u <= 0x007A) { "english" }
-                        else if (u >= 0xAC00 && u <= 0xD7A3) || (u >= 0x1100 && u <= 0x11FF) || (u >= 0x3130 && u <= 0x318F) { "korean" }
-                        else if (u >= 0x3040 && u <= 0x309F) || (u >= 0x30A0 && u <= 0x30FF) { "japanese" }
-                        else if u >= 0x4E00 && u <= 0x9FFF { "chinese" }
-                        else if u >= 0x0400 && u <= 0x04FF { "russian" }
-                        else if u >= 0x0600 && u <= 0x06FF { "arabic" }
-                        else if u >= 0x0E00 && u <= 0x0E7F { "thai" }
-                        else if u >= 0x0900 && u <= 0x097F { "hindi" }
-                        else if u >= 0x0980 && u <= 0x09FF { "bengali" }
-                        else if u >= 0x0370 && u <= 0x03FF { "greek" }
-                        else if u >= 0x0590 && u <= 0x05FF { "hebrew" }
-                        else if u >= 0x1EA0 && u <= 0x1EF9 { "vietnamese" }
-                        else if u >= 0x00C0 && u <= 0x00FF { "european" }
-                        else { "" };
+                    // 🌟 [수정] whatlang 라이브러리를 활용한 Local 언어 확정 로직
+                    let local_language = match whatlang::detect(&target_text) {
+                        Some(info) => match info.lang() {
+                            whatlang::Lang::Kor => "korean",
+                            whatlang::Lang::Jpn => "japanese",
+                            whatlang::Lang::Cmn => "chinese",
+                            whatlang::Lang::Rus => "russian",
+                            whatlang::Lang::Ara => "arabic",
+                            whatlang::Lang::Tha => "thai",
+                            whatlang::Lang::Hin => "hindi",
+                            whatlang::Lang::Ben => "bengali",
+                            whatlang::Lang::Ell => "greek",
+                            whatlang::Lang::Heb => "hebrew",
+                            whatlang::Lang::Vie => "vietnamese",
+                            whatlang::Lang::Fra => "french",
+                            whatlang::Lang::Deu => "german",
+                            whatlang::Lang::Spa => "spanish",
+                            whatlang::Lang::Ita => "italian",
+                            whatlang::Lang::Por => "portuguese",
+                            whatlang::Lang::Nld => "dutch",
+                            _ => "english",
+                        }.to_string(),
+                        None => "english".to_string(),
+                    };
 
-                        if !lang.is_empty() {
-                            *language_counts.entry(lang).or_insert(0) += 1;
-                        }
+                    let mut detected_languages_vec = vec![local_language.clone()];
+                    if local_language != "english" {
+                        detected_languages_vec.push("english".to_string());
                     }
-                    
-                    let mut detected_languages_vec: Vec<String> = language_counts.keys().map(|s| s.to_string()).collect();
-                    if detected_languages_vec.is_empty() { detected_languages_vec.push("english".to_string()); }
-
-                    // 가장 많이 사용된 언어를 local_language로 확정
-                    let local_language = language_counts.into_iter()
-                        .max_by_key(|&(_, count)| count)
-                        .map(|(lang, _)| lang.to_string())
-                        .unwrap_or_else(|| "english".to_string());
 
                     // 🌟 [CRITICAL FIX] 다국어 검증(Stage 3) 시 local_language를 무조건 가장 먼저(0번 인덱스) 검증하도록 재배열하여 불필요한 타언어(English 등) LLM 추론을 최소화합니다.
                     if let Some(pos) = detected_languages_vec.iter().position(|l| l == &local_language) {
@@ -2978,33 +2974,31 @@ async fn process_task(
                                 emit_term(&format!("    💀 [REJECT] 타겟 미스매치 (is_target_mismatch=true)"));
                                 is_hallucination = true;
                             } else {
-                                // 🌟 [CRITICAL FIX] 추출된 단어(extracted_val) 자체의 유니코드를 분석하여 
+                                // 🌟 [CRITICAL FIX] 추출된 단어(extracted_val) 자체를 whatlang으로 분석하여 
                                 // 해당 단어의 실제 언어를 Stage 3 검증의 최우선순위로 동적 재배치합니다.
-                                let mut local_lang_counts = std::collections::HashMap::new();
-                                for c in extracted_val.chars() {
-                                    let u = c as u32;
-                                    let lang = if (u >= 0x0041 && u <= 0x005A) || (u >= 0x0061 && u <= 0x007A) { "english" }
-                                    else if (u >= 0xAC00 && u <= 0xD7A3) || (u >= 0x1100 && u <= 0x11FF) || (u >= 0x3130 && u <= 0x318F) { "korean" }
-                                    else if (u >= 0x3040 && u <= 0x309F) || (u >= 0x30A0 && u <= 0x30FF) { "japanese" }
-                                    else if u >= 0x4E00 && u <= 0x9FFF { "chinese" }
-                                    else if u >= 0x0400 && u <= 0x04FF { "russian" }
-                                    else if u >= 0x0600 && u <= 0x06FF { "arabic" }
-                                    else if u >= 0x0E00 && u <= 0x0E7F { "thai" }
-                                    else if u >= 0x0900 && u <= 0x097F { "hindi" }
-                                    else if u >= 0x0980 && u <= 0x09FF { "bengali" }
-                                    else if u >= 0x0370 && u <= 0x03FF { "greek" }
-                                    else if u >= 0x0590 && u <= 0x05FF { "hebrew" }
-                                    else if u >= 0x1EA0 && u <= 0x1EF9 { "vietnamese" }
-                                    else if u >= 0x00C0 && u <= 0x00FF { "european" }
-                                    else { "" };
-
-                                    if !lang.is_empty() {
-                                        *local_lang_counts.entry(lang).or_insert(0) += 1;
-                                    }
-                                }
-                                
                                 let mut current_word_langs = Vec::new();
-                                if let Some((best_lang, _)) = local_lang_counts.into_iter().max_by_key(|&(_, count)| count) {
+                                
+                                if let Some(info) = whatlang::detect(&extracted_val) {
+                                    let best_lang = match info.lang() {
+                                        whatlang::Lang::Kor => "korean",
+                                        whatlang::Lang::Jpn => "japanese",
+                                        whatlang::Lang::Cmn => "chinese",
+                                        whatlang::Lang::Rus => "russian",
+                                        whatlang::Lang::Ara => "arabic",
+                                        whatlang::Lang::Tha => "thai",
+                                        whatlang::Lang::Hin => "hindi",
+                                        whatlang::Lang::Ben => "bengali",
+                                        whatlang::Lang::Ell => "greek",
+                                        whatlang::Lang::Heb => "hebrew",
+                                        whatlang::Lang::Vie => "vietnamese",
+                                        whatlang::Lang::Fra => "french",
+                                        whatlang::Lang::Deu => "german",
+                                        whatlang::Lang::Spa => "spanish",
+                                        whatlang::Lang::Ita => "italian",
+                                        whatlang::Lang::Por => "portuguese",
+                                        whatlang::Lang::Nld => "dutch",
+                                        _ => "english",
+                                    };
                                     emit_term(&format!("    🌐 [언어 동적 매핑] 추출 단어 '{}' 분석 결과: 단일 언어({})로 검증을 제한합니다.", extracted_val, best_lang));
                                     current_word_langs.push(best_lang.to_string());
                                 } else {
