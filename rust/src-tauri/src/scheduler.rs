@@ -1358,6 +1358,27 @@ async fn process_task(
                         }
                     }
 
+                    // 🌟 [사전 정규식 추출] 웹주소(URL) 마스킹 (http, https 모두 포함)
+                    if let Ok(url_re) = regex::Regex::new(r"(?i)(https://|http://|www\.)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(/[a-zA-Z0-9./?%&=-]*)?") {
+                        let mut found_urls = std::collections::HashSet::new();
+                        for mat in url_re.find_iter(&masked_text) { found_urls.insert(mat.as_str().to_string()); }
+                        for url_val in found_urls {
+                            let mnemonic = crate::parsing::generate_mnemonic();
+                            let upper_key = "URL".to_string();
+                            let final_replacement = format!("[{}]", mnemonic);
+                            let skip_marker = format!("[___REDACTED_{}___]", skip_counter);
+                            masked_text = safe_replace(&masked_text, &url_val, &skip_marker);
+                            doc_title = safe_replace(&doc_title, &url_val, &skip_marker);
+                            doc_desc = safe_replace(&doc_desc, &url_val, &skip_marker);
+                            skip_map.insert(skip_marker.clone(), final_replacement);
+                            replacement_history.push((url_val.clone(), skip_marker.clone()));
+                            domain_history.push(("url".to_string(), url_val.clone()));
+                            skip_counter += 1;
+                            all_matches.push(json!({ "name": upper_key, "value": url_val, "mnemonic": mnemonic }));
+                            emit_term(&format!("[EXTRACTION] 🔗 웹주소 정규식 사전 추출 성공: {} -> 강제 마스킹 완료", url_val));
+                        }
+                    }
+
                     // 🌟 [CRITICAL FIX] 특수문자 제거 및 언어(단어) 추출 범용 로직
                     // 기존에 특수문자를 공백으로 덮어씌워 "FDE(Forward"가 "FDE Forward"로 쪼개지는 현상을 방지합니다.
                     // 원본 텍스트 구조를 그대로 유지하여 NMS 추출 시 괄호 등 특수문자가 훼손되지 않도록 개선합니다.
