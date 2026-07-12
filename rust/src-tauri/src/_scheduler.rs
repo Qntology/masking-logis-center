@@ -33,12 +33,14 @@ use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 
 // 🌟 [변경] Lindera 기반 초고속 형태소 분석 파이프라인
-use lindera::{Tokenizer, TokenizerConfig};
+use lindera::{Tokenizer as LinderaTokenizer, TokenizerConfig};
 use lindera_core::mode::Mode;
 use lindera_dictionary::{DictionaryConfig, DictionaryKind};
+use tokenizers::Tokenizer as HfTokenizer;
 
 pub struct LinderaPipeline {
-    pub tokenizer: Tokenizer,
+    pub lindera: LinderaTokenizer,
+    pub hf_tokenizer: Option<HfTokenizer>,
 }
 
 impl LinderaPipeline {
@@ -61,10 +63,66 @@ impl LinderaPipeline {
             ..TokenizerConfig::default()
         };
 
-        let tokenizer = Tokenizer::from_config(config)
+        let lindera = LinderaTokenizer::from_config(config)
             .map_err(|e| anyhow::anyhow!("Lindera 초기화 실패: {}", e))?;
 
-        Ok(Self { tokenizer })
+        // 🌟 [다국어 토크나이저 통합] Hugging Face tokenizer 로드
+        // 실제 프로젝트 내 모델 경로에 맞춰 "tokenizer.json" 위치를 맵핑합니다.
+        let hf_tokenizer = HfTokenizer::from_file("tokenizer.json").ok();
+
+        Ok(Self { lindera, hf_tokenizer })
+    }
+
+    // 🌟 [추가] CJK와 영어를 구분하여 토큰화하는 하이브리드 파이프라인 메서드
+    pub fn tokenize_hybrid(&self, text: &str) -> (Vec<String>, Vec<(String, usize, usize)>) {
+        let mut tag_names = Vec::new();
+        let mut word_spans = Vec::new();
+
+        // 간단한 CJK 체크 로직 (첫 글자 유니코드 범위 확인)
+        let is_cjk = text.chars().next().map_or(false, |c| {
+            let cp = c as u32;
+            (0xAC00..=0xD7A3).contains(&cp) || (0x3040..=0x30FF).contains(&cp) || (0x4E00..=0x9FFF).contains(&cp)
+        });
+
+        if is_cjk {
+            // 한중일: 기존 Lindera 그대로 속도 이점 활용
+            let tokens = self.lindera.tokenize(text).unwrap_or_default();
+            for mut token in tokens {
+                let t_text = token.text.to_string();
+                let start = token.byte_start;
+                let end = token.byte_end;
+                let pos_tag = if let Some(details) = token.get_details() {
+                    if !details.is_empty() { details[0].to_string() } else { "UNK".to_string() }
+                } else {
+                    "UNK".to_string()
+                };
+                word_spans.push((t_text, start, end));
+                tag_names.push(pos_tag);
+            }
+        } else if let Some(hf) = &self.hf_tokenizer {
+            // 영어/기타 언어: HF Tokenizer를 사용해 서브워드로 안전하게 분리
+            if let Ok(encoding) = hf.encode(text, true) {
+                let tokens = encoding.get_tokens();
+                let offsets = encoding.get_offsets();
+                for (i, t_text) in tokens.iter().enumerate() {
+                    let (start, end) = offsets[i];
+                    // HF 서브워드에 대해 일반 명사(NNG)로 일괄 취급하여 Lindera의 OOV(UNK) 파기 로직을 완벽히 우회
+                    word_spans.push((t_text.replace("Ġ", ""), start, end));
+                    tag_names.push("NNG".to_string()); 
+                }
+            }
+        } else {
+            // 토크나이저 파일 누락 시의 Fallback: 공백 단위 분리 (UNK 방어용)
+            let mut start_idx = 0;
+            for word in text.split_whitespace() {
+                let end_idx = start_idx + word.len();
+                word_spans.push((word.to_string(), start_idx, end_idx));
+                tag_names.push("NNG".to_string());
+                start_idx = end_idx + 1; 
+            }
+        }
+
+        (tag_names, word_spans)
     }
 }
 
@@ -380,7 +438,7 @@ async fn process_task(
         let (last_msg, count) = &mut *state;
 
         let is_spam = msg.contains("이미 다른 동의어 트랙에서 마스킹 완료된") 
-            || msg.contains("[STANZA] 1차 형태소 분리 완료")
+            || msg.contains("[LINDERA] 문맥 기반 형태소 분리 완료")
             || msg.contains("연쇄 파기(Cascade Cancellation)");
 
         if is_spam && msg == last_msg.as_str() {
@@ -875,8 +933,8 @@ async fn process_task(
 
                     emit_term(&format!("[EXTRACTION] 🌐 Detected Languages: {:?} (Local: {})", detected_languages_vec, local_language));
 
-                    // 🌟 [추가] Stanza Pipeline 동적 로드 (로컬 언어 기준)
-                    let stanza_lang_code = match local_language.as_str() {
+                    // 🌟 [변경] 다국어 토크나이저 파이프라인 동적 로드용 언어 코드 맵핑 (로컬 언어 기준)
+                    let tokenizer_lang_code = match local_language.as_str() {
                         "korean" => "ko",
                         "english" => "en",
                         "japanese" => "ja",
@@ -896,12 +954,12 @@ async fn process_task(
                     // 🌟 [CRITICAL FIX] 순차적 로딩 강제 (Concurrency Deadlock 원천 차단)
                     // LLM(Granite) 백그라운드 로딩은 상단 최초 1회 로드로 이동되었으므로 즉시 사전 기반 토크나이저를 로드합니다.
                     // =====================================================================
-                    emit_term("[EXTRACTION] 🧠 LLM 로딩 완료 확인. Lindera 사전 로딩 진입...");
+                    emit_term("[EXTRACTION] 🧠 LLM 로딩 완료 확인. 하이브리드 토크나이저 사전 로딩 진입...");
 
                     let mut lindera_pipeline = None;
-                    emit_term(&format!("[LINDERA] 🧠 Loading Lindera Dictionary for '{}'...", stanza_lang_code));
+                    emit_term(&format!("[TOKENIZER] 🧠 Loading Dictionary / HF Tokenizer for '{}'...", tokenizer_lang_code));
                     
-                    match LinderaPipeline::new(stanza_lang_code) {
+                    match LinderaPipeline::new(tokenizer_lang_code) {
                         Ok(pipeline) => {
                             lindera_pipeline = Some(pipeline);
                             emit_term("[LINDERA] ✅ Lindera Pipeline loaded successfully.");
@@ -1681,32 +1739,8 @@ async fn process_task(
                                 let use_context = cand_byte_idx_opt.is_some();
                                 let text_to_analyze = if use_context { specific_line.clone() } else { eval_target.clone() };
 
-                                // 🌟 Lindera Tokenization 수행
-                                let tokens = lindera.tokenizer.tokenize(&text_to_analyze).unwrap_or_default();
-                                
-                                let mut tag_names: Vec<String> = Vec::new();
-                                let mut word_spans: Vec<(String, usize, usize)> = Vec::new();
-                                
-                                for mut token in tokens {
-                                    let text = token.text.to_string();
-                                    let start = token.byte_start;
-                                    let end = token.byte_end;
-                                    
-                                    // 🌟 사전의 형태소 정보(POS 태그) 추출
-                                    // 🌟 [CRITICAL FIX] Lindera 0.30.0 API 변경 대응: get_details() 사용
-                                    let pos_tag = if let Some(details) = token.get_details() {
-                                        if !details.is_empty() {
-                                            details[0].to_string()
-                                        } else {
-                                            "UNK".to_string()
-                                        }
-                                    } else {
-                                        "UNK".to_string()
-                                    };
-                                    
-                                    word_spans.push((text, start, end));
-                                    tag_names.push(pos_tag);
-                                }
+                                // 🌟 다국어 하이브리드 Tokenization 수행
+                                let (tag_names, word_spans) = lindera.tokenize_hybrid(&text_to_analyze);
 
                                 let mut candidate_words: Vec<String> = Vec::new();
                                 let mut candidate_tags: Vec<String> = Vec::new();
@@ -2039,32 +2073,8 @@ async fn process_task(
                                         let use_context = cand_byte_idx_opt.is_some();
                                         let text_to_analyze = if use_context { matched_context.clone() } else { eval_ext.clone() };
 
-                                        // 🌟 Lindera Tokenization 수행
-                                        let tokens = lindera.tokenizer.tokenize(&text_to_analyze).unwrap_or_default();
-                                        
-                                        let mut tag_names: Vec<String> = Vec::new();
-                                        let mut word_spans: Vec<(String, usize, usize)> = Vec::new();
-                                        
-                                        for mut token in tokens {
-                                            let text = token.text.to_string();
-                                            let start = token.byte_start;
-                                            let end = token.byte_end;
-                                            
-                                            // 🌟 사전의 형태소 정보(POS 태그) 추출
-                                            // 🌟 [CRITICAL FIX] Lindera 0.30.0 API 변경 대응: get_details() 사용
-                                            let pos_tag = if let Some(details) = token.get_details() {
-                                                if !details.is_empty() {
-                                                    details[0].to_string()
-                                                } else {
-                                                    "UNK".to_string()
-                                                }
-                                            } else {
-                                                "UNK".to_string()
-                                            };
-                                            
-                                            word_spans.push((text, start, end));
-                                            tag_names.push(pos_tag);
-                                        }
+                                        // 🌟 다국어 하이브리드 Tokenization 수행
+                                        let (tag_names, word_spans) = lindera.tokenize_hybrid(&text_to_analyze);
                                                     
                                         let mut candidate_words: Vec<String> = Vec::new();
                                         let mut candidate_tags: Vec<String> = Vec::new();
