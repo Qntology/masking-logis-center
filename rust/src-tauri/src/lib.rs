@@ -2144,11 +2144,22 @@ async fn check_model_status() -> Result<serde_json::Value, String> {
     let embed_dir = base_path.join("granite-embedding-97m-multilingual-r2");
     let granite_dir = base_path.join("granite-4.0-h-350m");
 
+    // 🌟 [추가] stanza 하위의 각 언어별 폴더가 완전한지 검사
+    let stanza_dir = base_path.join("stanza");
+    let has_stanza_lang = |lang: &str| -> bool {
+        let lang_dir = stanza_dir.join(lang);
+        lang_dir.join("vocab.json").exists()
+            && lang_dir.join("pos.onnx").exists()
+            && lang_dir.join("tokenizer.onnx").exists()
+            && lang_dir.join("depparse.onnx").exists()
+    };
+
+    // 🌟 [수정] HTML 문자열 조립 로직을 제거하고, JS(프론트엔드)에서 렌더링할 수 있도록 name과 license 데이터 원본을 전달합니다.
     Ok(serde_json::json!({
-        "Qwen3": has_model_file(&qwen3_dir),
-        "Qwen3.5": has_model_file(&qwen3_5_dir),
-        "Embedding": has_model_file(&embed_dir),
-        "Granite": has_model_file(&granite_dir)
+        "Qwen3": { "is_ready": has_model_file(&qwen3_dir), "name": "Qwen3 0.6B", "license": "Apache 2.0" },
+        "Qwen3.5": { "is_ready": has_model_file(&qwen3_5_dir), "name": "Qwen3.5 2B", "license": "Apache 2.0" },
+        "Embedding": { "is_ready": has_model_file(&embed_dir), "name": "Granite Embedding", "license": "Apache 2.0" },
+        "Granite": { "is_ready": has_model_file(&granite_dir), "name": "Granite 4.0", "license": "Apache 2.0" }
     }))
 }
 
@@ -2170,12 +2181,18 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
     tokio::task::spawn(async move {
         let base_path = app_dir_clone.join("models");
 
-        let folder_name = match model_name.as_str() {
-            "Qwen3" => "Qwen3-0.6B-Instruct-gguf",
-            "Qwen3.5" => "Qwen3.5-2B-Instruct-gguf",
-            "Embedding" => "granite-embedding-97m-multilingual-r2",
-            "Granite" => "granite-4.0-h-350m",
-            _ => "unknown"
+        // 🌟 [수정] stanza 다운로드 경로 동적 맵핑 (models/stanza/{lang} 구조 지원)
+        let folder_name = if model_name.starts_with("stanza_") {
+            let lang = model_name.replace("stanza_", "");
+            format!("stanza/{}", lang)
+        } else {
+            match model_name.as_str() {
+                "Qwen3" => "Qwen3-0.6B-Instruct-gguf".to_string(),
+                "Qwen3.5" => "Qwen3.5-2B-Instruct-gguf".to_string(),
+                "Embedding" => "granite-embedding-97m-multilingual-r2".to_string(),
+                "Granite" => "granite-4.0-h-350m".to_string(),
+                _ => "unknown".to_string()
+            }
         };
 
         let dir_path = base_path.join(folder_name);
@@ -2184,21 +2201,53 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
             return;
         }
         
-        let files_to_download = match model_name.as_str() {
-            "Qwen3" => vec![
-                ("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf", "Qwen3-0.6B-Q8_0.gguf")
-            ],
-            "Qwen3.5" => vec![
-                ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-BF16.gguf", "mmproj-BF16.gguf"),
-                ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q8_0.gguf", "Qwen3.5-2B-Q8_0.gguf")
-            ],
-            "Embedding" => vec![
-                ("https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2/resolve/main/model.safetensors", "model.safetensors")
-            ],
-            "Granite" => vec![
-                ("https://huggingface.co/ibm-granite/granite-4.0-h-350m/resolve/main/model.safetensors", "model.safetensors")
-            ],
-            _ => vec![]
+        // 🌟 [수정] 문자열 타입(String)으로 변환하여 다국어 url을 생성할 수 있도록 확장
+        let files_to_download: Vec<(String, String)> = if model_name.starts_with("stanza_") {
+            let lang = model_name.replace("stanza_", "");
+            let lang_code = match lang.as_str() {
+                "korean" => "ko",
+                "english" => "en",
+                "japanese" => "ja",
+                "chinese" => "zh-hans",
+                "french" => "fr",
+                "german" => "de",
+                "spanish" => "es",
+                "italian" => "it",
+                "portuguese" => "pt",
+                "dutch" => "nl",
+                "russian" => "ru",
+                "arabic" => "ar",
+                "thai" => "th",
+                "hindi" => "hi",
+                "bengali" => "bn",
+                "greek" => "el",
+                "hebrew" => "he",
+                "vietnamese" => "vi",
+                _ => "en",
+            };
+            vec![
+                (format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/vocab.json", lang_code), "vocab.json".to_string()),
+                (format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/pos.onnx", lang_code), "pos.onnx".to_string()),
+                (format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/tokenizer.onnx", lang_code), "tokenizer.onnx".to_string()),
+                (format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/depparse.onnx", lang_code), "depparse.onnx".to_string()),
+            ]
+        } else {
+            match model_name.as_str() {
+                "Qwen3" => vec![
+                    ("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf".to_string(), "Qwen3-0.6B-Q8_0.gguf".to_string())
+                ],
+                "Qwen3.5" => vec![
+                    ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-BF16.gguf".to_string(), "mmproj-BF16.gguf".to_string()),
+                    ("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q8_0.gguf".to_string(), "Qwen3.5-2B-Q8_0.gguf".to_string())
+                ],
+                "Embedding" => vec![
+                    ("https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2/resolve/main/model.safetensors".to_string(), "model.safetensors".to_string())
+                ],
+                "Granite" => vec![
+                    ("https://huggingface.co/ibm-granite/granite-4.0-h-350m/resolve/main/model.safetensors".to_string(), "model.safetensors".to_string())
+                ],
+                _ => vec![]
+            }
         };
 
         let total_files = files_to_download.len();
@@ -2216,7 +2265,16 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
                 continue;
             }
 
-            match client.get(*url).send().await {
+            // 🌟 [추가] 다운로드 링크 터미널 로깅 및 UI 이벤트 발송
+            println!("[DOWNLOAD] 다운로드 시작: {} (URL: {})", filename, url);
+            let _ = app_handle.emit("download_progress", serde_json::json!({
+                "model": model_name,
+                "percent": 0,
+                "message": format!("다운로드 중: {} (URL: {})", filename, url)
+            }));
+
+            // 🌟 [수정] url이 &String 이므로 역참조(*) 없이 그대로 전달합니다.
+            match client.get(url).send().await {
                 Ok(res) => {
                     if !res.status().is_success() {
                         let _ = app_handle.emit("download_error", serde_json::json!({"model": model_name, "error": format!("HTTP {}", res.status())}));

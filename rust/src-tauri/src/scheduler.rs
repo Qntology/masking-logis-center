@@ -1159,6 +1159,12 @@ async fn process_task(
                         "dutch" => "nl",
                         "russian" => "ru",
                         "arabic" => "ar",
+                        "thai" => "th",
+                        "hindi" => "hi",
+                        "bengali" => "bn",
+                        "greek" => "el",
+                        "hebrew" => "he",
+                        "vietnamese" => "vi",
                         _ => "en",
                     };
                     
@@ -1176,8 +1182,131 @@ async fn process_task(
                     // }
 
                     let stanza_base_dir = crate::utils::get_app_dir().join("models").join("stanza");
+                    let stanza_lang_dir = stanza_base_dir.join(stanza_lang_code);
                     let mut stanza_pipeline = None;
-                    if stanza_base_dir.join(stanza_lang_code).exists() {
+                    
+                    // 🌟 [추가] Stanza 모델 다운로드 로직 (언어 체크 및 자동 다운로드)
+                    let supported_stanza_langs = ["korean", "japanese", "chinese", "russian", "arabic", "thai", "hindi", "bengali", "greek", "hebrew", "vietnamese", "french", "german", "spanish", "italian", "portuguese", "dutch"];
+                    let dl_lang = if supported_stanza_langs.contains(&local_language.as_str()) {
+                        local_language.clone()
+                    } else {
+                        "english".to_string()
+                    };
+
+                    if !stanza_lang_dir.exists() {
+                        let msg = format!("모델이 존재하지 않아 '{}' 언어 모델 자동 다운로드를 시작합니다...", dl_lang);
+                        emit_term(&format!("[STANZA] ⬇️ {}", msg));
+                        
+                        let payload = json!({ 
+                            "task_id": task.id.clone(),
+                            "category": "Downloading Model", 
+                            "summary": msg,
+                            "spinner": "⬇️"
+                        });
+                        let _ = app_handle.emit("extraction-progress", &payload);
+                        crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
+
+                        let _ = std::fs::create_dir_all(&stanza_lang_dir);
+                        
+                        let files = ["vocab.json", "pos.onnx", "tokenizer.onnx", "depparse.onnx"];
+                        let client = reqwest::Client::new();
+                        let mut all_success = true;
+                        
+                        for file in files {
+                            let url = format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/{}", stanza_lang_code, file);
+                            let file_path = stanza_lang_dir.join(file);
+                            
+                            // 🌟 [추가] 다운로드 링크 URL 로그 포함
+                            let dl_msg = format!("다운로드 중: {} (URL: {})", file, url);
+                            emit_term(&format!("[STANZA] {}", dl_msg));
+                            
+                            let payload = json!({ 
+                                "task_id": task.id.clone(),
+                                "category": "Downloading Model", 
+                                "summary": dl_msg,
+                                "spinner": "⬇️"
+                            });
+                            let _ = app_handle.emit("extraction-progress", &payload);
+
+                            match client.get(&url).send().await {
+                                Ok(res) if res.status().is_success() => {
+                                    let total_size = res.content_length().unwrap_or(0);
+                                    if let Ok(mut dest) = tokio::fs::File::create(&file_path).await {
+                                        use tokio::io::AsyncWriteExt;
+                                        use futures::StreamExt;
+                                        let mut stream = res.bytes_stream();
+                                        let mut downloaded: u64 = 0;
+                                        let mut last_percent = 0;
+                                        while let Some(chunk_res) = stream.next().await {
+                                            if let Ok(chunk) = chunk_res {
+                                                if dest.write_all(&chunk).await.is_err() {
+                                                    all_success = false;
+                                                    break;
+                                                }
+                                                downloaded += chunk.len() as u64;
+                                                if total_size > 0 {
+                                                    let percent = (downloaded as f64 / total_size as f64 * 100.0) as u32;
+                                                    if percent >= last_percent + 10 { // 10% 단위로 UI 로그 출력
+                                                        let pct_msg = format!("{} 다운로드 진행률: {}%", file, percent);
+                                                        emit_term(&format!("[STANZA] {}", pct_msg));
+                                                        
+                                                        let payload = json!({ 
+                                                            "task_id": task.id.clone(),
+                                                            "category": "Downloading Model", 
+                                                            "summary": pct_msg,
+                                                            "spinner": "⬇️"
+                                                        });
+                                                        let _ = app_handle.emit("extraction-progress", &payload);
+                                                        
+                                                        last_percent = percent;
+                                                    }
+                                                }
+                                            } else {
+                                                all_success = false;
+                                                break;
+                                            }
+                                        }
+                                    } else {
+                                        all_success = false;
+                                    }
+                                },
+                                _ => {
+                                    all_success = false;
+                                }
+                            }
+                            if !all_success { 
+                                emit_term(&format!("[STANZA] ❌ 다운로드 실패: {}", file));
+                                break; 
+                            }
+                        }
+                        
+                        if all_success {
+                            let msg = "모델 다운로드 완료!";
+                            emit_term(&format!("[STANZA] ✅ {}", msg));
+                            let payload = json!({ 
+                                "task_id": task.id.clone(),
+                                "category": "Downloading Model", 
+                                "summary": msg,
+                                "spinner": "✅"
+                            });
+                            let _ = app_handle.emit("extraction-progress", &payload);
+                            crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
+                        } else {
+                            let msg = "다운로드 중 오류 발생. 진행을 위해 다운로드된 파일을 삭제합니다.";
+                            emit_term(&format!("[STANZA] ⚠️ {}", msg));
+                            let payload = json!({ 
+                                "task_id": task.id.clone(),
+                                "category": "Error", 
+                                "summary": msg,
+                                "spinner": "❌"
+                            });
+                            let _ = app_handle.emit("extraction-progress", &payload);
+                            crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
+                            let _ = std::fs::remove_dir_all(&stanza_lang_dir);
+                        }
+                    }
+
+                    if stanza_lang_dir.exists() {
                         emit_term(&format!("[STANZA] 🧠 Loading Stanza ONNX models for '{}'...", stanza_lang_code));
                         
                         let base_dir_clone = stanza_base_dir.clone();
