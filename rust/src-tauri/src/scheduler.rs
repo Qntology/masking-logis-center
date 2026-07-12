@@ -224,9 +224,6 @@ impl StanzaPreprocessor {
         let slen_tensor = ndarray::Array1::from_vec(vec![seq_len as i64]).into_dyn();
         let wlen_tensor = ndarray::Array1::from_vec(wlen_vec).into_dyn();
         
-        // 🌟 [CRITICAL FIX] PyTorch ONNX Export 과정에서 사용되지 않은 입력이 제거될 수 있으므로 동적 조립하되,
-        // 차원(Shape)만으로 매핑하면 pre_tensor(0)와 mask_tensor(1)가 뒤바뀌어 모든 출력이 PROPN으로 오작동합니다.
-        // 반드시 input_meta.name을 파싱하여 정확한 텐서를 지정해야 문맥이 차단되는 Hallucination을 막을 수 있습니다.
         // 🌟 [개선] 휴리스틱(조건부) 탐색을 배제하고 ONNX 파이프라인에서 튀어나올 수 있는 모든 변형 스키마를 1:1 Key-Value 매핑
         let mut tensor_pool = std::collections::HashMap::new();
         tensor_pool.insert("word", word_tensor.clone());
