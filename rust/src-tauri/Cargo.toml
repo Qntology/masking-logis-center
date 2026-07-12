@@ -71,8 +71,6 @@ windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_S
 libc = "0.2"
 boa_engine = { path = "../crates/boa-engine/core/engine" }
 onnxruntime = { path = "../crates/onnxruntime" }
-# 🌟 [CRITICAL FIX] onnxruntime 0.0.14 내부의 하드코딩된 의존성 락(<0.15.2)을 통과하기 위해
-# 허용된 가장 높은 버전인 0.15.1로 최종 고정합니다.
 ndarray = "0.15.1"
 whatlang = "0.18.0"
 
