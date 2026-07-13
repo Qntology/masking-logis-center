@@ -951,6 +951,11 @@ async fn process_task(
         if uuids.is_empty() { return Ok(()); }
         
         let total = uuids.len();
+
+        // 🌟 [CRITICAL FIX] Stanza 파이프라인 메모리 릭 및 속도 저하 방지를 위해 문서 순회 루프 외부로 캐시 맵 격상
+        let stanza_base_dir = crate::utils::get_app_dir().join("models").join("stanza");
+        let mut stanza_pipelines: std::collections::HashMap<String, StanzaPipeline> = std::collections::HashMap::new();
+
         for (idx, uuid_val) in uuids.iter().enumerate() {
             if cancellation_token.load(Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
             
@@ -1180,10 +1185,13 @@ async fn process_task(
                     // =====================================================================
                     emit_term("[EXTRACTION] 🧠 LLM 로딩 완료 확인. ONNX 로딩 진입...");
                     
-                    let stanza_base_dir = crate::utils::get_app_dir().join("models").join("stanza");
-                    let mut stanza_pipelines: std::collections::HashMap<String, StanzaPipeline> = std::collections::HashMap::new();
-                    
                     for current_lang in &detected_languages_vec {
+                        // 이미 로드된 모델은 재로드하지 않고 스킵하여 속도 극대화 및 Box::leak 중복 메모리 누수 방지
+                        if stanza_pipelines.contains_key(current_lang) {
+                            emit_term(&format!("[STANZA] ⚡ '{}' 언어 모델이 이미 메모리에 로드되어 있습니다. 캐시를 재사용합니다.", current_lang));
+                            continue;
+                        }
+
                         let stanza_lang_code = match current_lang.as_str() {
                             "korean" => "ko",
                             "english" => "en",
@@ -4416,8 +4424,7 @@ async fn process_task(
                         extracted_json = json!({ "matches": all_matches, "text": masked_text, "title": doc_title.clone(), "description": doc_desc.clone() });
                     }
                     
-                    // 🌟 [VRAM 해제] 단일 문서에 대한 Stanza(ONNX) 추론이 모두 끝났으므로 즉시 메모리를 반환합니다.
-                    drop(stanza_pipelines);
+                    // 🌟 [VRAM 해제 변경] 여러 문서 처리를 위해 Stanza 파이프라인 캐시를 유지하므로 여기서 drop하지 않습니다.
                 }
 
                 // 🌟 [STEP 3] 최종 결과물(마스킹 정보)을 DB에 업데이트합니다.
@@ -4444,6 +4451,9 @@ async fn process_task(
                 }
             }
         }
+
+        // 🌟 [VRAM/RAM 해제] 마스킹 전체 작업이 종료되었으므로 보존했던 Stanza 캐시를 비웁니다.
+        drop(stanza_pipelines);
 
         // 🌟 [VRAM 해제] 마스킹 전체 작업이 종료되었으므로 LLM 및 임베딩 모델의 리소스를 VRAM에서 즉시 비웁니다.
         emit_term("[PROCESS] 🧹 마스킹 작업 완료. VRAM 반환을 위해 모든 AI 모델 리소스를 즉시 해제합니다.");
