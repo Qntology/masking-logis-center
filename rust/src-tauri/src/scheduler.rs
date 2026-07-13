@@ -3236,37 +3236,87 @@ async fn process_task(
                                                             }
                                                         }
                                                         
-                                                        // 🌟 [동적 의미 기반 절단] 하드코딩된 조사 배열을 쓰지 않고, 
-                                                        // 단일 토큰의 마지막 1~2글자를 뺐을 때의 벡터 유사도가 기존보다 높아진다면 
-                                                        // 이를 의미를 훼손하는 조사/어미로 간주하여 AI가 스스로 판단하고 절단합니다.
+                                                        // 🌟 [STANZA AI 기반 형태소 정밀 절단] 단일 토큰으로 융합된 조사/어미를 Stanza POS 모델의 Char-Level 추론을 활용해 완벽히 분리합니다.
                                                         if trimmed_words.len() == 1 {
                                                             let word = trimmed_words[0].clone();
-                                                            let char_count = word.chars().count();
-                                                            if char_count > 2 {
-                                                                let lang_prefix = target_name.split('_').next().unwrap_or("english");
-                                                                let prefixed_b_val = target_bias.split(',').map(|s| format!("{} {}", lang_prefix, s.trim())).collect::<Vec<_>>().join(", ");
-                                                                let bias_emb = model.get_embedding(prefixed_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
-
-                                                                let mut best_word = word.clone();
-                                                                let mut best_score = std::f32::MIN;
-                                                                
-                                                                // 원본, -1글자, -2글자에 대한 임베딩 평가 수행
-                                                                for drop_len in 0..=2 {
-                                                                    let candidate: String = word.chars().take(char_count - drop_len).collect();
-                                                                    let p_emb = model.get_embedding(candidate.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
-                                                                    
-                                                                    // 추출 목표(bias_emb)와의 코사인 유사도로 어간(Root) 적합성 점수 측정
-                                                                    let score = cosine_similarity(&p_emb, &bias_emb);
-                                                                    
-                                                                    if score > best_score {
-                                                                        best_score = score;
-                                                                        best_word = candidate;
+                                                            let chars: Vec<char> = word.chars().collect();
+                                                            
+                                                            // 숫자와 단위(도, 명, 원 등)가 결합된 경우(예: "35도") 단위 분리
+                                                            if chars.len() > 1 && chars[0].is_ascii_digit() && !chars.last().unwrap().is_ascii_digit() {
+                                                                let mut cut_idx = chars.len();
+                                                                for i in (0..chars.len()).rev() {
+                                                                    if !chars[i].is_ascii_digit() && chars[i] != '.' && chars[i] != ',' {
+                                                                        cut_idx = i;
+                                                                    } else {
+                                                                        break;
                                                                     }
                                                                 }
-                                                                
-                                                                if best_word != word {
-                                                                    trimmed_words[0] = best_word;
+                                                                if cut_idx > 0 && cut_idx < chars.len() {
+                                                                    let clean_word: String = chars[0..cut_idx].iter().collect();
+                                                                    emit_term(&format!("[STANZA] ✂️ 숫자 단위 분리 성공: '{}' -> '{}'", word, clean_word));
+                                                                    trimmed_words[0] = clean_word;
                                                                     is_trimmed = true;
+                                                                }
+                                                            } else if chars.len() > 1 {
+                                                                let char_strs: Vec<String> = chars.iter().map(|c| c.to_string()).collect();
+                                                                let char_refs: Vec<&str> = char_strs.iter().map(|s| s.as_str()).collect();
+                                                                
+                                                                let mut chunk_size = char_refs.len();
+                                                                for input_meta in &stanza.pos_session.inputs {
+                                                                    let dims = &input_meta.dimensions;
+                                                                    if dims.len() == 2 && dims.get(1) == Some(&Some(32)) {
+                                                                        if let Some(&Some(fixed_seq)) = dims.get(0) {
+                                                                            chunk_size = fixed_seq as usize;
+                                                                        }
+                                                                    }
+                                                                }
+                                                                if chunk_size == 0 { chunk_size = char_refs.len(); }
+                                                                
+                                                                let mut padded_chunk = char_refs.clone();
+                                                                let valid_len = padded_chunk.len();
+                                                                while padded_chunk.len() < chunk_size {
+                                                                    padded_chunk.push("<pad>");
+                                                                }
+                                                                
+                                                                if let Ok(char_inputs) = stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session) {
+                                                                    if let Ok(char_outputs) = stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(char_inputs) {
+                                                                        let output_tensor = &char_outputs[0];
+                                                                        let shape = output_tensor.shape();
+                                                                        let mut char_tags = Vec::new();
+                                                                        
+                                                                        let num_classes = if shape.len() == 3 { shape[2] as usize } else { shape[1] as usize };
+                                                                        for i in 0..valid_len {
+                                                                            let mut max_val = std::f32::MIN;
+                                                                            let mut max_idx = 0;
+                                                                            for c in 0..num_classes {
+                                                                                let val = if shape.len() == 3 { output_tensor[[0, i, c]] } else { output_tensor[[i, c]] };
+                                                                                if val > max_val { max_val = val; max_idx = c; }
+                                                                            }
+                                                                            let tag = stanza.preprocessor.upos_vocab.get(max_idx as usize).map(|s| s.as_str()).unwrap_or("X");
+                                                                            char_tags.push(tag);
+                                                                        }
+                                                                        
+                                                                        // 분석된 글자별 태그를 확인하여, 끝부분이 조사(ADP), 어조사(PART), 기호(PUNCT), 동사(VERB), 부사(ADV) 등으로 끝나는지 판별
+                                                                        let tail_cut_tags = ["ADP", "PART", "PUNCT", "SCONJ", "CCONJ", "VERB", "ADV", "ADJ"];
+                                                                        let mut cut_idx = valid_len;
+                                                                        for i in (1..valid_len).rev() {
+                                                                            if tail_cut_tags.contains(&char_tags[i]) {
+                                                                                cut_idx = i;
+                                                                            } else {
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                        
+                                                                        // 잘려나가는 꼬리에 영문자/숫자가 포함되어 있으면 보호 (예: '아이폰X' -> X가 기호로 오판되는 것 방지)
+                                                                        let has_ascii_tail = chars[cut_idx..].iter().any(|c| c.is_ascii_alphanumeric());
+                                                                        
+                                                                        if cut_idx < valid_len && cut_idx > 0 && !has_ascii_tail {
+                                                                            let clean_word: String = chars[0..cut_idx].iter().collect();
+                                                                            emit_term(&format!("[STANZA] ✂️ Stanza Char-POS 절단 성공: '{}' -> '{}' (태그 맵: {:?})", word, clean_word, char_tags));
+                                                                            trimmed_words[0] = clean_word;
+                                                                            is_trimmed = true;
+                                                                        }
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -4039,13 +4089,30 @@ async fn process_task(
                                 safe_chunks.sort();
                                 safe_chunks.dedup();
 
+                                // 🌟 [추가] 앞뒤 공백이나 특수문자로 분리된 독립된 단어인지 판별하는 헬퍼 함수
+                                let is_independent_word = |text: &str, target: &str| -> bool {
+                                    let escaped = regex::escape(target);
+                                    let pattern = format!(r"(?i)(?:^|[^\p{{L}}\p{{N}}_]){}(?:[^\p{{L}}\p{{N}}_]|$)", escaped);
+                                    if let Ok(re) = regex::Regex::new(&pattern) {
+                                        re.is_match(text)
+                                    } else {
+                                        text.contains(target)
+                                    }
+                                };
+
                                 // Title 검증
                                 if !doc_title.contains(&extracted_val) {
                                     let mut best_chunk = String::new();
                                     let mut best_score = 0.3_f32; 
                                     
                                     for chunk_trim in &safe_chunks {
-                                        if doc_title.contains(chunk_trim) {
+                                        let is_valid_match = if chunk_trim.len() == extracted_val.len() {
+                                            doc_title.contains(chunk_trim)
+                                        } else {
+                                            is_independent_word(&doc_title, chunk_trim)
+                                        };
+
+                                        if is_valid_match {
                                             let p_emb = model.get_embedding(chunk_trim.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                             let b_score = cosine_similarity(&p_emb, &bias_emb);
                                             let p_score = cosine_similarity(&p_emb, &prej_emb);
@@ -4068,14 +4135,17 @@ async fn process_task(
                                         }
                                     }
                                     if !best_chunk.is_empty() {
-                                        emit_term(&format!("    👑 [CROSS-FIELD RESCUE] 제목(Title)에 전체 문자열이 없으나, 핵심 단어 '{}' 발견 (Score: {:.4}) -> 강제 마스킹", best_chunk, best_score));
+                                        emit_term(&format!("    👑 [CROSS-FIELD RESCUE] 제목(Title)에 전체 문자열이 없으나, 독립된 핵심 단어 '{}' 발견 (Score: {:.4}) -> 강제 마스킹", best_chunk, best_score));
                                         let c_mnemonic = crate::parsing::generate_mnemonic();
                                         let c_final_replacement = format!("[{}]", c_mnemonic);
                                         let c_skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                                         
                                         doc_title = safe_replace(&doc_title, &best_chunk, &c_skip_marker);
                                         skip_map.insert(c_skip_marker.clone(), c_final_replacement.clone());
-                                        replacement_history.push((best_chunk.clone(), c_skip_marker.clone()));
+                                        
+                                        // 🌟 [개선] 파편화 방지: 잘라낸 파편 단어는 전역 장부(replacement_history)에 넣지 않고 현재 영역에만 지역적으로 반영하여, 본문 등 다른 영역은 독립적으로 재평가되도록 합니다.
+                                        // replacement_history.push((best_chunk.clone(), c_skip_marker.clone())); 
+                                        
                                         current_target_found.push(best_chunk.clone());
                                         domain_history.push((target_name.to_string(), best_chunk.clone()));
                                         skip_counter += 1;
@@ -4094,7 +4164,13 @@ async fn process_task(
                                     let mut best_score = 0.3_f32; 
                                     
                                     for chunk_trim in &safe_chunks {
-                                        if doc_desc.contains(chunk_trim) {
+                                        let is_valid_match = if chunk_trim.len() == extracted_val.len() {
+                                            doc_desc.contains(chunk_trim)
+                                        } else {
+                                            is_independent_word(&doc_desc, chunk_trim)
+                                        };
+
+                                        if is_valid_match {
                                             let p_emb = model.get_embedding(chunk_trim.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                                             let b_score = cosine_similarity(&p_emb, &bias_emb);
                                             let p_score = cosine_similarity(&p_emb, &prej_emb);
@@ -4117,14 +4193,17 @@ async fn process_task(
                                         }
                                     }
                                     if !best_chunk.is_empty() {
-                                        emit_term(&format!("    👑 [CROSS-FIELD RESCUE] 요약(Desc)에 전체 문자열이 없으나, 핵심 단어 '{}' 발견 (Score: {:.4}) -> 강제 마스킹", best_chunk, best_score));
+                                        emit_term(&format!("    👑 [CROSS-FIELD RESCUE] 요약(Desc)에 전체 문자열이 없으나, 독립된 핵심 단어 '{}' 발견 (Score: {:.4}) -> 강제 마스킹", best_chunk, best_score));
                                         let c_mnemonic = crate::parsing::generate_mnemonic();
                                         let c_final_replacement = format!("[{}]", c_mnemonic);
                                         let c_skip_marker = format!("[___REDACTED_{}___]", skip_counter);
                                         
                                         doc_desc = safe_replace(&doc_desc, &best_chunk, &c_skip_marker);
                                         skip_map.insert(c_skip_marker.clone(), c_final_replacement.clone());
-                                        replacement_history.push((best_chunk.clone(), c_skip_marker.clone()));
+                                        
+                                        // 🌟 [개선] 파편화 방지: 위와 동일하게 전역 장부에 추가하지 않아 본문의 파편화를 예방합니다.
+                                        // replacement_history.push((best_chunk.clone(), c_skip_marker.clone()));
+                                        
                                         current_target_found.push(best_chunk.clone());
                                         domain_history.push((target_name.to_string(), best_chunk.clone()));
                                         skip_counter += 1;
