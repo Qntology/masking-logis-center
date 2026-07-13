@@ -367,8 +367,8 @@ pub enum TensorElementDataType {
     Int64 = sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 as OnnxEnumInt,
     /// String, equivalent to Rust's `String`
     String = sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING as OnnxEnumInt,
-    // /// Boolean, equivalent to Rust's `bool`
-    // Bool = sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL as OnnxEnumInt,
+    /// Boolean, equivalent to Rust's `bool`
+    Bool = sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL as OnnxEnumInt,
     // /// 16-bit floating point, equivalent to Rust's `f16`
     // Float16 = sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 as OnnxEnumInt,
     /// 64-bit floating point, equivalent to Rust's `f64`
@@ -397,9 +397,7 @@ impl From<TensorElementDataType> for sys::ONNXTensorElementDataType {
             Int32 => sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
             Int64 => sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
             String => sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING,
-            // Bool => {
-            //     sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL
-            // }
+            Bool => sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL,
             // Float16 => {
             //     sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16
             // }
@@ -450,7 +448,7 @@ impl_type_trait!(u16, Uint16);
 impl_type_trait!(i16, Int16);
 impl_type_trait!(i32, Int32);
 impl_type_trait!(i64, Int64);
-// impl_type_trait!(bool, Bool);
+impl_type_trait!(bool, Bool);
 // impl_type_trait!(f16, Float16);
 impl_type_trait!(f64, Double);
 impl_type_trait!(u32, Uint32);

@@ -44,6 +44,7 @@ use onnxruntime::GraphOptimizationLevel;
 pub struct StanzaPreprocessor {
     pub word_vocab: HashMap<String, i64>,
     pub char_vocab: HashMap<char, i64>,
+    pub id_to_char: HashMap<i64, char>, // 🌟 Lemma 복원용 역방향 맵 추가
     pub upos_vocab: Vec<String>,
     pub word_unk_id: i64,
     pub char_unk_id: i64,
@@ -59,6 +60,7 @@ impl StanzaPreprocessor {
             
         let mut word_vocab: HashMap<String, i64> = HashMap::new();
         let mut char_vocab: HashMap<char, i64> = HashMap::new();
+        let mut id_to_char: HashMap<i64, char> = HashMap::new();
         let mut upos_vocab = Vec::new();
         
         // 🌟 1. Word Vocab 파싱 (기존 로직 보존 및 통합)
@@ -72,8 +74,10 @@ impl StanzaPreprocessor {
 
         Self::extract_vocab_from_node(word_target, &mut word_vocab);
 
-        // 🌟 2. Char Vocab 파싱 (Stanza OOV 극복의 핵심)
-        let char_target = if let Some(pos) = json_val.get("pos") {
+        // 🌟 2. Char Vocab 파싱 (Stanza OOV 극복의 핵심 + Lemma 지원)
+        let char_target = if let Some(lemma) = json_val.get("lemma") {
+            lemma.get("char").unwrap_or(&serde_json::Value::Null)
+        } else if let Some(pos) = json_val.get("pos") {
             pos.get("char").unwrap_or(&serde_json::Value::Null)
         } else if let Some(ner) = json_val.get("ner") {
             ner.get("char").unwrap_or(&serde_json::Value::Null)
@@ -87,6 +91,7 @@ impl StanzaPreprocessor {
         for (k, v) in temp_char_vocab {
             if let Some(c) = k.chars().next() {
                 char_vocab.insert(c, v);
+                id_to_char.insert(v, c); // 🌟 원형(Lemma) 문자열 복원용 생성
             }
         }
 
@@ -112,7 +117,7 @@ impl StanzaPreprocessor {
             
         let char_unk_id = *char_vocab.get(&'<').unwrap_or(&0); // '<unk>' 처리용
         
-        Ok(Self { word_vocab, char_vocab, upos_vocab, word_unk_id, char_unk_id })
+        Ok(Self { word_vocab, char_vocab, id_to_char, upos_vocab, word_unk_id, char_unk_id })
     }
 
     // 🌟 중복된 JSON 파싱 로직을 공통 헬퍼 함수로 분리
@@ -241,6 +246,10 @@ impl StanzaPreprocessor {
         tensor_pool.insert("pretrained", pre_tensor.clone());
         tensor_pool.insert("pre", pre_tensor.clone());
         
+        let pos_tensor = ndarray::Array2::<i64>::zeros((1, seq_len)).into_dyn();
+        tensor_pool.insert("pos", pos_tensor.clone());
+        tensor_pool.insert("upos", pos_tensor.clone());
+        
         tensor_pool.insert("word_len", wlen_tensor.clone());
         tensor_pool.insert("wordchar_len", wlen_tensor.clone());
         tensor_pool.insert("wlen", wlen_tensor.clone());
@@ -275,6 +284,7 @@ pub struct StanzaPipeline {
     pub preprocessor: StanzaPreprocessor,
     pub tokenize_session: Session<'static>,
     pub pos_session: Session<'static>,
+    pub lemma_session: Session<'static>, // 🌟 Lemma 세션 추가
 }
 
 // (로컬 라이브러리 onnxruntime crate 자체에 Send/Sync를 구현하였으므로 더 이상 unsafe 래퍼가 필요 없습니다!)
@@ -285,6 +295,7 @@ impl StanzaPipeline {
         let vocab_path = lang_dir.join("vocab.json");
         let tokenize_path = lang_dir.join("tokenizer.onnx");
         let pos_path = lang_dir.join("pos.onnx");
+        let lemma_path = lang_dir.join("lemma.onnx"); // 🌟 Lemma 경로 추가
 
         let preprocessor = StanzaPreprocessor::new(&vocab_path)?;
 
@@ -304,6 +315,7 @@ impl StanzaPipeline {
         // 경로 문자열을 메모리에 영구 고정(Leak)하여 수명 문제를 완벽히 해결합니다.
         let tokenize_path_static: &'static str = Box::leak(tokenize_path.to_string_lossy().into_owned().into_boxed_str());
         let pos_path_static: &'static str = Box::leak(pos_path.to_string_lossy().into_owned().into_boxed_str());
+        let lemma_path_static: &'static str = Box::leak(lemma_path.to_string_lossy().into_owned().into_boxed_str()); // 🌟 Leak 생성
 
         let tok_start_time = std::time::Instant::now();
         println!("[STANZA] TOKENIZER 모델 세션을 빌드합니다...");
@@ -325,12 +337,23 @@ impl StanzaPipeline {
             
         println!("[STANZA] ✅ POS 모델 세션 빌드 완료! (소요 시간: {:.2}초)", pos_start_time.elapsed().as_secs_f32());
 
+        let lemma_start_time = std::time::Instant::now();
+        println!("[STANZA] LEMMA 모델 세션을 빌드합니다...");
+        
+        let lemma_session = env.new_session_builder()
+            .map_err(|e| anyhow::anyhow!("Lemma Session builder error: {}", e))?
+            .with_model_from_file(lemma_path_static)
+            .map_err(|e| anyhow::anyhow!("lemma.onnx 모델 파일 로드 실패: {}", e))?;
+            
+        println!("[STANZA] ✅ LEMMA 모델 세션 빌드 완료! (소요 시간: {:.2}초)", lemma_start_time.elapsed().as_secs_f32());
+
         println!("[STANZA] 🚀 모든 세션 로드 완료! (총 소요 시간: {:.2}초)", total_start_time.elapsed().as_secs_f32());
         
         Ok(Self {
             preprocessor,
             tokenize_session,
             pos_session,
+            lemma_session,
         })
     }
 }
@@ -1151,196 +1174,190 @@ async fn process_task(
 
                     emit_term(&format!("[EXTRACTION] 🌐 Detected Languages: {:?} (Local: {})", detected_languages_vec, local_language));
 
-                    // 🌟 [추가] Stanza Pipeline 동적 로드 (로컬 언어 기준)
-                    let stanza_lang_code = match local_language.as_str() {
-                        "korean" => "ko",
-                        "english" => "en",
-                        "japanese" => "ja",
-                        "chinese" => "zh-hans",
-                        "french" => "fr",
-                        "german" => "de",
-                        "spanish" => "es",
-                        "italian" => "it",
-                        "portuguese" => "pt",
-                        "dutch" => "nl",
-                        "russian" => "ru",
-                        "arabic" => "ar",
-                        "thai" => "th",
-                        "hindi" => "hi",
-                        "bengali" => "bn",
-                        "greek" => "el",
-                        "hebrew" => "he",
-                        "vietnamese" => "vi",
-                        _ => "en",
-                    };
-                    
                     // =====================================================================
                     // 🌟 [CRITICAL FIX] 순차적 로딩 강제 (Concurrency Deadlock 원천 차단)
                     // LLM(Granite) 백그라운드 로딩은 상단 최초 1회 로드로 이동되었으므로 즉시 ONNX를 로드합니다.
                     // =====================================================================
                     emit_term("[EXTRACTION] 🧠 LLM 로딩 완료 확인. ONNX 로딩 진입...");
                     
-                    // 🌟 [추가] LLM 모델 로딩 실패 시 상세 로그(에러 스택)를 UI 터미널에 출력합니다.
-                    // if let Err(e) = model.secure_vram_relay(target_model_size, None, Some(cancellation_token.clone()), false, None).await {
-                    //     let err_msg = format!("LLM 모델({:?}) 로딩 실패 상세 원인: {:?}", target_model_size, e);
-                    //     emit_term(&format!("🚨 [CRITICAL ERROR] {}", err_msg));
-                    //     return Err(anyhow::anyhow!(err_msg));
-                    // }
-
                     let stanza_base_dir = crate::utils::get_app_dir().join("models").join("stanza");
-                    let stanza_lang_dir = stanza_base_dir.join(stanza_lang_code);
-                    let mut stanza_pipeline = None;
+                    let mut stanza_pipelines: std::collections::HashMap<String, StanzaPipeline> = std::collections::HashMap::new();
                     
-                    // 🌟 [추가] Stanza 모델 다운로드 로직 (언어 체크 및 자동 다운로드)
-                    let supported_stanza_langs = ["korean", "japanese", "chinese", "russian", "arabic", "thai", "hindi", "bengali", "greek", "hebrew", "vietnamese", "french", "german", "spanish", "italian", "portuguese", "dutch"];
-                    let dl_lang = if supported_stanza_langs.contains(&local_language.as_str()) {
-                        local_language.clone()
-                    } else {
-                        "english".to_string()
-                    };
+                    for current_lang in &detected_languages_vec {
+                        let stanza_lang_code = match current_lang.as_str() {
+                            "korean" => "ko",
+                            "english" => "en",
+                            "japanese" => "ja",
+                            "chinese" => "zh-hans",
+                            "french" => "fr",
+                            "german" => "de",
+                            "spanish" => "es",
+                            "italian" => "it",
+                            "portuguese" => "pt",
+                            "dutch" => "nl",
+                            "russian" => "ru",
+                            "arabic" => "ar",
+                            "thai" => "th",
+                            "hindi" => "hi",
+                            "bengali" => "bn",
+                            "greek" => "el",
+                            "hebrew" => "he",
+                            "vietnamese" => "vi",
+                            _ => "en",
+                        };
 
-                    if !stanza_lang_dir.exists() {
-                        let msg = format!("모델이 존재하지 않아 '{}' 언어 모델 자동 다운로드를 시작합니다...", dl_lang);
-                        emit_term(&format!("[STANZA] ⬇️ {}", msg));
-                        
-                        let payload = json!({ 
-                            "task_id": task.id.clone(),
-                            "category": "Downloading Model", 
-                            "summary": msg,
-                            "spinner": "⬇️"
-                        });
-                        let _ = app_handle.emit("extraction-progress", &payload);
-                        crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
+                        let stanza_lang_dir = stanza_base_dir.join(stanza_lang_code);
+                        let supported_stanza_langs = ["korean", "japanese", "chinese", "russian", "arabic", "thai", "hindi", "bengali", "greek", "hebrew", "vietnamese", "french", "german", "spanish", "italian", "portuguese", "dutch"];
+                        let dl_lang = if supported_stanza_langs.contains(&current_lang.as_str()) {
+                            current_lang.clone()
+                        } else {
+                            "english".to_string()
+                        };
 
-                        let _ = std::fs::create_dir_all(&stanza_lang_dir);
-                        
-                        let files = ["vocab.json", "pos.onnx", "tokenizer.onnx", "depparse.onnx"];
-                        let client = reqwest::Client::new();
-                        let mut all_success = true;
-                        
-                        for file in files {
-                            let url = format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/{}", stanza_lang_code, file);
-                            let file_path = stanza_lang_dir.join(file);
-                            
-                            // 🌟 [추가] 다운로드 링크 URL 로그 포함
-                            let dl_msg = format!("다운로드 중: {} (URL: {})", file, url);
-                            emit_term(&format!("[STANZA] {}", dl_msg));
+                        if !stanza_lang_dir.exists() {
+                            let msg = format!("모델이 존재하지 않아 '{}' 언어 모델 자동 다운로드를 시작합니다...", dl_lang);
+                            emit_term(&format!("[STANZA] ⬇️ {}", msg));
                             
                             let payload = json!({ 
                                 "task_id": task.id.clone(),
                                 "category": "Downloading Model", 
-                                "summary": dl_msg,
+                                "summary": msg,
                                 "spinner": "⬇️"
                             });
                             let _ = app_handle.emit("extraction-progress", &payload);
+                            crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
 
-                            match client.get(&url).send().await {
-                                Ok(res) if res.status().is_success() => {
-                                    let total_size = res.content_length().unwrap_or(0);
-                                    if let Ok(mut dest) = tokio::fs::File::create(&file_path).await {
-                                        use tokio::io::AsyncWriteExt;
-                                        use futures::StreamExt;
-                                        let mut stream = res.bytes_stream();
-                                        let mut downloaded: u64 = 0;
-                                        let mut last_percent = 0;
-                                        while let Some(chunk_res) = stream.next().await {
-                                            if let Ok(chunk) = chunk_res {
-                                                if dest.write_all(&chunk).await.is_err() {
+                            let _ = std::fs::create_dir_all(&stanza_lang_dir);
+                            
+                            // 🌟 Lemma 모델(lemma.onnx)을 다운로드 리스트에 추가합니다.
+                            let files = ["vocab.json", "pos.onnx", "tokenizer.onnx", "depparse.onnx", "lemma.onnx"];
+                            let client = reqwest::Client::new();
+                            let mut all_success = true;
+                            
+                            for file in files {
+                                let url = format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/{}", stanza_lang_code, file);
+                                let file_path = stanza_lang_dir.join(file);
+                                
+                                // 🌟 [추가] 다운로드 링크 URL 로그 포함
+                                let dl_msg = format!("다운로드 중: {} (URL: {})", file, url);
+                                emit_term(&format!("[STANZA] {}", dl_msg));
+                                
+                                let payload = json!({ 
+                                    "task_id": task.id.clone(),
+                                    "category": "Downloading Model", 
+                                    "summary": dl_msg,
+                                    "spinner": "⬇️"
+                                });
+                                let _ = app_handle.emit("extraction-progress", &payload);
+
+                                match client.get(&url).send().await {
+                                    Ok(res) if res.status().is_success() => {
+                                        let total_size = res.content_length().unwrap_or(0);
+                                        if let Ok(mut dest) = tokio::fs::File::create(&file_path).await {
+                                            use tokio::io::AsyncWriteExt;
+                                            use futures::StreamExt;
+                                            let mut stream = res.bytes_stream();
+                                            let mut downloaded: u64 = 0;
+                                            let mut last_percent = 0;
+                                            while let Some(chunk_res) = stream.next().await {
+                                                if let Ok(chunk) = chunk_res {
+                                                    if dest.write_all(&chunk).await.is_err() {
+                                                        all_success = false;
+                                                        break;
+                                                    }
+                                                    downloaded += chunk.len() as u64;
+                                                    if total_size > 0 {
+                                                        let percent = (downloaded as f64 / total_size as f64 * 100.0) as u32;
+                                                        if percent >= last_percent + 10 { // 10% 단위로 UI 로그 출력
+                                                            let pct_msg = format!("{} 다운로드 진행률: {}%", file, percent);
+                                                            emit_term(&format!("[STANZA] {}", pct_msg));
+                                                            
+                                                            let payload = json!({ 
+                                                                "task_id": task.id.clone(),
+                                                                "category": "Downloading Model", 
+                                                                "summary": pct_msg,
+                                                                "spinner": "⬇️"
+                                                            });
+                                                            let _ = app_handle.emit("extraction-progress", &payload);
+                                                            
+                                                            last_percent = percent;
+                                                        }
+                                                    }
+                                                } else {
                                                     all_success = false;
                                                     break;
                                                 }
-                                                downloaded += chunk.len() as u64;
-                                                if total_size > 0 {
-                                                    let percent = (downloaded as f64 / total_size as f64 * 100.0) as u32;
-                                                    if percent >= last_percent + 10 { // 10% 단위로 UI 로그 출력
-                                                        let pct_msg = format!("{} 다운로드 진행률: {}%", file, percent);
-                                                        emit_term(&format!("[STANZA] {}", pct_msg));
-                                                        
-                                                        let payload = json!({ 
-                                                            "task_id": task.id.clone(),
-                                                            "category": "Downloading Model", 
-                                                            "summary": pct_msg,
-                                                            "spinner": "⬇️"
-                                                        });
-                                                        let _ = app_handle.emit("extraction-progress", &payload);
-                                                        
-                                                        last_percent = percent;
-                                                    }
-                                                }
-                                            } else {
-                                                all_success = false;
-                                                break;
                                             }
+                                        } else {
+                                            all_success = false;
                                         }
-                                    } else {
+                                    },
+                                    _ => {
                                         all_success = false;
                                     }
-                                },
-                                _ => {
-                                    all_success = false;
+                                }
+                                if !all_success { 
+                                    emit_term(&format!("[STANZA] ❌ 다운로드 실패: {}", file));
+                                    break; 
                                 }
                             }
-                            if !all_success { 
-                                emit_term(&format!("[STANZA] ❌ 다운로드 실패: {}", file));
-                                break; 
+                            
+                            if all_success {
+                                let msg = "모델 다운로드 완료!";
+                                emit_term(&format!("[STANZA] ✅ {}", msg));
+                                let payload = json!({ 
+                                    "task_id": task.id.clone(),
+                                    "category": "Downloading Model", 
+                                    "summary": msg,
+                                    "spinner": "✅"
+                                });
+                                let _ = app_handle.emit("extraction-progress", &payload);
+                                crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
+                            } else {
+                                let msg = "다운로드 중 오류 발생. 진행을 위해 다운로드된 파일을 삭제합니다.";
+                                emit_term(&format!("[STANZA] ⚠️ {}", msg));
+                                let payload = json!({ 
+                                    "task_id": task.id.clone(),
+                                    "category": "Error", 
+                                    "summary": msg,
+                                    "spinner": "❌"
+                                });
+                                let _ = app_handle.emit("extraction-progress", &payload);
+                                crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
+                                let _ = std::fs::remove_dir_all(&stanza_lang_dir);
                             }
                         }
-                        
-                        if all_success {
-                            let msg = "모델 다운로드 완료!";
-                            emit_term(&format!("[STANZA] ✅ {}", msg));
-                            let payload = json!({ 
-                                "task_id": task.id.clone(),
-                                "category": "Downloading Model", 
-                                "summary": msg,
-                                "spinner": "✅"
+
+                        if stanza_lang_dir.exists() {
+                            emit_term(&format!("[STANZA] 🧠 Loading Stanza ONNX models for '{}'...", stanza_lang_code));
+                            
+                            let base_dir_clone = stanza_base_dir.clone();
+                            let lang_code_clone = stanza_lang_code.to_string();
+                            
+                            // 🌟 [UNSAFE BYPASS] 구버전 onnxruntime(0.0.14)은 내부 C++ 포인터(*mut)에 대해 
+                            // Rust의 스레드 간 전송(Send) 트레이트 구현을 누락하는 설계 결함이 있습니다.
+                            // 컴파일러의 락을 강제로 해제하기 위해 Unsafe 래퍼 구조체를 선언하여 전송 자격을 억지로 부여합니다.
+                            struct UnsafePipelineWrapper(StanzaPipeline);
+                            unsafe impl Send for UnsafePipelineWrapper {}
+                            
+                            let (tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<UnsafePipelineWrapper>>();
+                            std::thread::spawn(move || {
+                                let res = StanzaPipeline::new(base_dir_clone, &lang_code_clone).map(UnsafePipelineWrapper);
+                                let _ = tx.send(res);
                             });
-                            let _ = app_handle.emit("extraction-progress", &payload);
-                            crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
+                            
+                            let pipeline_res = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("OS 스레드 통신 채널이 끊어졌습니다.")));
+
+                            match pipeline_res {
+                                Ok(wrapper) => {
+                                    stanza_pipelines.insert(current_lang.clone(), wrapper.0);
+                                    emit_term(&format!("[STANZA] ✅ Stanza Pipeline for '{}' loaded successfully.", current_lang));
+                                },
+                                Err(e) => emit_term(&format!("[STANZA] ⚠️ Failed to load Stanza models for '{}' (상세 원인): {:?}", current_lang, e)),
+                            }
                         } else {
-                            let msg = "다운로드 중 오류 발생. 진행을 위해 다운로드된 파일을 삭제합니다.";
-                            emit_term(&format!("[STANZA] ⚠️ {}", msg));
-                            let payload = json!({ 
-                                "task_id": task.id.clone(),
-                                "category": "Error", 
-                                "summary": msg,
-                                "spinner": "❌"
-                            });
-                            let _ = app_handle.emit("extraction-progress", &payload);
-                            crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
-                            let _ = std::fs::remove_dir_all(&stanza_lang_dir);
+                            emit_term(&format!("[STANZA] ⚠️ Stanza models for '{}' not found. Skipping POS/Depparse filtering.", stanza_lang_code));
                         }
-                    }
-
-                    if stanza_lang_dir.exists() {
-                        emit_term(&format!("[STANZA] 🧠 Loading Stanza ONNX models for '{}'...", stanza_lang_code));
-                        
-                        let base_dir_clone = stanza_base_dir.clone();
-                        let lang_code_clone = stanza_lang_code.to_string();
-                        
-                        // 🌟 [UNSAFE BYPASS] 구버전 onnxruntime(0.0.14)은 내부 C++ 포인터(*mut)에 대해 
-                        // Rust의 스레드 간 전송(Send) 트레이트 구현을 누락하는 설계 결함이 있습니다.
-                        // 컴파일러의 락을 강제로 해제하기 위해 Unsafe 래퍼 구조체를 선언하여 전송 자격을 억지로 부여합니다.
-                        struct UnsafePipelineWrapper(StanzaPipeline);
-                        unsafe impl Send for UnsafePipelineWrapper {}
-                        
-                        let (tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<UnsafePipelineWrapper>>();
-                        std::thread::spawn(move || {
-                            let res = StanzaPipeline::new(base_dir_clone, &lang_code_clone).map(UnsafePipelineWrapper);
-                            let _ = tx.send(res);
-                        });
-                        
-                        let pipeline_res = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("OS 스레드 통신 채널이 끊어졌습니다.")));
-
-                        match pipeline_res {
-                            Ok(wrapper) => {
-                                stanza_pipeline = Some(wrapper.0);
-                                emit_term("[STANZA] ✅ Stanza Pipeline loaded successfully.");
-                            },
-                            Err(e) => emit_term(&format!("[STANZA] ⚠️ Failed to load Stanza models (상세 원인): {:?}", e)),
-                        }
-                    } else {
-                        emit_term(&format!("[STANZA] ⚠️ Stanza models for '{}' not found. Skipping POS/Depparse filtering.", stanza_lang_code));
                     }
 
                     // 🌟 [추가] 언어 기반 동적 타겟 확장 로직
@@ -1413,30 +1430,16 @@ async fn process_task(
                                     let char_before = text[..absolute_t_idx].chars().next_back();
                                     let char_after = text[absolute_t_idx + target.len()..].chars().next();
                                     
-                                    let is_ascii_target = target.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || c == '-' || c == '_');
-
-                                    if is_ascii_target {
-                                        // 영문/숫자 타겟인 경우, 앞이나 뒤에 영문자/숫자가 하나라도 붙어있으면 독립 단어가 아닌 파편(Prefix/Suffix/Infix)으로 간주
-                                        let prev_is_alpha = char_before.map_or(false, |c| c.is_ascii_alphanumeric());
-                                        let next_is_alpha = char_after.map_or(false, |c| c.is_ascii_alphanumeric());
-                                        if prev_is_alpha || next_is_alpha {
-                                            is_infix = true;
-                                        }
-                                    } else {
-                                        // 기존 한글 및 기타 언어 로직 보완
-                                        let prev_is_alnum = char_before.map_or(false, |c| c.is_alphanumeric());
-                                        let next_is_alnum = char_after.map_or(false, |c| c.is_alphanumeric());
-                                        
-                                        if prev_is_alnum && next_is_alnum {
-                                            // 앞뒤가 모두 문자로 둘러싸여 있는 경우 (예: 에'이전'트)
-                                            if target_char_count <= 2 {
-                                                is_infix = true;
-                                            }
-                                        } else if prev_is_alnum || next_is_alnum {
-                                            // 앞이나 뒤 한쪽만 붙어있는 경우, 타겟이 1글자면 무조건 파편으로 간주
-                                            if target_char_count <= 1 {
-                                                is_infix = true;
-                                            }
+                                    // 🌟 [CRITICAL FIX] 특수문자(괄호, 쉼표 등)는 공백과 동일하게 단어의 경계로 취급합니다.
+                                    // 알파벳이나 숫자(Letter/Number)가 붙어있을 때만 파편(Infix)으로 간주하여 마스킹을 우회합니다.
+                                    let prev_is_alnum = char_before.map_or(false, |c| c.is_alphanumeric());
+                                    let next_is_alnum = char_after.map_or(false, |c| c.is_alphanumeric());
+                                    
+                                    if prev_is_alnum && next_is_alnum {
+                                        is_infix = true; // 양옆이 글자/숫자로 막힌 경우 무조건 파편
+                                    } else if prev_is_alnum || next_is_alnum {
+                                        if target_char_count <= 1 {
+                                            is_infix = true; // 한쪽이 막혀있고 1글자면 파편
                                         }
                                     }
                                     
@@ -2076,7 +2079,37 @@ async fn process_task(
                         }
 
                         // 🌟 [STAGE 2.5] Stanza 정제 및 전처리 (Post-NMS Trimming - 미시적 정밀 타격)
-                        if let Some(stanza) = &mut stanza_pipeline {
+                        let mut word_lang = local_language.clone();
+                        if let Some(info) = whatlang::detect(&specific_candidate) {
+                            let detected = match info.lang() {
+                                whatlang::Lang::Kor => "korean",
+                                whatlang::Lang::Jpn => "japanese",
+                                whatlang::Lang::Cmn => "chinese",
+                                whatlang::Lang::Rus => "russian",
+                                whatlang::Lang::Ara => "arabic",
+                                whatlang::Lang::Tha => "thai",
+                                whatlang::Lang::Hin => "hindi",
+                                whatlang::Lang::Ben => "bengali",
+                                whatlang::Lang::Ell => "greek",
+                                whatlang::Lang::Heb => "hebrew",
+                                whatlang::Lang::Vie => "vietnamese",
+                                whatlang::Lang::Fra => "french",
+                                whatlang::Lang::Deu => "german",
+                                whatlang::Lang::Spa => "spanish",
+                                whatlang::Lang::Ita => "italian",
+                                whatlang::Lang::Por => "portuguese",
+                                whatlang::Lang::Nld => "dutch",
+                                _ => "english",
+                            };
+                            word_lang = detected.to_string();
+                        }
+                        
+                        let mut stanza_opt = stanza_pipelines.get_mut(&word_lang);
+                        if stanza_opt.is_none() {
+                            stanza_opt = stanza_pipelines.get_mut(&local_language);
+                        }
+
+                        if let Some(stanza) = stanza_opt {
                             if !specific_candidate.is_empty() {
                                 // 🌟 [원본 보존] 문장 전체 검색을 위해 정제 전의 원본 타겟을 보존합니다.
                                 let original_candidate = specific_candidate.clone();
@@ -2093,11 +2126,8 @@ async fn process_task(
                                 }
                                 eval_target = eval_target.split_whitespace().collect::<Vec<_>>().join(" ");
 
-                                // 🌟 정제된 텍스트를 specific_candidate에 다시 덮어씌워 LLM 프롬프트에도 깨끗한 값을 전달합니다.
-                                specific_candidate = eval_target.clone();
-
                                 // 🌟 [CRITICAL FIX] 특수문자 제거 후 힌트 단어가 완전히 사라진 경우 (예: "."), 무의미한 LLM 추론 및 ONNX 에러를 방지하기 위해 트랙을 즉시 스킵합니다.
-                                if specific_candidate.trim().is_empty() {
+                                if eval_target.trim().is_empty() {
                                     emit_term("[STANZA] ⚠️ 특수문자 정제 후 힌트 단어가 완전히 사라졌습니다. 트랙을 스킵합니다.");
                                     continue;
                                 }
@@ -2377,6 +2407,77 @@ async fn process_task(
                                                 let mut valid_tags_clone = candidate_tags.clone();
                                                 let mut is_trimmed = false;
 
+                                                // 🌟 [추가] Lemma 기반 글자 커팅 (어간 추출) 적용
+                                                // POS 태깅을 마친 trimmed_words를 대상으로 lemma.onnx를 돌려 원형(어근)만 추출하여 교체합니다.
+                                                if !trimmed_words.is_empty() {
+                                                    let words_refs: Vec<&str> = trimmed_words.iter().map(|s| s.as_str()).collect();
+                                                    if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session) {
+                                                        if let Ok(lemma_outputs) = stanza.lemma_session.run::<'_, '_, '_, i64, f32, _>(lemma_inputs) {
+                                                            let output_tensor = &lemma_outputs[0];
+                                                            let shape = output_tensor.shape();
+                                                            let is_4d = shape.len() == 4;
+                                                            // 통상적으로 Seq2Seq lemma의 출력 차원 파악 후 디코딩 수행
+                                                            let num_words = if is_4d { shape[1] as usize } else { shape[0] as usize };
+                                                            
+                                                            for w_idx in 0..num_words.min(trimmed_words.len()) {
+                                                                let mut lemma_chars = String::new();
+                                                                // 차원 구조에 따라 시퀀스를 뽑아 글자로 복원
+                                                                if is_4d {
+                                                                    let max_len = shape[2] as usize;
+                                                                    let num_classes = shape[3] as usize;
+                                                                    for c_idx in 0..max_len {
+                                                                        let mut max_val = std::f32::MIN;
+                                                                        let mut best_class = 0;
+                                                                        for cls in 0..num_classes {
+                                                                            let val = output_tensor[[0, w_idx, c_idx, cls]];
+                                                                            if val > max_val { max_val = val; best_class = cls; }
+                                                                        }
+                                                                        if best_class > 0 {
+                                                                            if let Some(&c) = stanza.preprocessor.id_to_char.get(&(best_class as i64)) {
+                                                                                if c != '<' && c != '>' { lemma_chars.push(c); } // 제어문자 무시
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                } else if shape.len() == 3 {
+                                                                    let max_len = shape[1] as usize;
+                                                                    let num_classes = shape[2] as usize;
+                                                                    for c_idx in 0..max_len {
+                                                                        let mut max_val = std::f32::MIN;
+                                                                        let mut best_class = 0;
+                                                                        for cls in 0..num_classes {
+                                                                            let val = output_tensor[[w_idx, c_idx, cls]];
+                                                                            if val > max_val { max_val = val; best_class = cls; }
+                                                                        }
+                                                                        if best_class > 0 {
+                                                                            if let Some(&c) = stanza.preprocessor.id_to_char.get(&(best_class as i64)) {
+                                                                                if c != '<' && c != '>' { lemma_chars.push(c); } // 제어문자 무시
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                } else if shape.len() == 2 {
+                                                                    let max_len = shape[1] as usize;
+                                                                    for c_idx in 0..max_len {
+                                                                        let best_class = output_tensor[[w_idx, c_idx]] as i64;
+                                                                        if best_class > 0 {
+                                                                            if let Some(&c) = stanza.preprocessor.id_to_char.get(&best_class) {
+                                                                                if c != '<' && c != '>' { lemma_chars.push(c); }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                                
+                                                                // 원형(Lemma) 문자열이 유효하게 도출되었을 경우 기존 단어를 교체 (커팅 반영)
+                                                                let clean_lemma = lemma_chars.trim();
+                                                                if !clean_lemma.is_empty() && clean_lemma != trimmed_words[w_idx] {
+                                                                    emit_term(&format!("[STANZA] ✂️ Lemma 글자 커팅 성공: '{}' -> '{}'", trimmed_words[w_idx], clean_lemma));
+                                                                    trimmed_words[w_idx] = clean_lemma.to_string();
+                                                                    is_trimmed = true;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
                                                 // 🌟 [CRITICAL FIX] PUG 파이프(|) 등 순수 기호가 독립 단어로 분리되어 무한 루프를 유발하는 현상 차단
                                                 let mut clean_words = Vec::new();
                                                 let mut clean_tags = Vec::new();
@@ -2432,9 +2533,43 @@ async fn process_task(
                                                     }
                                                 }
                                                 
+                                                // 🌟 [CRITICAL FIX] 형태소 분리 및 절단 이후, 남은 단어들을 원본(original_candidate)에 매핑하여 특수기호/공백을 복원합니다.
+                                                let mut restored_candidate = String::new();
+                                                let mut force_split_due_to_dropped_infix = false;
+
+                                                if !trimmed_words.is_empty() {
+                                                    let escaped_words: Vec<String> = trimmed_words.iter().map(|w| regex::escape(w)).collect();
+                                                    let pattern_str = escaped_words.join(r"[^\p{L}\p{N}_]*");
+                                                    if let Ok(re) = regex::Regex::new(&pattern_str) {
+                                                        if let Some(mat) = re.find(&original_candidate) {
+                                                            let mut start_idx = mat.start();
+                                                            let mut end_idx = mat.end();
+                                                            
+                                                            let chars_before: Vec<(usize, char)> = original_candidate[..start_idx].char_indices().rev().collect();
+                                                            for (idx, c) in chars_before {
+                                                                if c.is_alphanumeric() || c.is_whitespace() { break; }
+                                                                start_idx = idx;
+                                                            }
+                                                            
+                                                            let chars_after: Vec<(usize, char)> = original_candidate[end_idx..].char_indices().collect();
+                                                            for (offset, c) in chars_after {
+                                                                if c.is_alphanumeric() || c.is_whitespace() { break; }
+                                                                end_idx += c.len_utf8();
+                                                            }
+                                                            
+                                                            restored_candidate = original_candidate[start_idx..end_idx].to_string();
+                                                        } else {
+                                                            // 매칭 실패: Stanza가 단어 사이의 글자(예: 조사)를 날렸다는 의미이므로 분할(Split) 큐로 넘깁니다.
+                                                            force_split_due_to_dropped_infix = true;
+                                                        }
+                                                    }
+                                                }
+
                                                 let mut queue_split = false;
-                                                if trimmed_words.len() >= 2 {
-                                                    // 🌟 [CRITICAL FIX] 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하되, 의미 있는 1글자 명사(NOUN, PROPN)나 숫자(NUM), 수식어가 분할 큐를 찢는 현상을 원천 방지합니다.
+                                                if force_split_due_to_dropped_infix && trimmed_words.len() >= 2 {
+                                                    queue_split = true;
+                                                } else if trimmed_words.len() >= 2 {
+                                                    // 🌟 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하되, 의미 있는 1글자 명사(NOUN, PROPN)나 숫자(NUM), 수식어가 분할 큐를 찢는 현상을 원천 방지합니다.
                                                     let protected_tags = ["ADJ", "ADV", "DET", "PART", "PRON", "NOUN", "PROPN", "NUM"];
                                                     if trimmed_words.iter().enumerate().any(|(w_idx, w)| {
                                                         let c_count = w.chars().filter(|c| !c.is_whitespace()).count();
@@ -2448,7 +2583,11 @@ async fn process_task(
 
                                                 if queue_split {
                                                     let parts_display = trimmed_words.join("', '");
-                                                    emit_term(&format!("[STANZA] ✂️ 1글자 단어 포함 감지. '{}' 로 분할하여 평가합니다.", parts_display));
+                                                    if force_split_due_to_dropped_infix {
+                                                        emit_term(&format!("[STANZA] ✂️ 절단된 중간 단어(조사 등) 감지. '{}' 로 분할하여 평가합니다.", parts_display));
+                                                    } else {
+                                                        emit_term(&format!("[STANZA] ✂️ 1글자 단어 포함 감지. '{}' 로 분할하여 평가합니다.", parts_display));
+                                                    }
                                                     
                                                     let mut accepted_parts = Vec::new();
                                                     let mut rejected_parts = Vec::new();
@@ -2473,9 +2612,12 @@ async fn process_task(
                                                     }
                                                     
                                                     continue;
-                                                } else if is_trimmed {
-                                                    let join_str = " ";
-                                                    let trimmed_candidate = trimmed_words.join(join_str);
+                                                } else if is_trimmed || !restored_candidate.is_empty() {
+                                                    let trimmed_candidate = if !restored_candidate.is_empty() {
+                                                        restored_candidate
+                                                    } else {
+                                                        trimmed_words.join(" ")
+                                                    };
                                                     
                                                     // 🌟 [수정된 로직] 절단 결과가 1글자 이하라면 무의미한 단어로 간주하고 해당 트랙을 즉시 기각(스킵)합니다.
                                                     let char_count = trimmed_candidate.chars().filter(|c| !c.is_whitespace()).count();
@@ -2484,7 +2626,7 @@ async fn process_task(
                                                         continue;
                                                     }
                                                     
-                                                    emit_term(&format!("[STANZA] ✂️ 1차 형태소 분리 후 스마트 머리/꼬리 절단 ({}): '{}' -> '{}'", local_language, specific_candidate, trimmed_candidate));
+                                                    emit_term(&format!("[STANZA] ✂️ 1차 형태소 분리 후 원본 복원 결합 ({}): '{}' -> '{}'", local_language, specific_candidate, trimmed_candidate));
                                                     specific_candidate = trimmed_candidate;
                                                 } else {
                                                     if specific_candidate != eval_target {
@@ -2642,7 +2784,38 @@ async fn process_task(
                             // 🌟 [추가] 추출된 단어(extracted_val)에 대해 한 번 더 NLP(Stanza) 검증 및 정제를 수행하여 꼬리(조사)를 자르거나 명사가 아닌 경우 기각합니다.
                             let mut nlp_rejected = false;
                             let mut already_masked_skip = false;
-                            if let Some(stanza) = &mut stanza_pipeline {
+                            
+                            let mut ext_lang = local_language.clone();
+                            if let Some(info) = whatlang::detect(&extracted_val) {
+                                let detected = match info.lang() {
+                                    whatlang::Lang::Kor => "korean",
+                                    whatlang::Lang::Jpn => "japanese",
+                                    whatlang::Lang::Cmn => "chinese",
+                                    whatlang::Lang::Rus => "russian",
+                                    whatlang::Lang::Ara => "arabic",
+                                    whatlang::Lang::Tha => "thai",
+                                    whatlang::Lang::Hin => "hindi",
+                                    whatlang::Lang::Ben => "bengali",
+                                    whatlang::Lang::Ell => "greek",
+                                    whatlang::Lang::Heb => "hebrew",
+                                    whatlang::Lang::Vie => "vietnamese",
+                                    whatlang::Lang::Fra => "french",
+                                    whatlang::Lang::Deu => "german",
+                                    whatlang::Lang::Spa => "spanish",
+                                    whatlang::Lang::Ita => "italian",
+                                    whatlang::Lang::Por => "portuguese",
+                                    whatlang::Lang::Nld => "dutch",
+                                    _ => "english",
+                                };
+                                ext_lang = detected.to_string();
+                            }
+                            
+                            let mut stanza_ext_opt = stanza_pipelines.get_mut(&ext_lang);
+                            if stanza_ext_opt.is_none() {
+                                stanza_ext_opt = stanza_pipelines.get_mut(&local_language);
+                            }
+
+                            if let Some(stanza) = stanza_ext_opt {
                                 // 🌟 [CRITICAL FIX] 이미 Stage 2.5에서 NLP 검증을 통과한 specific_candidate와 동일하다면, 
                                 // 마커([___REDACTED_...])로 인해 문맥이 오염된 상태에서 Stanza가 동사(VERB)로 오판하는 것을 막기 위해 중복 검증을 안전하게 건너뜁니다!
                                 if !extracted_val.is_empty() && extracted_val != specific_candidate {
@@ -2661,11 +2834,8 @@ async fn process_task(
                                     }
                                     eval_ext = eval_ext.split_whitespace().collect::<Vec<_>>().join(" ");
 
-                                    // 🌟 정제된 텍스트를 extracted_val에 덮어씌워 오탐률을 줄입니다.
-                                    extracted_val = eval_ext.clone();
-
                                     // 🌟 [CRITICAL FIX] 특수문자 제거 후 추출 단어가 완전히 사라진 경우, NLP 검증을 우회하고 강제로 기각 상태를 활성화합니다.
-                                    if extracted_val.trim().is_empty() {
+                                    if eval_ext.trim().is_empty() {
                                         emit_term("[STANZA-EXT] ⚠️ 특수문자 정제 후 추출 단어가 완전히 사라졌습니다. 강제 기각 처리합니다.");
                                         nlp_rejected = true;
                                     } else if hallucinated_candidates.contains(&extracted_val) {
@@ -2937,6 +3107,74 @@ async fn process_task(
                                                     let mut valid_tags_clone = candidate_tags.clone();
                                                     let mut is_trimmed = false;
 
+                                                    // 🌟 [추가] Lemma 기반 글자 커팅 (어간 추출) 2차 적용
+                                                    // 추출 단어에 대한 NLP 검증 시에도 동일하게 원형 커팅을 시도합니다.
+                                                    if !trimmed_words.is_empty() {
+                                                        let words_refs: Vec<&str> = trimmed_words.iter().map(|s| s.as_str()).collect();
+                                                        if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session) {
+                                                            if let Ok(lemma_outputs) = stanza.lemma_session.run::<'_, '_, '_, i64, f32, _>(lemma_inputs) {
+                                                                let output_tensor = &lemma_outputs[0];
+                                                                let shape = output_tensor.shape();
+                                                                let is_4d = shape.len() == 4;
+                                                                let num_words = if is_4d { shape[1] as usize } else { shape[0] as usize };
+                                                                
+                                                                for w_idx in 0..num_words.min(trimmed_words.len()) {
+                                                                    let mut lemma_chars = String::new();
+                                                                    if is_4d {
+                                                                        let max_len = shape[2] as usize;
+                                                                        let num_classes = shape[3] as usize;
+                                                                        for c_idx in 0..max_len {
+                                                                            let mut max_val = std::f32::MIN;
+                                                                            let mut best_class = 0;
+                                                                            for cls in 0..num_classes {
+                                                                                let val = output_tensor[[0, w_idx, c_idx, cls]];
+                                                                                if val > max_val { max_val = val; best_class = cls; }
+                                                                            }
+                                                                            if best_class > 0 {
+                                                                                if let Some(&c) = stanza.preprocessor.id_to_char.get(&(best_class as i64)) {
+                                                                                    if c != '<' && c != '>' { lemma_chars.push(c); }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    } else if shape.len() == 3 {
+                                                                        let max_len = shape[1] as usize;
+                                                                        let num_classes = shape[2] as usize;
+                                                                        for c_idx in 0..max_len {
+                                                                            let mut max_val = std::f32::MIN;
+                                                                            let mut best_class = 0;
+                                                                            for cls in 0..num_classes {
+                                                                                let val = output_tensor[[w_idx, c_idx, cls]];
+                                                                                if val > max_val { max_val = val; best_class = cls; }
+                                                                            }
+                                                                            if best_class > 0 {
+                                                                                if let Some(&c) = stanza.preprocessor.id_to_char.get(&(best_class as i64)) {
+                                                                                    if c != '<' && c != '>' { lemma_chars.push(c); }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    } else if shape.len() == 2 {
+                                                                        let max_len = shape[1] as usize;
+                                                                        for c_idx in 0..max_len {
+                                                                            let best_class = output_tensor[[w_idx, c_idx]] as i64;
+                                                                            if best_class > 0 {
+                                                                                if let Some(&c) = stanza.preprocessor.id_to_char.get(&best_class) {
+                                                                                    if c != '<' && c != '>' { lemma_chars.push(c); }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    
+                                                                    let clean_lemma = lemma_chars.trim();
+                                                                    if !clean_lemma.is_empty() && clean_lemma != trimmed_words[w_idx] {
+                                                                        emit_term(&format!("[STANZA-EXT] ✂️ Lemma 글자 커팅 성공: '{}' -> '{}'", trimmed_words[w_idx], clean_lemma));
+                                                                        trimmed_words[w_idx] = clean_lemma.to_string();
+                                                                        is_trimmed = true;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
                                                     // 🌟 [CRITICAL FIX] PUG 파이프(|) 등 순수 기호가 독립 단어로 분리되어 무한 루프를 유발하는 현상 차단
                                                     let mut clean_words = Vec::new();
                                                     let mut clean_tags = Vec::new();
@@ -2959,9 +3197,13 @@ async fn process_task(
                                                     if !is_id_domain {
                                                         while let Some(first_tag) = valid_tags_clone.first() {
                                                             if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
-                                                                // 🌟 [예외 추가] 만약 잘려나가는 단어가 영어/숫자 등 고유명사의 특징을 띤다면 보호합니다.
                                                                 let first_word = &trimmed_words[0];
-                                                                if first_word.chars().any(|c| c.is_ascii_alphanumeric()) {
+                                                                // 🌟 [예외 추가] 잘려나가는 단어가 영어/숫자이거나 특정 보호 기호(괄호 등)를 포함하면 보호합니다.
+                                                                let has_ascii = first_word.chars().any(|c| c.is_ascii_alphanumeric());
+                                                                let has_bracket = first_word.contains('[') || first_word.contains(']') || first_word.contains('(') || first_word.contains(')');
+                                                                
+                                                                // 태그가 PUNCT(문장부호)인데 괄호를 포함하거나, 길이가 2글자 이상인 기호 덩어리라면 자르지 않고 보호합니다.
+                                                                if has_ascii || (*first_tag == "PUNCT" && (has_bracket || first_word.chars().count() >= 2)) {
                                                                     break;
                                                                 }
                                                                 trimmed_words.remove(0);
@@ -2978,9 +3220,12 @@ async fn process_task(
                                                     if !is_id_domain {
                                                         while let Some(last_tag) = valid_tags_clone.last() {
                                                             if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
-                                                                // 🌟 [예외 추가] 만약 잘려나가는 단어가 영어/숫자 등 고유명사의 특징을 띤다면 보호합니다.
                                                                 let last_word = trimmed_words.last().unwrap();
-                                                                if last_word.chars().any(|c| c.is_ascii_alphanumeric()) {
+                                                                // 🌟 [예외 추가] 잘려나가는 단어가 영어/숫자이거나 특정 보호 기호(괄호 등)를 포함하면 보호합니다.
+                                                                let has_ascii = last_word.chars().any(|c| c.is_ascii_alphanumeric());
+                                                                let has_bracket = last_word.contains('[') || last_word.contains(']') || last_word.contains('(') || last_word.contains(')');
+                                                                
+                                                                if has_ascii || (*last_tag == "PUNCT" && (has_bracket || last_word.chars().count() >= 2)) {
                                                                     break;
                                                                 }
                                                                 trimmed_words.pop();
@@ -2990,11 +3235,80 @@ async fn process_task(
                                                                 break;
                                                             }
                                                         }
+                                                        
+                                                        // 🌟 [동적 의미 기반 절단] 하드코딩된 조사 배열을 쓰지 않고, 
+                                                        // 단일 토큰의 마지막 1~2글자를 뺐을 때의 벡터 유사도가 기존보다 높아진다면 
+                                                        // 이를 의미를 훼손하는 조사/어미로 간주하여 AI가 스스로 판단하고 절단합니다.
+                                                        if trimmed_words.len() == 1 {
+                                                            let word = trimmed_words[0].clone();
+                                                            let char_count = word.chars().count();
+                                                            if char_count > 2 {
+                                                                let lang_prefix = target_name.split('_').next().unwrap_or("english");
+                                                                let prefixed_b_val = target_bias.split(',').map(|s| format!("{} {}", lang_prefix, s.trim())).collect::<Vec<_>>().join(", ");
+                                                                let bias_emb = model.get_embedding(prefixed_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
+
+                                                                let mut best_word = word.clone();
+                                                                let mut best_score = std::f32::MIN;
+                                                                
+                                                                // 원본, -1글자, -2글자에 대한 임베딩 평가 수행
+                                                                for drop_len in 0..=2 {
+                                                                    let candidate: String = word.chars().take(char_count - drop_len).collect();
+                                                                    let p_emb = model.get_embedding(candidate.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                                                    
+                                                                    // 추출 목표(bias_emb)와의 코사인 유사도로 어간(Root) 적합성 점수 측정
+                                                                    let score = cosine_similarity(&p_emb, &bias_emb);
+                                                                    
+                                                                    if score > best_score {
+                                                                        best_score = score;
+                                                                        best_word = candidate;
+                                                                    }
+                                                                }
+                                                                
+                                                                if best_word != word {
+                                                                    trimmed_words[0] = best_word;
+                                                                    is_trimmed = true;
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                     
+                                                    // 🌟 [CRITICAL FIX] 형태소 분리 및 절단 이후, 남은 단어들을 원본(original_ext)에 매핑하여 특수기호/공백을 복원합니다.
+                                                    let mut restored_candidate = String::new();
+                                                    let mut force_split_due_to_dropped_infix = false;
+
+                                                    if !trimmed_words.is_empty() {
+                                                        let escaped_words: Vec<String> = trimmed_words.iter().map(|w| regex::escape(w)).collect();
+                                                        let pattern_str = escaped_words.join(r"[^\p{L}\p{N}_]*");
+                                                        if let Ok(re) = regex::Regex::new(&pattern_str) {
+                                                            if let Some(mat) = re.find(&original_ext) {
+                                                                let mut start_idx = mat.start();
+                                                                let mut end_idx = mat.end();
+                                                                
+                                                                let chars_before: Vec<(usize, char)> = original_ext[..start_idx].char_indices().rev().collect();
+                                                                for (idx, c) in chars_before {
+                                                                    if c.is_alphanumeric() || c.is_whitespace() { break; }
+                                                                    start_idx = idx;
+                                                                }
+                                                                
+                                                                let chars_after: Vec<(usize, char)> = original_ext[end_idx..].char_indices().collect();
+                                                                for (offset, c) in chars_after {
+                                                                    if c.is_alphanumeric() || c.is_whitespace() { break; }
+                                                                    end_idx += c.len_utf8();
+                                                                }
+                                                                
+                                                                restored_candidate = original_ext[start_idx..end_idx].to_string();
+                                                            } else {
+                                                                // 매칭 실패: Stanza가 단어 사이의 글자(예: 조사)를 날렸다는 의미이므로 분할(Split) 큐로 넘깁니다.
+                                                                force_split_due_to_dropped_infix = true;
+                                                            }
+                                                        }
+                                                    }
+
                                                     let mut queue_split = false;
-                                                    if trimmed_words.len() >= 2 {
-                                                        // 🌟 [CRITICAL FIX] 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하되, 의미 있는 1글자 명사(NOUN, PROPN)나 숫자(NUM), 수식어가 분할 큐를 찢는 현상을 원천 방지합니다.
+                                                    if force_split_due_to_dropped_infix && trimmed_words.len() >= 2 {
+                                                        queue_split = true;
+                                                    } else if trimmed_words.len() >= 2 {
+                                                        // 🌟 1글자 단어가 진짜 알파벳/한글/숫자일 때만 분할하되, 의미 있는 1글자 명사(NOUN, PROPN)나 숫자(NUM), 수식어가 분할 큐를 찢는 현상을 원천 방지합니다.
                                                         let protected_tags = ["ADJ", "ADV", "DET", "PART", "PRON", "NOUN", "PROPN", "NUM"];
                                                         if trimmed_words.iter().enumerate().any(|(w_idx, w)| {
                                                             let c_count = w.chars().filter(|c| !c.is_whitespace()).count();
@@ -3008,11 +3322,40 @@ async fn process_task(
 
                                                     if queue_split {
                                                         let parts_display = trimmed_words.join("', '");
-                                                        emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 로 분할하여 평가하고 현재 트랙을 종료합니다.", parts_display));
+                                                        if force_split_due_to_dropped_infix {
+                                                            emit_term(&format!("[STANZA-EXT] ✂️ 절단된 중간 단어(조사 등) 감지. 추출단어를 '{}' 로 분할하여 평가하고 현재 트랙을 종료합니다.", parts_display));
+                                                        } else {
+                                                            emit_term(&format!("[STANZA-EXT] ✂️ 1글자 단어 포함 감지. 추출단어를 '{}' 로 분할하여 평가하고 현재 트랙을 종료합니다.", parts_display));
+                                                        }
                                                         
                                                         let mut accepted_parts = Vec::new();
                                                         let mut rejected_parts = Vec::new();
                                                         
+                                                        // 🌟 [추가] 분리된 조각들이 원본에서 연속적일 경우 결합하여 추가 (찜통+더위 -> 찜통더위)
+                                                        let mut recombined_words = Vec::new();
+                                                        if trimmed_words.len() >= 2 {
+                                                            let mut current_combined = trimmed_words[0].clone();
+                                                            for i in 1..trimmed_words.len() {
+                                                                let next_word = &trimmed_words[i];
+                                                                let combined = format!("{}{}", current_combined, next_word);
+                                                                let combined_spaced = format!("{} {}", current_combined, next_word);
+                                                                
+                                                                if original_ext.contains(&combined) {
+                                                                    current_combined = combined;
+                                                                } else if original_ext.contains(&combined_spaced) {
+                                                                    current_combined = combined_spaced;
+                                                                } else {
+                                                                    if current_combined.chars().count() >= 2 {
+                                                                        recombined_words.push(current_combined.clone());
+                                                                    }
+                                                                    current_combined = next_word.clone();
+                                                                }
+                                                            }
+                                                            if current_combined.chars().count() >= 2 && current_combined != original_ext {
+                                                                recombined_words.push(current_combined);
+                                                            }
+                                                        }
+
                                                         for part in &trimmed_words {
                                                             let p_char_count = part.chars().filter(|c| !c.is_whitespace()).count();
                                                             if p_char_count >= 2 {
@@ -3022,6 +3365,17 @@ async fn process_task(
                                                                 accepted_parts.push(part.to_string());
                                                             } else {
                                                                 rejected_parts.push(part.to_string());
+                                                            }
+                                                        }
+
+                                                        // 🌟 재결합된 단어들을 큐에 추가
+                                                        for recombined in recombined_words {
+                                                            if !accepted_parts.contains(&recombined) {
+                                                                let mut clone = valid_targets[p_idx - 1].clone();
+                                                                clone.7 = recombined.clone();
+                                                                valid_targets.push(clone);
+                                                                accepted_parts.push(recombined.clone());
+                                                                emit_term(&format!("[STANZA-EXT] 🔗 재결합 조각 추가: '{}'", recombined));
                                                             }
                                                         }
                                                         
@@ -3036,9 +3390,12 @@ async fn process_task(
                                                         // continue를 호출하면 프롬프트가 변하지 않아 영구적인 무한 루프에 빠집니다.
                                                         // 추론 큐(valid_targets)에 분할된 단어를 이미 밀어넣었으므로, 현재 트랙은 즉시 종료(break)해야 합니다.
                                                         break;
-                                                    } else if is_trimmed {
-                                                        let join_str = " ";
-                                                        let trimmed_candidate = trimmed_words.join(join_str);
+                                                    } else if is_trimmed || !restored_candidate.is_empty() {
+                                                        let trimmed_candidate = if !restored_candidate.is_empty() {
+                                                            restored_candidate
+                                                        } else {
+                                                            trimmed_words.join(" ")
+                                                        };
                                                         
                                                         // 🌟 [수정된 로직] 추출 단어의 사후 절단 결과가 1글자 이하라면 무의미한 단어로 간주하고 강제 기각(nlp_rejected) 처리합니다.
                                                         let char_count = trimmed_candidate.chars().filter(|c| !c.is_whitespace()).count();
@@ -3046,7 +3403,7 @@ async fn process_task(
                                                             emit_term(&format!("[STANZA-EXT] ✂️ 스마트 절단 결과 1글자만 남음 ('{}' -> '{}'). 무의미한 단어로 간주하여 강제 기각합니다.", extracted_val, trimmed_candidate));
                                                             nlp_rejected = true;
                                                         } else {
-                                                            emit_term(&format!("[STANZA-EXT] ✂️ 1차 형태소 분리 후 추출단어 스마트 머리/꼬리 절단 ({}): '{}' -> '{}'", local_language, extracted_val, trimmed_candidate));
+                                                            emit_term(&format!("[STANZA-EXT] ✂️ 1차 형태소 분리 후 원본 복원 결합 ({}): '{}' -> '{}'", local_language, extracted_val, trimmed_candidate));
                                                             extracted_val = trimmed_candidate;
                                                         }
                                                     } else {
@@ -3290,20 +3647,13 @@ async fn process_task(
                                             let cb = extracted_val[..idx].chars().next_back();
                                             let ca = extracted_val[idx + orig.len()..].chars().next();
                                             let mut is_infix = false;
-                                            let is_ascii_orig = orig.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || c == '-' || c == '_');
+                                            let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
+                                            let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
                                             
-                                            if is_ascii_orig {
-                                                let prev_is_alpha = cb.map_or(false, |c| c.is_ascii_alphanumeric());
-                                                let next_is_alpha = ca.map_or(false, |c| c.is_ascii_alphanumeric());
-                                                if prev_is_alpha || next_is_alpha { is_infix = true; }
-                                            } else {
-                                                let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
-                                                let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
-                                                if prev_is_alnum && next_is_alnum {
-                                                    if orig.chars().count() <= 2 { is_infix = true; }
-                                                } else if prev_is_alnum || next_is_alnum {
-                                                    if orig.chars().count() <= 1 { is_infix = true; }
-                                                }
+                                            if prev_is_alnum && next_is_alnum {
+                                                is_infix = true;
+                                            } else if prev_is_alnum || next_is_alnum {
+                                                if orig.chars().count() <= 1 { is_infix = true; }
                                             }
                                             if !is_infix { is_valid_overlap = true; }
                                         }
@@ -3312,20 +3662,13 @@ async fn process_task(
                                             let cb = orig[..idx].chars().next_back();
                                             let ca = orig[idx + extracted_val.len()..].chars().next();
                                             let mut is_infix = false;
-                                            let is_ascii_ext = extracted_val.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || c == '-' || c == '_');
+                                            let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
+                                            let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
                                             
-                                            if is_ascii_ext {
-                                                let prev_is_alpha = cb.map_or(false, |c| c.is_ascii_alphanumeric());
-                                                let next_is_alpha = ca.map_or(false, |c| c.is_ascii_alphanumeric());
-                                                if prev_is_alpha || next_is_alpha { is_infix = true; }
-                                            } else {
-                                                let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
-                                                let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
-                                                if prev_is_alnum && next_is_alnum {
-                                                    if extracted_val.chars().count() <= 2 { is_infix = true; }
-                                                } else if prev_is_alnum || next_is_alnum {
-                                                    if extracted_val.chars().count() <= 1 { is_infix = true; }
-                                                }
+                                            if prev_is_alnum && next_is_alnum {
+                                                is_infix = true;
+                                            } else if prev_is_alnum || next_is_alnum {
+                                                if extracted_val.chars().count() <= 1 { is_infix = true; }
                                             }
                                             if !is_infix { is_valid_overlap = true; }
                                         }
@@ -3811,19 +4154,13 @@ async fn process_task(
                                         let cb = extracted_val[..idx].chars().next_back();
                                         let ca = extracted_val[idx + orig.len()..].chars().next();
                                         
-                                        let is_ascii_orig = orig.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || c == '-' || c == '_');
-                                        if is_ascii_orig {
-                                            let prev_is_alpha = cb.map_or(false, |c| c.is_ascii_alphanumeric());
-                                            let next_is_alpha = ca.map_or(false, |c| c.is_ascii_alphanumeric());
-                                            if prev_is_alpha || next_is_alpha { is_infix = true; }
-                                        } else {
-                                            let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
-                                            let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
-                                            if prev_is_alnum && next_is_alnum {
-                                                if orig.chars().count() <= 2 { is_infix = true; }
-                                            } else if prev_is_alnum || next_is_alnum {
-                                                if orig.chars().count() <= 1 { is_infix = true; }
-                                            }
+                                        let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
+                                        let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
+                                        
+                                        if prev_is_alnum && next_is_alnum {
+                                            is_infix = true;
+                                        } else if prev_is_alnum || next_is_alnum {
+                                            if orig.chars().count() <= 1 { is_infix = true; }
                                         }
                                     }
                                     
@@ -4001,7 +4338,7 @@ async fn process_task(
                     }
                     
                     // 🌟 [VRAM 해제] 단일 문서에 대한 Stanza(ONNX) 추론이 모두 끝났으므로 즉시 메모리를 반환합니다.
-                    drop(stanza_pipeline);
+                    drop(stanza_pipelines);
                 }
 
                 // 🌟 [STEP 3] 최종 결과물(마스킹 정보)을 DB에 업데이트합니다.

@@ -64,7 +64,8 @@ where
             | TensorElementDataType::Int64
             | TensorElementDataType::Double
             | TensorElementDataType::Uint32
-            | TensorElementDataType::Uint64 => {
+            | TensorElementDataType::Uint64
+            | TensorElementDataType::Bool => {
                 // primitive data is already suitably laid out in memory; provide it to
                 // onnxruntime as is
                 let tensor_values_ptr: *mut std::ffi::c_void =
