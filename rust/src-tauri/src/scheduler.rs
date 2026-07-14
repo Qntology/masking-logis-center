@@ -1443,12 +1443,8 @@ async fn process_task(
                                     let prev_is_alnum = char_before.map_or(false, |c| c.is_alphanumeric());
                                     let next_is_alnum = char_after.map_or(false, |c| c.is_alphanumeric());
                                     
-                                    if prev_is_alnum && next_is_alnum {
-                                        is_infix = true; // 양옆이 글자/숫자로 막힌 경우 무조건 파편
-                                    } else if prev_is_alnum || next_is_alnum {
-                                        if target_char_count <= 1 {
-                                            is_infix = true; // 한쪽이 막혀있고 1글자면 파편
-                                        }
+                                    if prev_is_alnum || next_is_alnum {
+                                        is_infix = true; // 한쪽이라도 문자로 막혀있으면 독립 단어가 아닌 파편으로 간주하여 보호
                                     }
                                     
                                     if is_infix {
@@ -1689,7 +1685,7 @@ async fn process_task(
                                     let mut title_bonus = 0.0;
                                     let t_sim = cosine_similarity(&chunk_emb, &title_emb);
                                     if t_sim > 0.0 {
-                                        title_bonus = t_sim * 0.15; // 제목과 벡터 방향성이 일치하는 단어에 15% 보정치 가점 부여
+                                        title_bonus = t_sim * 0.35; // 순수 숫자의 구출을 위해 연관성 가중치를 35%로 대폭 상향
                                     }
                                     
                                     // 🌟 타이브레이커 감점 및 제목 보너스를 최종 스코어에 반영
@@ -1930,7 +1926,7 @@ async fn process_task(
                                         
                                         let mut title_bonus = 0.0;
                                         let t_sim = cosine_similarity(&combined_emb, &title_emb);
-                                        if t_sim > 0.0 { title_bonus = t_sim * 0.15; }
+                                        if t_sim > 0.0 { title_bonus = t_sim * 0.35; }
                                         
                                         let target_score = b_score - (p_score * 0.7) - verb_penalty + title_bonus;
                                         if target_score > real_max_score {
@@ -3708,10 +3704,8 @@ async fn process_task(
                                             let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
                                             let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
                                             
-                                            if prev_is_alnum && next_is_alnum {
+                                            if prev_is_alnum || next_is_alnum {
                                                 is_infix = true;
-                                            } else if prev_is_alnum || next_is_alnum {
-                                                if orig.chars().count() <= 1 { is_infix = true; }
                                             }
                                             if !is_infix { is_valid_overlap = true; }
                                         }
@@ -3723,10 +3717,8 @@ async fn process_task(
                                             let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
                                             let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
                                             
-                                            if prev_is_alnum && next_is_alnum {
+                                            if prev_is_alnum || next_is_alnum {
                                                 is_infix = true;
-                                            } else if prev_is_alnum || next_is_alnum {
-                                                if extracted_val.chars().count() <= 1 { is_infix = true; }
                                             }
                                             if !is_infix { is_valid_overlap = true; }
                                         }
@@ -3871,7 +3863,7 @@ async fn process_task(
                                             let mut title_bonus = 0.0;
                                             let t_sim = cosine_similarity(&p_emb, &title_emb);
                                             if t_sim > 0.0 {
-                                                title_bonus = t_sim * 0.15;
+                                                title_bonus = t_sim * 0.35;
                                             }
                                             
                                             let base_score = b_score - (p_score * penalty_weight) - verb_penalty + title_bonus;
@@ -4133,7 +4125,7 @@ async fn process_task(
                                             
                                             let mut t_bonus = 0.0;
                                             let t_sim = cosine_similarity(&p_emb, &title_emb);
-                                            if t_sim > 0.0 { t_bonus = t_sim * 0.15; }
+                                            if t_sim > 0.0 { t_bonus = t_sim * 0.35; }
                                             
                                             let score = b_score - (p_score * penalty_weight) - verb_penalty + t_bonus;
                                             if score > best_score {
@@ -4191,7 +4183,7 @@ async fn process_task(
                                             
                                             let mut t_bonus = 0.0;
                                             let t_sim = cosine_similarity(&p_emb, &title_emb);
-                                            if t_sim > 0.0 { t_bonus = t_sim * 0.15; }
+                                            if t_sim > 0.0 { t_bonus = t_sim * 0.35; }
                                             
                                             let score = b_score - (p_score * penalty_weight) - verb_penalty + t_bonus;
                                             if score > best_score {
@@ -4244,10 +4236,8 @@ async fn process_task(
                                         let prev_is_alnum = cb.map_or(false, |c| c.is_alphanumeric());
                                         let next_is_alnum = ca.map_or(false, |c| c.is_alphanumeric());
                                         
-                                        if prev_is_alnum && next_is_alnum {
+                                        if prev_is_alnum || next_is_alnum {
                                             is_infix = true;
-                                        } else if prev_is_alnum || next_is_alnum {
-                                            if orig.chars().count() <= 1 { is_infix = true; }
                                         }
                                     }
                                     
@@ -4368,22 +4358,43 @@ async fn process_task(
                                 if val.chars().count() >= 2 && !val.starts_with("[___REDACTED") {
                                     let final_repl = format!("[{}]", mnemonic);
                                     
+                                    let target_char_count = val.chars().count();
+
                                     // 1. 단순 교체 (노이즈/링크 복원 과정에서 튀어나온 텍스트 등 즉시 교체) - 중첩 마스킹 방지 적용
                                     let escaped_val = regex::escape(val);
                                     let pattern1 = format!(r"(\[[^\]]+\])|({})", escaped_val);
                                     if let Ok(re) = regex::Regex::new(&pattern1) {
-                                        let replacer = |caps: &regex::Captures| {
-                                            if caps.get(1).is_some() {
-                                                caps[0].to_string() // 이미 마스킹된 [니모닉] 내부는 보존
-                                            } else {
-                                                final_repl.clone()
-                                            }
-                                        };
-                                        let new_text = re.replace_all(&masked_text, replacer).to_string();
+                                        let haystack_text = masked_text.clone();
+                                        let new_text = re.replace_all(&haystack_text, |caps: &regex::Captures| {
+                                            if caps.get(1).is_some() { return caps[0].to_string(); }
+                                            let m = caps.get(0).unwrap();
+                                            let prev_is_alnum = haystack_text[..m.start()].chars().next_back().map_or(false, |c| c.is_alphanumeric());
+                                            let next_is_alnum = haystack_text[m.end()..].chars().next().map_or(false, |c| c.is_alphanumeric());
+                                            let is_infix = prev_is_alnum || next_is_alnum;
+                                            if is_infix { caps[0].to_string() } else { final_repl.clone() }
+                                        }).to_string();
                                         if new_text != masked_text { masked_text = new_text; final_sweep_count += 1; }
-                                        let new_title = re.replace_all(&doc_title, replacer).to_string();
+
+                                        let haystack_title = doc_title.clone();
+                                        let new_title = re.replace_all(&haystack_title, |caps: &regex::Captures| {
+                                            if caps.get(1).is_some() { return caps[0].to_string(); }
+                                            let m = caps.get(0).unwrap();
+                                            let prev_is_alnum = haystack_title[..m.start()].chars().next_back().map_or(false, |c| c.is_alphanumeric());
+                                            let next_is_alnum = haystack_title[m.end()..].chars().next().map_or(false, |c| c.is_alphanumeric());
+                                            let is_infix = prev_is_alnum || next_is_alnum;
+                                            if is_infix { caps[0].to_string() } else { final_repl.clone() }
+                                        }).to_string();
                                         if new_title != doc_title { doc_title = new_title; final_sweep_count += 1; }
-                                        let new_desc = re.replace_all(&doc_desc, replacer).to_string();
+
+                                        let haystack_desc = doc_desc.clone();
+                                        let new_desc = re.replace_all(&haystack_desc, |caps: &regex::Captures| {
+                                            if caps.get(1).is_some() { return caps[0].to_string(); }
+                                            let m = caps.get(0).unwrap();
+                                            let prev_is_alnum = haystack_desc[..m.start()].chars().next_back().map_or(false, |c| c.is_alphanumeric());
+                                            let next_is_alnum = haystack_desc[m.end()..].chars().next().map_or(false, |c| c.is_alphanumeric());
+                                            let is_infix = prev_is_alnum || next_is_alnum;
+                                            if is_infix { caps[0].to_string() } else { final_repl.clone() }
+                                        }).to_string();
                                         if new_desc != doc_desc { doc_desc = new_desc; final_sweep_count += 1; }
                                     }
 
@@ -4395,18 +4406,37 @@ async fn process_task(
                                         let regex_pattern = escaped_chars.join(r"[^\p{L}\p{N}_\[\]]+"); 
                                         let pattern2 = format!(r"(\[[^\]]+\])|({})", regex_pattern);
                                         if let Ok(re) = regex::Regex::new(&pattern2) {
-                                            let replacer = |caps: &regex::Captures| {
-                                                if caps.get(1).is_some() {
-                                                    caps[0].to_string() // 이미 마스킹된 [니모닉] 내부는 보존
-                                                } else {
-                                                    final_repl.clone()
-                                                }
-                                            };
-                                            let new_text = re.replace_all(&masked_text, replacer).to_string();
+                                            let haystack_text = masked_text.clone();
+                                            let new_text = re.replace_all(&haystack_text, |caps: &regex::Captures| {
+                                                if caps.get(1).is_some() { return caps[0].to_string(); }
+                                                let m = caps.get(0).unwrap();
+                                                let prev_is_alnum = haystack_text[..m.start()].chars().next_back().map_or(false, |c| c.is_alphanumeric());
+                                                let next_is_alnum = haystack_text[m.end()..].chars().next().map_or(false, |c| c.is_alphanumeric());
+                                                let is_infix = prev_is_alnum || next_is_alnum;
+                                                if is_infix { caps[0].to_string() } else { final_repl.clone() }
+                                            }).to_string();
                                             if new_text != masked_text { masked_text = new_text; final_sweep_count += 1; }
-                                            let new_title = re.replace_all(&doc_title, replacer).to_string();
+
+                                            let haystack_title = doc_title.clone();
+                                            let new_title = re.replace_all(&haystack_title, |caps: &regex::Captures| {
+                                                if caps.get(1).is_some() { return caps[0].to_string(); }
+                                                let m = caps.get(0).unwrap();
+                                                let prev_is_alnum = haystack_title[..m.start()].chars().next_back().map_or(false, |c| c.is_alphanumeric());
+                                                let next_is_alnum = haystack_title[m.end()..].chars().next().map_or(false, |c| c.is_alphanumeric());
+                                                let is_infix = prev_is_alnum || next_is_alnum;
+                                                if is_infix { caps[0].to_string() } else { final_repl.clone() }
+                                            }).to_string();
                                             if new_title != doc_title { doc_title = new_title; final_sweep_count += 1; }
-                                            let new_desc = re.replace_all(&doc_desc, replacer).to_string();
+
+                                            let haystack_desc = doc_desc.clone();
+                                            let new_desc = re.replace_all(&haystack_desc, |caps: &regex::Captures| {
+                                                if caps.get(1).is_some() { return caps[0].to_string(); }
+                                                let m = caps.get(0).unwrap();
+                                                let prev_is_alnum = haystack_desc[..m.start()].chars().next_back().map_or(false, |c| c.is_alphanumeric());
+                                                let next_is_alnum = haystack_desc[m.end()..].chars().next().map_or(false, |c| c.is_alphanumeric());
+                                                let is_infix = prev_is_alnum || next_is_alnum;
+                                                if is_infix { caps[0].to_string() } else { final_repl.clone() }
+                                            }).to_string();
                                             if new_desc != doc_desc { doc_desc = new_desc; final_sweep_count += 1; }
                                         }
                                     }
