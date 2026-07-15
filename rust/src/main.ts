@@ -5,9 +5,9 @@ import { listen, emit } from '@tauri-apps/api/event';
 import { readFile } from '@tauri-apps/plugin-fs';
 
 // Imports for Rendering & Shim
-import { item2html, selector } from "./lib/render";
-import { Select, Upsert } from "./lib/db";
-import { hashId, time2text } from "./lib/utils";
+import { item2html } from "./lib/render";
+import { Select } from "./lib/db";
+import { hashId } from "./lib/utils";
 
 // Access global libs
 const ethers = (window as any).ethers;
@@ -36,7 +36,7 @@ let isExpanded = false;
 let currentTab = "list";
 let currentImage: string | null = null;
 let currentDetectedUrl = "";
-let isCurrentShop = false; 
+export let isCurrentShop = false; 
 let searchDebounceTimer: number | null = null;
 let chatPollInterval: number | null = null;
 
@@ -47,7 +47,7 @@ let isExtracting = false;
 // 🚀 모델 다운로드 관련 상태 관리 변수 추가
 let modelStatus: Record<string, boolean> = {};
 const TARGET_MODELS = ['Qwen3', 'Qwen3.5', 'Embedding', 'Granite'];
-let lastSearchedQuery = "";
+export let lastSearchedQuery = "";
 // 🌟 [CRITICAL FIX] 프론트엔드 상태 토글 및 중복 전송 방어용 락
 let isBrowserRunning = false;
 let isAutoLaunchLocked = false; // 🌟 런처 클릭 후 stopped 시그널 전까지 버튼 강제 숨김 락
@@ -278,7 +278,7 @@ interface SearchTag {
 let activeTags: SearchTag[] = [];
 
 // List State
-let cachedDocs: any[] = [];
+export let cachedDocs: any[] = [];
 let currentPage = 0;
 const pageSize = 10;
 let isLoading = false;
@@ -291,7 +291,7 @@ let isChatLoading = false;
 
 // [NEW] Track first-load status for UI loaders
 let isFirstNavRender = true;
-let isFirstChatLoad = true;
+export let isFirstChatLoad = true;
 
 // [NEW] Window Focus State (백그라운드 리소스 최적화용)
 let isFocus = true;
@@ -304,7 +304,7 @@ const livePayloads = new Map<string, any>(); // 🌟 [CRITICAL FIX] 퍼센트(%)
 // ==========================================
 // [PARITY] Cloud front.js Core Utilities
 // ==========================================
-function isDiff(obj1: any, obj2: any): boolean {
+export function isDiff(obj1: any, obj2: any): boolean {
     if (!obj1 && !obj2) return false;
     if (!obj1 || !obj2) return true;
     const keys1 = Object.keys(obj1);
@@ -321,7 +321,7 @@ function isDiff(obj1: any, obj2: any): boolean {
     return false;
 }
 
-function safeClone(obj: any) {
+export function safeClone(obj: any) {
     const seen = new WeakMap();
     function clone(value: any) {
         if (typeof value !== "object" || value === null) return value;
@@ -336,7 +336,7 @@ function safeClone(obj: any) {
     return clone(obj);
 }
 
-function mergeNode(obj1: any, obj2: any) {
+export function mergeNode(obj1: any, obj2: any) {
     const isEmpty = (value: any) => value === null || value === undefined || value === '' || value === 0;
     const merged = { ...obj1 };
     for (const key in obj2) {
@@ -351,7 +351,7 @@ function mergeNode(obj1: any, obj2: any) {
 }
 
 const taskSteps = new Map<string, Map<string, number>>();
-const taskTotalSteps = new Map<string, number>(); // 🌟 [CRITICAL FIX] 작업별 총 스텝 수를 기억하는 장부 추가
+export const taskTotalSteps = new Map<string, number>(); // 🌟 [CRITICAL FIX] 작업별 총 스텝 수를 기억하는 장부 추가
 
 let selectedUuids = new Set<string>();
 let maskingUuids = new Set<string>(); // 🌟 [추가] 마스킹 진행 중인 아이템 ID 추적용 Set
@@ -360,7 +360,7 @@ let activeTaskId: string | null = null;
 // [DEPRECATED] 흩어져 있던 개별 락 변수들은 GlobalTaskManager로 대체되었습니다.
 let spinnerInterval: number | null = null;
 let qrSpinnerIndex = 0; 
-let systemLogCount = 0;
+export let systemLogCount = 0;
 
 function stepQrSpinner() {
     const el = document.getElementById("qr-auth-spinner");
@@ -410,14 +410,14 @@ const listScrollContainer = document.getElementById("list-scroll-container") as 
 const headerLoading = document.getElementById("header-loading") as HTMLElement;
 
 // 🌟 기존 loadingIndicator 대신 h2 태그를 선택합니다.
-const listTitle = document.querySelector("#list-view .header-row h2") as HTMLElement;
+export const listTitle = document.querySelector("#list-view .header-row h2") as HTMLElement;
 
 const aiResultsArea = document.getElementById("ai-search-results") as HTMLElement;
-const aiResultsTitle = document.getElementById("ai-results-title") as HTMLElement;
+export const aiResultsTitle = document.getElementById("ai-results-title") as HTMLElement;
 const aiResultsContent = document.getElementById("ai-results-content") as HTMLElement;
 
 const chatTalks = document.querySelector('.chat-talks') as HTMLElement;
-const chatForm = document.querySelector('form[name="chat-form"]') as HTMLFormElement;
+export const chatForm = document.querySelector('form[name="chat-form"]') as HTMLFormElement;
 
 // --- Settings Toggle Logic ---
 const settingsToggle = document.getElementById("settings-toggle") as HTMLInputElement;
@@ -1149,19 +1149,19 @@ async function renderNavigation() {
             };
         });
         
-        const navSection = pageList.closest('.nav-section') as HTMLElement;
+        const navSection = pageList!.closest('.nav-section') as HTMLElement;
         const isSettingsOpen = (document.getElementById("settings-toggle") as HTMLInputElement)?.checked;
 
         if (tree.length === 0) {
-            pageList.innerHTML = `<div class="empty">No records found.</div>`;
+            pageList!.innerHTML = `<div class="empty">No records found.</div>`;
             if (navSection) navSection.style.display = isSettingsOpen ? "none" : "block";
         } else {
             if (navSection) navSection.style.display = isSettingsOpen ? "none" : "block";
             
-            pageList.innerHTML = await renderAccordion(tree);
+            pageList!.innerHTML = await renderAccordion(tree);
 
             // 🌟 [추가] 이벤트 바인딩 로직 단순화
-            pageList.querySelectorAll(".logis-label").forEach((label: any) => {
+            pageList!.querySelectorAll(".logis-label").forEach((label: any) => {
                 label.onclick = async (e: Event) => {
                     const ds = label.dataset;
                     if (!ds.id) return;
@@ -1538,7 +1538,7 @@ async function syncData() {
 
             // 🌟 [추가] '대기 중' 멤버 정화(Cleanup) 로직
             // 서버에서 받은 결과 중 정식 멤버(member/user)가 있는지 확인합니다.
-            const realMembers = response.results.filter(item => item.type === "member" || item.type === "user");
+            const realMembers = response.results.filter((item: any) => item.type === "member" || item.type === "user");
             if (realMembers.length > 0) {
                 const localUsers = await Select["users"]({});
                 // 로컬에 저장된 'pending_invite_'로 시작하는 가짜 데이터들을 찾습니다.
@@ -1547,7 +1547,7 @@ async function syncData() {
                 for (const pending of pendingInvites) {
                     const pendingEmail = pending.data?.email;
                     // 서버에서 온 정식 멤버 중 이메일(혹은 이름)이 일치하는 사람이 있는지 대조
-                    const isNowMember = realMembers.some(m => {
+                    const isNowMember = realMembers.some((m: any) => {
                         // 서버 데이터(m) 내부에 이메일 정보가 있거나, 이름이 이메일 아이디와 같은지 확인
                         return m.to === pending.from || (m.data && m.data.email === pendingEmail);
                     });
@@ -1584,7 +1584,7 @@ let currentSearchMode = "commerce";
 let customModes: string[] = ["shipping", "commerce", "analytic"];
 let isModeEdit = false;
 let tempModes: { original: string | null, current: string }[] = [];
-let draggedModeIndex: number | null = null; // 🌟 [CRITICAL FIX] 드래그 앤 드롭 안정성을 위한 인덱스 추적 변수 추가
+export let draggedModeIndex: number | null = null; // 🌟 [CRITICAL FIX] 드래그 앤 드롭 안정성을 위한 인덱스 추적 변수 추가
 
 // 🌟 앱 시작 및 탭 UI 동적 렌더링 함수
 async function renderModeTabs() {
@@ -3094,7 +3094,7 @@ async function startWebRtcOfferer(baseIp: string, seed: number) {
     }
 
     try {
-        const result = await Promise.any(scanPromises);
+        const result = await (Promise as any).any(scanPromises);
         await peerConn.setRemoteDescription({ type: 'answer', sdp: result.answerSdp });
         console.log(`[SYNC] Connected to ${result.targetIp} successfully via Auto Scan!`);
     } catch (e) {
@@ -4279,7 +4279,7 @@ async function loadRelatedData(doc: any, container: HTMLElement) {
     }
 }
 
-function renderDocs(docs: any[]) {
+export function renderDocs(docs: any[]) {
     // This is now handled by upsertListItems for consistency
     upsertListItems(docs, 'append');
 }
@@ -4680,7 +4680,7 @@ function startPolling() {
 async function saveSession() { await kvSet("chat_session", JSON.stringify(currentSession)); }
 
 // 🌟 [추가] Pages 숨김 처리 상태를 담을 전역 배열
-let hiddenPages: string[] = [];
+export let hiddenPages: string[] = [];
 
 async function initSession() {
     // 🌟 [추가] Dexie에서 숨김 페이지 목록을 불러옵니다.

@@ -34,6 +34,7 @@ rust/src-tauri/gen
 *.gg
 *.onnx
 *.gguf
+*.dll
 *.safetensors
 test_result.txt
 run_result.txt

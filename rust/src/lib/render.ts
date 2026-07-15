@@ -59,7 +59,7 @@ export function time2text(dateVal: any): string {
     return Math.floor(seconds) + " seconds";
 }
 
-function isAlmostEqual(obj1: any, obj2: any): boolean {
+export function isAlmostEqual(obj1: any, obj2: any): boolean {
     if (!obj1 || !obj2) return false;
     if (Object.keys(obj1).length === 0 || Object.keys(obj2).length === 0) return false;
     const keys1 = Object.keys(obj1);
