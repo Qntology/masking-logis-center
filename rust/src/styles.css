@@ -75,7 +75,6 @@ body {
   
   border: 1px solid var(--glass-border);
   border-radius: 1em; /* Pill Shape */
-  box-shadow: 0 0 10px 0 rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -283,7 +282,6 @@ body {
   color: var(--text-muted);
   width: 30px;
   height: 40px;
-  border-radius: 50%;
   display: inline-block;
   align-items: center;
   justify-content: center;
@@ -297,7 +295,6 @@ body {
 
 .nav-btn:hover {
   font-family: "Noto Color Emoji", sans-serif;
-  background: var(--glass-highlight);
   color: #000;
 }
 
@@ -319,7 +316,6 @@ body {
   border: 1px solid var(--glass-border);
   border-radius: 1em;
   padding: 0;
-  box-shadow: 0 0 10px 0 rgba(0, 0, 0, 0.5);
   
   /* Animation State */
   opacity: 0;
@@ -789,7 +785,6 @@ tr:hover { background: rgba(0,0,0,0.05); }
     border-radius: 8px;
     padding: 10px;
     margin-bottom: 10px;
-    box-shadow: 0 2px 5px rgba(0,0,0,0.05);
     transition: transform 0.2s;
     z-index: 0;
 }
