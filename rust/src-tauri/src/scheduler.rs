@@ -279,6 +279,15 @@ impl StanzaPreprocessor {
     }
 }
 
+static STANZA_ENV: once_cell::sync::Lazy<&'static onnxruntime::environment::Environment> = once_cell::sync::Lazy::new(|| {
+    Box::leak(Box::new(
+        onnxruntime::environment::Environment::builder()
+            .with_name("stanza_global_env")
+            .build()
+            .expect("Failed to initialize global ONNX Runtime Environment")
+    ))
+});
+
 // 🌟 [추가] ONNX Runtime 세션을 초기화하고 보유하는 파이프라인 구조체
 pub struct StanzaPipeline {
     pub preprocessor: StanzaPreprocessor,
@@ -301,13 +310,8 @@ impl StanzaPipeline {
 
         let total_start_time = std::time::Instant::now();
 
-        // onnxruntime 0.0.14 요구사항: Environment 할당 (static으로 메모리 릭(Leak)하여 생명주기 문제 우회)
-        let env = Box::leak(Box::new(
-            Environment::builder()
-                .with_name("stanza_env")
-                .build()
-                .map_err(|e| anyhow::anyhow!("Env error: {}", e))?
-        ));
+        // onnxruntime 0.0.14 요구사항: Environment 전역 싱글톤 사용 (메모리 릭 방지)
+        let env = *STANZA_ENV;
 
         // 🌟 [onnxruntime 0.0.14 버그 우회] 
         // 구버전 라이브러리의 설계 결함으로 인해, 파일 경로 문자열의 수명(Lifetime)이 
@@ -525,6 +529,8 @@ pub async fn start_background_worker(
                             }
                             *model_lock = None;
                         }
+                        println!("[Scheduler] ⏳ 에러 복구 후 VRAM 반환 대기...");
+                        let _ = wait_for_resources_settled(1200, 800, None).await;
 
                         if err_msg.contains("Task cancelled") {
                              println!("[Scheduler] Task cancelled: {}", task.id);
@@ -599,10 +605,14 @@ pub async fn start_background_worker(
                                     continue;
                                 }
                             }
-                        } else if err_msg.contains("No valid model found") || err_msg.to_lowercase().contains("model is missing") {
-                            // 🌟 [추가] 모델 파일 누락 에러 감지 시 세팅 화면으로 이동 유도
-                            let final_err = "Model files are missing. Please go to Settings and download the required models.";
-                            println!("[Scheduler] Model missing error detected. Redirecting user to settings.");
+                        } else if err_msg.contains("No valid model found") 
+                            || err_msg.to_lowercase().contains("model is missing") 
+                            || err_msg.to_lowercase().contains(".safetensors") 
+                            || err_msg.to_lowercase().contains(".gguf") 
+                            || err_msg.to_lowercase().contains("no such file") {
+                            // 🌟 [추가] safetensors, gguf 등 실질적인 가중치 파일 누락 에러 감지 시 세팅 화면으로 이동 유도
+                            let final_err = "Model files (.safetensors, .gguf) are missing or incomplete. Please go to Settings and re-download the required models.";
+                            println!("[Scheduler] Model weight missing or incomplete error detected. Redirecting user to settings.");
 
                             let store_guard = store.lock().await;
                             if let Some(db) = store_guard.as_ref() {
@@ -757,14 +767,13 @@ async fn process_task(
     
     let language = "english"; 
 
-    // --- Image Extraction Logic (Qwen 3.5 Pipeline) ---
+    // --- Image Extraction & Masking Workflow ---
     if task.r#type == "image_extraction" {
         let image_path = task_data.get("image_path").and_then(|s| s.as_str()).unwrap_or("").to_string();
         
         if !image_path.is_empty() {
-            emit_term(&format!("[PROCESS] Task type is 'image_extraction'. Bypassing Vision LLM inference and staging raw image."));
+            emit_term(&format!("[PROCESS] Task type is 'image_extraction'. Staging raw image and preparing for OCR + Masking."));
             
-            // 🌟 이미지를 Base64로 인코딩하여 프론트엔드가 즉시 렌더링할 수 있게 만듭니다.
             use base64::{Engine, prelude::BASE64_STANDARD};
             let b64_img = if let Ok(bytes) = std::fs::read(&image_path) {
                 format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&bytes))
@@ -781,13 +790,11 @@ async fn process_task(
             let extracted_title = format!("[Image] {}", filename);
             let extracted_desc = "Staged Image content".to_string();
 
-            // 🌟 [CRITICAL FIX] Base64가 아닌 원본 이미지의 파일 시스템 경로를 Pug의 img 태그 형태로 만듭니다.
             let safe_image_path = image_path.replace("\\", "/");
             let pug_image_tag = format!("img(src=\"file://{}\", alt=\"{}\")", safe_image_path, filename);
 
             let store_guard = store_mutex.lock().await;
             if let Some(db) = store_guard.as_ref() {
-                // 🌟 [추가] 기존 아이템 여부 확인 및 속성 보존 처리
                 let existing_doc = db.get_item_by_id("items", &task.id).await.unwrap_or(None);
                 let is_new = existing_doc.is_none();
 
@@ -801,13 +808,12 @@ async fn process_task(
                     "description": extracted_desc.clone(),
                     "text": "Staged Image content",
                     "updated_at": chrono::Utc::now().timestamp_millis(),
-                    "mode": search_mode.clone() // 🌟 [CRITICAL FIX] 삭제 시 해시 추적을 위해 mode를 반드시 저장해야 합니다.
+                    "mode": search_mode.clone()
                 });
 
                 if let Some(doc) = existing_doc {
                     if let Ok(parsed) = serde_json::from_str::<Value>(&doc.json_data) {
                         if let Some(obj) = draft_data.as_object_mut() {
-                            // 이전에 마스킹된 데이터 및 커스텀 타이틀(data.title), 생성일(created_at) 보존
                             if let Some(masked) = parsed.get("masked") { obj.insert("masked".to_string(), masked.clone()); }
                             if let Some(is_masked) = parsed.get("is_masked") { obj.insert("is_masked".to_string(), is_masked.clone()); }
                             if let Some(masked_text) = parsed.get("masked_text") { obj.insert("masked_text".to_string(), masked_text.clone()); }
@@ -828,11 +834,8 @@ async fn process_task(
                     Some(&task.from), Some(&team_id), Some(&task.cc), Some(&task.bcc), Some(&task.r#ref), None
                 ).await;
 
-                // 🌟 이미지를 Pages 트리에 반영 (Hostname: Local Image, Pathname: 확장자 그룹화)
                 if is_new {
                     let hostname = "Local Image".to_string();
-                    
-                    // 🌟 [CRITICAL FIX] 파일명 대신 확장자만 추출하여 pathname으로 설정합니다.
                     let ext = std::path::Path::new(&filename)
                         .extension()
                         .and_then(|e| e.to_str())
@@ -841,8 +844,6 @@ async fn process_task(
                     let pathname = format!(".{}", ext);
                     
                     let cc_val = task.cc.clone();
-                    
-                    // 중복 체크 및 ID 생성 (확장자 기준으로 page_id가 생성되어 같은 확장자끼리 취합됨)
                     let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}_{}", search_mode, hostname, pathname));
                     
                     let mut page_count = 1;
@@ -870,38 +871,20 @@ async fn process_task(
                     ).await;
                 }
             }
-
-            // 🌟 [CRITICAL FIX] 첫 번째 Mutex 락(store_guard)을 명시적으로 해제하여, 아래의 두 번째 락에서 데드락(Deadlock)이 발생하는 것을 원천 차단합니다!
             drop(store_guard);
 
-            let display_summary = format!("{} - {}", extracted_title, extracted_desc);
-
-            // 🌟 [CRITICAL FIX] 상태(1)가 UI에 덮어씌워지는 것을 방어하기 위해 Done 이벤트 발송 직전에 DB도 9로 굳힙니다.
-            {
-                let store_guard = store_mutex.lock().await;
-                if let Some(db) = store_guard.as_ref() {
-                    let _ = db.update_task_status(&task.id, 9).await;
-                    let _ = db.update_message_status(&task.id, 9, Some(&display_summary)).await;
-                }
+            // 🌟 [NEW] 이미지 스테이징이 끝난 후, 바로 마스킹 파이프라인으로 넘기기 위해 task_data에 uuids를 주입하고, task_type을 속여서 아래 로직을 타게 만듭니다.
+            emit_term("[PROCESS] Image staged. Triggering OCR and Masking workflow...");
+            if let Some(obj) = task_data.as_object_mut() {
+                obj.insert("uuids".to_string(), json!([task.id.clone()]));
             }
-
-            let payload = json!({
-                "task_id": task.id, 
-                "category": "Done", 
-                "summary": display_summary, 
-                "spinner": "✅",
-                "data": null 
-            });
-            
-            let _ = app_handle.emit("extraction-progress", &payload);
-            crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
-
-            emit_term("[PROCESS] Image staging completed.");
-            return Ok(()); 
+            // 주의: 기존 코드는 여기서 바로 return Ok(()); 했지만, 이제 계속 아래로 내려갑니다.
+        } else {
+             return Err(anyhow::anyhow!("Image path is missing."));
         }
     }
 
-    if task.r#type == "mask_documents" {
+    if task.r#type == "mask_documents" || task.r#type == "image_extraction" {
         // 🌟 [CRITICAL FIX] 모델 로딩 락(Model Lock)을 마스킹 작업 내부로 강등 이동시켜, 
         // 무거운 AI 연산을 쓰지 않는 Draft(웹/이미지 스테이징) 작업들이 큐에서 막히는 병목을 원천 차단합니다!
         let model = {
@@ -941,7 +924,11 @@ async fn process_task(
             model_lock.as_ref().unwrap().clone()
         };
 
-        emit_term("[PROCESS] Starting batch masking for selected documents...");
+        if task.r#type == "image_extraction" {
+            emit_term("[PROCESS] Starting OCR and Masking workflow for selected images...");
+        } else {
+            emit_term("[PROCESS] Starting batch masking for selected documents...");
+        }
 
         // 🌟 [CRITICAL FIX] Granite 모델을 매번 불러오지 않기 위해 마스킹 작업 전체 진입 전 최초 1회만 로드합니다!
         // 현재는 임베딩 모델만 사용하므로 불필요한 Granite LLM VRAM 할당을 방지하기 위해 주석 처리합니다.
@@ -988,11 +975,12 @@ async fn process_task(
                 //     continue; 
                 // }
 
+                let is_img_task = task.r#type == "image_extraction";
                 let payload = json!({
                     "task_id": task.id,
-                    "category": format!("Processing ({}/{})", idx + 1, total),
-                    "summary": format!("Extracting data from draft {}...", doc_id),
-                    "spinner": "⠋"
+                    "category": if is_img_task { format!("OCR ({}/{})", idx + 1, total) } else { format!("Processing ({}/{})", idx + 1, total) },
+                    "summary": if is_img_task { format!("Performing Vision OCR on {}...", doc_id) } else { format!("Extracting data from draft {}...", doc_id) },
+                    "spinner": if is_img_task { "🔍" } else { "⠋" }
                 });
                 log_task_progress(app_handle, &task.id, &payload);
                 emit_term(&format!("[EXTRACTION] Processing document: {} (Table: {})", doc_id, found_table));
@@ -1000,6 +988,7 @@ async fn process_task(
                 let mut json_data: Value = serde_json::from_str(&doc.json_data).unwrap_or(json!({}));
                 let raw_html = json_data.get("html").and_then(|v| v.as_str()).unwrap_or("");
                 let is_image = raw_html.starts_with("data:image") || raw_html.starts_with("file://");
+                let existing_image_text = json_data.get("image_text").and_then(|v| v.as_str()).unwrap_or(""); // 🌟 [추가] 기 추출된 OCR 텍스트 확인
 
                 let mut target_text = String::new();
                 let mut extracted_json = json!({});
@@ -1009,39 +998,77 @@ async fn process_task(
 
                 // 🌟 [STEP 1] 이미지인 경우 OCR을 선행하여 텍스트를 먼저 추출합니다.
                 if is_image {
-                    model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
-                    
-                    let dynamic_image = if raw_html.starts_with("data:image") && raw_html.contains("base64,") {
-                        let data = raw_html.split("base64,").nth(1).unwrap_or("");
-                        crate::utils::img_utils::load_image_from_base64(data).ok()
-                    } else if raw_html.starts_with("file://") {
-                        let path = raw_html.replace("file://", "");
-                        image::open(&path).ok().map(|img| image::DynamicImage::ImageRgb8(img.to_rgb8()))
+                    if existing_image_text.is_empty() {
+                        model.secure_vram_relay(crate::model::ModelSize::Qwen3_5, None, Some(cancellation_token.clone()), false, None).await?;
+                        
+                        let dynamic_image = if raw_html.starts_with("data:image") && raw_html.contains("base64,") {
+                            let data = raw_html.split("base64,").nth(1).unwrap_or("");
+                            crate::utils::img_utils::load_image_from_base64(data).ok()
+                        } else if raw_html.starts_with("file://") {
+                            let path = raw_html.replace("file://", "");
+                            image::open(&path).ok().map(|img| image::DynamicImage::ImageRgb8(img.to_rgb8()))
+                        } else {
+                            None
+                        };
+
+                        let ocr_prompt = crate::parsing::ocr_image_prompt();
+
+                        let res_ocr = model.chat_with_qwen3_5_image_spinner(
+                            "You are a helpful extraction assistant.",
+                            &ocr_prompt,
+                            dynamic_image,
+                            app_handle,
+                            "extraction-progress",
+                            json!({ "category": format!("Vision OCR ({}/{})", idx + 1, total), "summary": "Extracting text from image..." }),
+                            1024,
+                            Some(cancellation_token.clone()),
+                            Some(format!("{}_{}_ocr", task.id, doc_id))
+                        ).await?;
+
+                        let ocr_json = crate::parsing::parse_json_from_llm(&res_ocr);
+                        target_text = ocr_json.get("image_text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        
+                        // OCR 된 원본 텍스트를 json_data에 먼저 보존합니다.
+                        if let Some(obj) = json_data.as_object_mut() {
+                            obj.insert("image_text".to_string(), json!(target_text.clone()));
+                        }
                     } else {
-                        None
-                    };
-
-                    let ocr_prompt = crate::parsing::ocr_image_prompt();
-
-                    let res_ocr = model.chat_with_qwen3_5_image_spinner(
-                        "You are a helpful extraction assistant.",
-                        &ocr_prompt,
-                        dynamic_image,
-                        app_handle,
-                        "extraction-progress",
-                        json!({ "category": format!("Vision OCR ({}/{})", idx + 1, total), "summary": "Extracting text from image..." }),
-                        1024,
-                        Some(cancellation_token.clone()),
-                        Some(format!("{}_{}_ocr", task.id, doc_id))
-                    ).await?;
-
-                    let ocr_json = crate::parsing::parse_json_from_llm(&res_ocr);
-                    target_text = ocr_json.get("image_text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    
-                    // OCR 된 원본 텍스트를 json_data에 먼저 보존합니다.
-                    if let Some(obj) = json_data.as_object_mut() {
-                        obj.insert("image_text".to_string(), json!(target_text));
+                        // 🌟 이미 OCR이 완료된 이미지라면 기존 텍스트를 재사용합니다.
+                        target_text = existing_image_text.to_string();
+                        emit_term("[EXTRACTION] ♻️ 기존에 완료된 OCR 텍스트를 재사용하여 마스킹을 시작합니다.");
                     }
+                    
+                    // 🌟 [DB 상태 개편] OCR 작업만 단독으로 요청된 경우 (image_extraction), 마스킹으로 넘어가지 않고 DB 갱신 후 즉시 종료합니다.
+                    if task.r#type == "image_extraction" {
+                        let payload = json!({
+                            "task_id": task.id,
+                            "category": format!("OCR Complete ({}/{})", idx + 1, total),
+                            "summary": format!("Vision OCR Complete for {}. Ready for masking.", doc_id),
+                            "spinner": "✅"
+                        });
+                        log_task_progress(app_handle, &task.id, &payload);
+                        emit_term(&format!("[EXTRACTION] ✅ Vision OCR 작업 완료 ({}). 마스킹은 사용자의 다음 요청 시 진행됩니다.", doc_id));
+                        
+                        let _ = store.upsert_item(
+                            found_table, &doc.id, &doc.r#type, json_data, Some(doc.vector.clone()),
+                            Some(&doc.from), Some(&doc.to), Some(&doc.cc), Some(&doc.bcc), Some(&doc.r#ref), Some(&doc.digest)
+                        ).await;
+
+                        // 🌟 이미지 OCR 단독 작업 종료 즉시 VRAM 리소스 명시적 해제 및 모델 가비지 컬렉션 수행
+                        model.deep_purge_resources().await;
+
+                        continue;
+                    }
+
+                    // 🌟 OCR 완료 후 (연속 진행 시) 마스킹 단계 진입 알림
+                    let payload = json!({
+                        "task_id": task.id,
+                        "category": format!("Masking ({}/{})", idx + 1, total),
+                        "summary": format!("OCR Complete. Starting masking for {}...", doc_id),
+                        "spinner": "⠋"
+                    });
+                    log_task_progress(app_handle, &task.id, &payload);
+                    emit_term("[EXTRACTION] ✅ Vision OCR 완료 (또는 재사용). 마스킹 단계로 전환합니다.");
                 } else {
                     let html_val = json_data.get("html").and_then(|v| v.as_str()).unwrap_or("");
                     let url_val = json_data.get("link").and_then(|v| v.as_str()).unwrap_or("");
@@ -4485,16 +4512,19 @@ async fn process_task(
         // 🌟 [VRAM/RAM 해제] 마스킹 전체 작업이 종료되었으므로 보존했던 Stanza 캐시를 비웁니다.
         drop(stanza_pipelines);
 
-        // 🌟 [VRAM 해제] 마스킹 전체 작업이 종료되었으므로 LLM 및 임베딩 모델의 리소스를 VRAM에서 즉시 비웁니다.
+        // 🌟 [VRAM 해제 보강] 마스킹 전체 작업이 종료되었으므로 LLM 및 임베딩 모델의 리소스를 VRAM에서 즉시 비웁니다.
         emit_term("[PROCESS] 🧹 마스킹 작업 완료. VRAM 반환을 위해 모든 AI 모델 리소스를 즉시 해제합니다.");
-        drop(model); // 지역 변수로 잡혀있던 모델 참조(Arc 클론)를 먼저 끊어줍니다.
         
+        // 지역 참조 끊기
+        drop(model); 
+        
+        // 전역 Mutex 잠금 및 명시적 파기
         {
             let mut model_lock = model_mutex.lock().await;
             if let Some(m) = model_lock.as_ref() {
-                m.deep_purge_resources().await; // 임베딩 및 생성 모델의 메모리를 완벽 반환합니다.
+                m.deep_purge_resources().await;
             }
-            *model_lock = None; // 전역 Mutex 내 모델 인스턴스 완전 소멸
+            *model_lock = None;
         }
 
         let summary_msg = "Extraction & Masking complete. Refreshing list...".to_string();
