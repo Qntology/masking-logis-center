@@ -136,6 +136,7 @@ pub struct LogisModel {
     pub granite_generator: Arc<TokioMutex<Option<crate::models::granite::generate::GraniteGenerateModel>>>,
     
     pub embedding_model: Arc<TokioMutex<Option<EmbeddingModel>>>,
+    pub embedding_cache: Arc<TokioMutex<std::collections::HashMap<String, Vec<f32>>>>,
 
     pub is_cpu_mode: bool, 
     pub is_disk_swap: bool,
@@ -224,12 +225,15 @@ impl LogisModel {
             }
         }
         
-        println!("[DIAG-PURGE] Step 2: Clearing Embedding Model...");
+        println!("[DIAG-PURGE] Step 2: Clearing Embedding Model & Cache...");
         {
             let mut emb = self.embedding_model.lock().await;
             if let Some(e) = emb.take() { 
                 drop(e); 
             }
+            // 🌟 램 누수 방지를 위해 캐시도 깔끔하게 비워줍니다.
+            let mut cache = self.embedding_cache.lock().await;
+            cache.clear();
         }
         
         println!("[DIAG-PURGE] Step 3: Synchronizing CUDA Context...");
@@ -873,6 +877,7 @@ impl LogisModel {
             qwen3_5_generator: Arc::new(TokioMutex::new(None)),
             granite_generator: Arc::new(TokioMutex::new(None)),
             embedding_model: Arc::new(TokioMutex::new(None)),
+            embedding_cache: Arc::new(TokioMutex::new(std::collections::HashMap::new())), // 🌟 캐시 초기화
             is_cpu_mode: config.is_cpu,
             is_disk_swap,
             dual_mode_enabled: true, 

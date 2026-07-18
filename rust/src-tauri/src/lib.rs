@@ -2125,14 +2125,12 @@ async fn check_model_status() -> Result<serde_json::Value, String> {
     let app_dir = crate::utils::get_app_dir();
     let base_path = app_dir.join("models");
 
-    // 특정 폴더 내에 10MB 이상의 GGUF 또는 safetensors 파일이 존재하는지 검사 (이름 무관)
-    let has_model_file = |dir: &std::path::PathBuf| -> bool {
+    // 🌟 [CRITICAL FIX] 특정 폴더 내에 10MB 이상의 GGUF 또는 SAFETENSORS 파일이 존재하는지 검사하도록 조건 확장
+    let has_valid_model = |dir: &std::path::PathBuf| -> bool {
         if let Ok(entries) = std::fs::read_dir(dir) {
             entries.flatten().any(|e| {
-                let path = e.path();
-                let ext = path.extension().and_then(|ex| ex.to_str()).unwrap_or("");
-                (ext == "gguf" || ext == "safetensors") && 
-                e.metadata().map(|m| m.len()).unwrap_or(0) > 10_000_000
+                let is_model_ext = e.path().extension().map_or(false, |ext| ext == "gguf" || ext == "safetensors");
+                is_model_ext && e.metadata().map(|m| m.len()).unwrap_or(0) > 10_000_000
             })
         } else {
             false
@@ -2141,27 +2139,17 @@ async fn check_model_status() -> Result<serde_json::Value, String> {
     
     let qwen3_dir = base_path.join("Qwen3-0.6B-Instruct-gguf");
     let qwen3_5_dir = base_path.join("Qwen3.5-2B-Instruct-gguf");
-    let embed_dir = base_path.join("granite-embedding-97m-multilingual-r2");
     let granite_dir = base_path.join("granite-4.0-h-350m");
+    let embed_dir = base_path.join("granite-embedding-97m-multilingual-r2");
 
-    // 🌟 [추가] stanza 하위의 각 언어별 폴더가 완전한지 검사
-    let stanza_dir = base_path.join("stanza");
-    let has_stanza_lang = |lang: &str| -> bool {
-        let lang_dir = stanza_dir.join(lang);
-        lang_dir.join("vocab.json").exists()
-            && lang_dir.join("pos.onnx").exists()
-            && lang_dir.join("tokenizer.onnx").exists()
-            && lang_dir.join("depparse.onnx").exists()
-    };
-
-    // 🌟 [수정] HTML 문자열 조립 로직을 제거하고, JS(프론트엔드)에서 렌더링할 수 있도록 name과 license 데이터 원본을 전달합니다.
     Ok(serde_json::json!({
-        "Qwen3": { "is_ready": has_model_file(&qwen3_dir), "name": "Qwen3 0.6B", "license": "Apache 2.0" },
-        "Qwen3.5": { "is_ready": has_model_file(&qwen3_5_dir), "name": "Qwen3.5 2B", "license": "Apache 2.0" },
-        "Embedding": { "is_ready": has_model_file(&embed_dir), "name": "Granite Embedding", "license": "Apache 2.0" },
-        "Granite": { "is_ready": has_model_file(&granite_dir), "name": "Granite 4.0", "license": "Apache 2.0" }
+        "Qwen3": has_valid_model(&qwen3_dir),
+        "Qwen3.5": has_valid_model(&qwen3_5_dir),
+        "Granite": has_valid_model(&granite_dir),
+        "Embedding": has_valid_model(&embed_dir)
     }))
 }
+
 
 #[tauri::command]
 async fn delete_all_models() -> Result<String, String> {

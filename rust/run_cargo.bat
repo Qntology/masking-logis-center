@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 > nul
-call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 set "PYTHONIOENCODING=utf-8"
 
 :: [AMD ROCm/HIP]
