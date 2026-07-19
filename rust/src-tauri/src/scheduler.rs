@@ -822,7 +822,6 @@ async fn process_task(
                 "text": "Staged Image content",
                 "updated_at": chrono::Utc::now().timestamp_millis(),
                 "mode": search_mode.clone(),
-                "needs_ocr": true,
                 "masked_text": ""
             });
 
@@ -1043,7 +1042,8 @@ async fn process_task(
 
                         if let Some(obj) = json_data.as_object_mut() {
                             obj.insert("image_text".to_string(), json!(target_text.clone()));
-                            obj.insert("needs_ocr".to_string(), json!(false));
+                            // 🌟 [개선] 좌표(Bounding Box) 등 구조화된 원본 데이터를 유실하지 않고 보존합니다.
+                            obj.insert("json".to_string(), ocr_json); 
                         }
                     } else {
                         target_text = existing_image_text.to_string();
@@ -4528,21 +4528,25 @@ async fn process_task(
 
                     // 🌟 [CRITICAL FIX] 개인정보(matches)가 0건이더라도 정상적으로 검사를 완료했다면
                     // 추출 JSON을 무조건 생성하여 DB에 is_masked = true 상태가 확정되도록 보장합니다.
-                    if is_image {
-                        extracted_json = json!({ "matches": all_matches, "image_text": masked_text, "text": masked_text, "title": doc_title.clone(), "description": doc_desc.clone() });
-                    } else {
-                        extracted_json = json!({ "matches": all_matches, "text": masked_text, "title": doc_title.clone(), "description": doc_desc.clone() });
-                    }
+                    // 🌟 [개선] 거대한 masked_text가 image_text와 text 두 필드에 복제되어 DB 용량을 2배로 낭비하는 현상을 방지합니다.
+                    extracted_json = json!({ 
+                        "matches": all_matches, 
+                        "text": masked_text, 
+                        "title": doc_title.clone(), 
+                        "description": doc_desc.clone() 
+                    });
                     
                     // 🌟 [VRAM 해제 변경] 여러 문서 처리를 위해 Stanza 파이프라인 캐시를 유지하므로 여기서 drop하지 않습니다.
                 } else {
                     // 검사할 텍스트가 완전히 비어있는 경우 (OCR 결과 없음 등)
                     emit_term("[EXTRACTION] ⚠️ 마스킹할 유효한 텍스트가 없습니다. 빈 결과로 마스킹 단계를 스킵하고 DB를 확정합니다.");
-                    if is_image {
-                        extracted_json = json!({ "matches": [], "image_text": target_text, "text": target_text, "title": doc_title.clone(), "description": doc_desc.clone() });
-                    } else {
-                        extracted_json = json!({ "matches": [], "text": target_text, "title": doc_title.clone(), "description": doc_desc.clone() });
-                    }
+                    // 🌟 [개선] 빈 텍스트 상태에서도 통일된 스키마로 관리합니다.
+                    extracted_json = json!({ 
+                        "matches": [], 
+                        "text": target_text, 
+                        "title": doc_title.clone(), 
+                        "description": doc_desc.clone() 
+                    });
                 }
 
                 // [STEP 3] 최종 결과물(마스킹 정보)을 DB에 업데이트합니다. (루프 하단부)
