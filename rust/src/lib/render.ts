@@ -178,8 +178,16 @@ export function item2html(item: any, checked: boolean = false, currentUrl: strin
             else if (itm.data && itm.data.is_masked) isMasked = true;
             else if (typeof itm.json_data === "string" && itm.json_data.includes('"is_masked":true')) isMasked = true;
             
+            // 🌟 [추가] 이미지 타입(OCR 대상) 여부 판별
+            let isImage = false;
+            if (itm.link && itm.link.startsWith("file://")) isImage = true;
+            else if (itm.data && itm.data.link && itm.data.link.startsWith("file://")) isImage = true;
+            else if (typeof itm.json_data === "string" && itm.json_data.includes('"link":"file://"')) isImage = true;
+            
             if (isMasked) {
                 _name = "masked";
+            } else if (isImage) {
+                _name = "OCR";
             }
         }
 

@@ -732,7 +732,6 @@ async fn process_task(
         emit_term(&format!("[PROCESS] Found existing KV cache for task {}. Ready to reuse.", task.id));
     }
 
-    
     let payload = json!({ 
         "task_id": task.id,
         "task_type": task.r#type, 
@@ -745,17 +744,14 @@ async fn process_task(
 
     let mut task_data: Value = serde_json::from_str(&task.data_json).unwrap_or(json!({}));
     
-    
     let search_mode = task_data.get("search_mode").and_then(|s| s.as_str()).unwrap_or("commerce").to_string();
 
-    // [FIX] 작업 유형에 따라 파일명을 자동으로 결정합니다.
     let kv_name = if task.r#type == "image_extraction" {
         Some("image".to_string())
     } else {
         Some("text".to_string())
     };
     
-    // [FIX] Robust device preference parsing (supports both "cpu" string and true/false boolean)
     let task_device_pref = if let Some(v) = task_data.get("device_preference") {
         if v.as_str() == Some("cpu") || v.as_bool() == Some(true) {
             Some("cpu".to_string())
@@ -769,12 +765,32 @@ async fn process_task(
     
     let language = "english"; 
 
+    // 🌟 [CRITICAL FIX] 구조체 이름 충돌 방지를 위한 로컬 메모리 전용 임시 구조체 선언
+    #[derive(Clone)]
+    struct StagedDoc {
+        id: String,
+        r#type: String,
+        text: String,
+        json_data: String,
+        vector: Vec<f32>,
+        from: String,
+        to: String,
+        cc: String,
+        bcc: String,
+        r#ref: String,
+        digest: String,
+    }
+
+    let mut in_memory_doc: Option<StagedDoc> = None;
+    let mut pending_page_update = None;
+
     // --- Image Extraction & Masking Workflow ---
     if task.r#type == "image_extraction" {
         let image_path = task_data.get("image_path").and_then(|s| s.as_str()).unwrap_or("").to_string();
-        
+        let uuids = task_data.get("uuids").and_then(|v| v.as_array());
+
         if !image_path.is_empty() {
-            emit_term(&format!("[PROCESS] Task type is 'image_extraction'. Staging raw image and preparing for OCR + Masking."));
+            emit_term(&format!("[PROCESS] Task type is 'image_extraction'. Staging raw image in memory for OCR."));
             
             use base64::{Engine, prelude::BASE64_STANDARD};
             let b64_img = if let Ok(bytes) = std::fs::read(&image_path) {
@@ -795,100 +811,62 @@ async fn process_task(
             let safe_image_path = image_path.replace("\\", "/");
             let pug_image_tag = format!("img(src=\"file://{}\", alt=\"{}\")", safe_image_path, filename);
 
-            let store_guard = store_mutex.lock().await;
-            if let Some(db) = store_guard.as_ref() {
-                let existing_doc = db.get_item_by_id("items", &task.id).await.unwrap_or(None);
-                let is_new = existing_doc.is_none();
+            let draft_data = json!({
+                "id": task.id.clone(),
+                "type": "draft",
+                "link": format!("file://{}", filename),
+                "html": b64_img.clone(),
+                "yaml": pug_image_tag, 
+                "title": extracted_title.clone(),
+                "description": extracted_desc.clone(),
+                "text": "Staged Image content",
+                "updated_at": chrono::Utc::now().timestamp_millis(),
+                "mode": search_mode.clone(),
+                "needs_ocr": true,
+                "masked_text": ""
+            });
 
-                let mut draft_data = json!({
-                    "id": task.id.clone(),
-                    "type": "draft",
-                    "link": format!("file://{}", filename),
-                    "html": b64_img.clone(),
-                    "yaml": pug_image_tag, 
-                    "title": extracted_title.clone(),
-                    "description": extracted_desc.clone(),
-                    "text": "Staged Image content",
-                    "updated_at": chrono::Utc::now().timestamp_millis(),
-                    "mode": search_mode.clone()
-                });
+            // 🌟 [CRITICAL FIX 1] DB에 즉시 쓰지 않고 가상 메모리 객체(StagedDoc)에 보관합니다.
+            in_memory_doc = Some(StagedDoc {
+                id: task.id.clone(),
+                r#type: "draft".to_string(),
+                text: "Staged Image content".to_string(),
+                json_data: draft_data.to_string(),
+                vector: vec![0.0; 384],
+                from: task.from.clone(),
+                to: team_id.clone(),
+                cc: task.cc.clone(),
+                bcc: task.bcc.clone(),
+                r#ref: task.r#ref.clone(),
+                digest: "".to_string(),
+            });
 
-                if let Some(doc) = existing_doc {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(&doc.json_data) {
-                        if let Some(obj) = draft_data.as_object_mut() {
-                            if let Some(masked) = parsed.get("masked") { obj.insert("masked".to_string(), masked.clone()); }
-                            if let Some(is_masked) = parsed.get("is_masked") { obj.insert("is_masked".to_string(), is_masked.clone()); }
-                            if let Some(masked_text) = parsed.get("masked_text") { obj.insert("masked_text".to_string(), masked_text.clone()); }
-                            if let Some(data) = parsed.get("data") { obj.insert("data".to_string(), data.clone()); }
-                            if let Some(created_at) = parsed.get("created_at") { obj.insert("created_at".to_string(), created_at.clone()); }
-                            if let Some(image_text) = parsed.get("image_text") { obj.insert("image_text".to_string(), image_text.clone()); }
-                        }
-                    }
-                } else {
-                    if let Some(obj) = draft_data.as_object_mut() {
-                        obj.insert("masked_text".to_string(), json!(b64_img));
-                        obj.insert("created_at".to_string(), json!(chrono::Utc::now().timestamp_millis()));
-                    }
-                }
+            let hostname = "Local Image".to_string();
+            let ext = std::path::Path::new(&filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("file")
+                .to_lowercase();
+            let pathname = format!(".{}", ext);
+            
+            let cc_val = task.cc.clone();
+            let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}_{}", search_mode, hostname, pathname));
+            
+            // 페이지 카운트 업데이트 정보 역시 대기열에 보관합니다.
+            pending_page_update = Some((page_id, hostname, pathname, cc_val, task.from.clone(), team_id.clone(), task.bcc.clone(), task.r#ref.clone(), search_mode.clone()));
 
-                let _ = db.upsert_item(
-                    "items", &task.id, "draft", draft_data.clone(), None,
-                    Some(&task.from), Some(&team_id), Some(&task.cc), Some(&task.bcc), Some(&task.r#ref), None
-                ).await;
-
-                if is_new {
-                    let hostname = "Local Image".to_string();
-                    let ext = std::path::Path::new(&filename)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("file")
-                        .to_lowercase();
-                    let pathname = format!(".{}", ext);
-                    
-                    let cc_val = task.cc.clone();
-                    let page_id = crate::utils::hash::hash_id(&format!("page_{}_{}_{}", search_mode, hostname, pathname));
-                    
-                    let mut page_count = 1;
-                    let mut existing_page_data = json!({
-                        "id": page_id.clone(),
-                        "type": "pages",
-                        "mode": search_mode.clone(),
-                        "hostname": hostname.clone(),
-                        "pathname": pathname.clone(),
-                        "cc": cc_val.clone(),
-                        "count": 1
-                    });
-
-                    if let Ok(Some(existing_page)) = db.get_item_by_id("pages", &page_id).await {
-                        if let Ok(mut parsed) = serde_json::from_str::<Value>(&existing_page.json_data) {
-                            page_count = parsed.get("count").and_then(|v| v.as_i64()).unwrap_or(0) + 1;
-                            parsed.as_object_mut().unwrap().insert("count".to_string(), json!(page_count));
-                            existing_page_data = parsed;
-                        }
-                    }
-
-                    let _ = db.upsert_item(
-                        "pages", &page_id, "pages", existing_page_data, None,
-                        Some(&task.from), Some(&team_id), Some(&cc_val), Some(&task.bcc), Some(&task.r#ref), None
-                    ).await;
-                }
-            }
-            drop(store_guard);
-
-            // 🌟 [NEW] 이미지 스테이징이 끝난 후, 바로 마스킹 파이프라인으로 넘기기 위해 task_data에 uuids를 주입하고, task_type을 속여서 아래 로직을 타게 만듭니다.
-            emit_term("[PROCESS] Image staged. Triggering OCR and Masking workflow...");
+            emit_term("[PROCESS] Image staged in memory. Triggering OCR workflow...");
             if let Some(obj) = task_data.as_object_mut() {
                 obj.insert("uuids".to_string(), json!([task.id.clone()]));
             }
-            // 주의: 기존 코드는 여기서 바로 return Ok(()); 했지만, 이제 계속 아래로 내려갑니다.
+        } else if uuids.is_some() && !uuids.unwrap().is_empty() {
+            emit_term("[PROCESS] Task type is 'image_extraction' with selected uuids. Bypassing staging.");
         } else {
              return Err(anyhow::anyhow!("Image path is missing."));
         }
     }
 
     if task.r#type == "mask_documents" || task.r#type == "image_extraction" {
-        // 🌟 [CRITICAL FIX] 모델 로딩 락(Model Lock)을 마스킹 작업 내부로 강등 이동시켜, 
-        // 무거운 AI 연산을 쓰지 않는 Draft(웹/이미지 스테이징) 작업들이 큐에서 막히는 병목을 원천 차단합니다!
         let model = {
             println!("[Scheduler] 🛡️ Attempting to acquire Model Lock...");
             let mut model_lock = model_mutex.lock().await;
@@ -915,7 +893,6 @@ async fn process_task(
                         *model_lock = Some(m);
                     },
                     Err(e) => {
-                        // 🌟 [추가] 초기화 실패 시 터미널과 UI 양쪽에 상세 에러 스택을 남깁니다.
                         let err_msg = format!("LogisModel::new 초기화 실패 상세 원인: {:?}", e);
                         println!("[Scheduler] ❌ {}", err_msg);
                         log_task_progress(app_handle, &task.id, &json!({ "category": "Error", "summary": err_msg }));
@@ -927,21 +904,16 @@ async fn process_task(
         };
 
         if task.r#type == "image_extraction" {
-            emit_term("[PROCESS] Starting OCR and Masking workflow for selected images...");
+            emit_term("[PROCESS] Starting OCR workflow for selected images...");
         } else {
             emit_term("[PROCESS] Starting batch masking for selected documents...");
         }
 
-        // 🌟 [CRITICAL FIX] Granite 모델을 매번 불러오지 않기 위해 마스킹 작업 전체 진입 전 최초 1회만 로드합니다!
-        // 현재는 임베딩 모델만 사용하므로 불필요한 Granite LLM VRAM 할당을 방지하기 위해 주석 처리합니다.
-        // model.ensure_granite().await?;
-        
         let uuids = task_data.get("uuids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         if uuids.is_empty() { return Ok(()); }
         
         let total = uuids.len();
 
-        // 🌟 [CRITICAL FIX] Stanza 파이프라인 메모리 릭 및 속도 저하 방지를 위해 문서 순회 루프 외부로 캐시 맵 격상
         let stanza_base_dir = crate::utils::get_app_dir().join("models").join("stanza");
         let mut stanza_pipelines: std::collections::HashMap<String, StanzaPipeline> = std::collections::HashMap::new();
 
@@ -956,27 +928,41 @@ async fn process_task(
                 store_guard.as_ref().ok_or_else(|| anyhow::anyhow!("Store not initialized"))?.clone()
             };
 
-            // 🌟 [CRITICAL FIX] "items" 테이블뿐만 아니라 모든 테이블을 순회하여 문서를 찾아냅니다.
-            let tables = vec!["items", "users", "pages"];
-            let mut found_doc = None;
+            // 🌟 [CRITICAL FIX 2] 메모리 객체 우선 확인
+            let mut found_doc: Option<StagedDoc> = None;
             let mut found_table = "items";
 
-            for table in tables {
-                if let Ok(Some(doc)) = store.get_item_by_id(table, doc_id).await {
-                    found_doc = Some(doc);
-                    found_table = table;
-                    break;
+            if let Some(mem_doc) = &in_memory_doc {
+                if doc_id == mem_doc.id {
+                    found_doc = Some(mem_doc.clone());
+                }
+            }
+
+            // 메모리에 없으면 DB 순회 탐색하여 StagedDoc 포맷으로 일치시킵니다.
+            if found_doc.is_none() {
+                let tables = vec!["items", "users", "pages"];
+                for table in tables {
+                    if let Ok(Some(doc)) = store.get_item_by_id(table, doc_id).await {
+                        found_doc = Some(StagedDoc {
+                            id: doc.id.clone(),
+                            r#type: doc.r#type.clone(),
+                            text: doc.text.clone(),
+                            json_data: doc.json_data.clone(),
+                            vector: doc.vector.clone(),
+                            from: doc.from.clone(),
+                            to: doc.to.clone(),
+                            cc: doc.cc.clone(),
+                            bcc: doc.bcc.clone(),
+                            r#ref: doc.r#ref.clone(),
+                            digest: doc.digest.clone(),
+                        });
+                        found_table = table;
+                        break;
+                    }
                 }
             }
 
             if let Some(doc) = found_doc {
-                // 🌟 [CRITICAL FIX] 이미 마스킹된 문서(is_masked: true)라도, 
-                // 새로운 니모닉 적용이나 업데이트된 프롬프트를 반영하기 위해 건너뛰지 않고 재처리하도록 제한을 해제합니다.
-                // if doc.is_masked {
-                //     emit_term(&format!("[EXTRACTION] Skipping document: {} (Already masked)", doc_id));
-                //     continue; 
-                // }
-
                 let is_img_task = task.r#type == "image_extraction";
                 let payload = json!({
                     "task_id": task.id,
@@ -990,13 +976,13 @@ async fn process_task(
                 let mut json_data: Value = serde_json::from_str(&doc.json_data).unwrap_or(json!({}));
                 let raw_html = json_data.get("html").and_then(|v| v.as_str()).unwrap_or("");
                 let is_image = raw_html.starts_with("data:image") || raw_html.starts_with("file://");
-                let existing_image_text = json_data.get("image_text").and_then(|v| v.as_str()).unwrap_or(""); // 🌟 [추가] 기 추출된 OCR 텍스트 확인
+                let existing_image_text = json_data.get("image_text").and_then(|v| v.as_str()).unwrap_or(""); 
 
                 let mut target_text = String::new();
                 let mut extracted_json = json!({});
-                let mut masked_text = String::new(); // 🌟 변수 생명주기를 [STEP 3]까지 연장하기 위해 밖으로 빼냅니다.
-                let mut doc_title = json_data.get("title").and_then(|v| v.as_str()).unwrap_or("Document").to_string(); // 🌟 [스코프 연장] STEP 3에서 접근 가능하도록 상단으로 이동
-                let mut doc_desc = json_data.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(); // 🌟 [스코프 연장] STEP 3에서 접근 가능하도록 상단으로 이동
+                let mut masked_text = String::new(); 
+                let mut doc_title = json_data.get("title").and_then(|v| v.as_str()).unwrap_or("Document").to_string(); 
+                let mut doc_desc = json_data.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(); 
 
                 // 🌟 [STEP 1] 이미지인 경우 OCR을 선행하여 텍스트를 먼저 추출합니다.
                 if is_image {
@@ -1024,23 +1010,47 @@ async fn process_task(
                             json!({ "category": format!("Vision OCR ({}/{})", idx + 1, total), "summary": "Extracting text from image..." }),
                             1024,
                             Some(cancellation_token.clone()),
-                            Some(format!("{}_{}_ocr", task.id, doc_id))
+                            Some(task.id.clone()) // 🌟 [CRITICAL FIX 3] '_ocr' 꼬리표 삭제. 원본 task.id 그대로 사용하여 더블 말풍선 방지
                         ).await?;
 
+                        if cancellation_token.load(Ordering::Relaxed) { 
+                            return Err(anyhow::anyhow!("Task cancelled")); 
+                        }
+
                         let ocr_json = crate::parsing::parse_json_from_llm(&res_ocr);
-                        target_text = ocr_json.get("image_text").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         
-                        // OCR 된 원본 텍스트를 json_data에 먼저 보존합니다.
+                        // 🌟 [CRITICAL FIX] LLM이 반환하는 JSON 구조(루트의 image_text, text 또는 data 객체 내부의 text 등)를 모두 커버할 수 있도록 유연하게 탐색합니다.
+                        target_text = ocr_json.get("image_text").and_then(|v| v.as_str())
+                            .or_else(|| ocr_json.get("text").and_then(|v| v.as_str()))
+                            .or_else(|| ocr_json.get("data").and_then(|d| d.get("text")).and_then(|v| v.as_str()))
+                            .unwrap_or("")
+                            .to_string();
+                        
+                        // 🌟 [CRITICAL FIX] OCR 결과가 비어있어도 파이프라인을 크래시 내지 않고 빈 문자열로 안전하게 통과시킵니다.
+                        if target_text.trim().is_empty() {
+                            let payload = json!({
+                                "task_id": task.id,
+                                "category": format!("OCR Warning ({}/{})", idx + 1, total),
+                                "summary": format!("No text found in {}. Proceeding safely...", doc_id),
+                                "spinner": "⚠️"
+                            });
+                            log_task_progress(app_handle, &task.id, &payload);
+                            emit_term("[EXTRACTION] ⚠️ OCR returned empty text. Proceeding with empty string to prevent pipeline crash.");
+                            
+                            // 빈 칸을 하나 부여하여 크래시를 방지하고 DB에 정상 저장되도록 유도합니다.
+                            target_text = " ".to_string();
+                        }
+
                         if let Some(obj) = json_data.as_object_mut() {
                             obj.insert("image_text".to_string(), json!(target_text.clone()));
+                            obj.insert("needs_ocr".to_string(), json!(false));
                         }
                     } else {
-                        // 🌟 이미 OCR이 완료된 이미지라면 기존 텍스트를 재사용합니다.
                         target_text = existing_image_text.to_string();
                         emit_term("[EXTRACTION] ♻️ 기존에 완료된 OCR 텍스트를 재사용하여 마스킹을 시작합니다.");
                     }
                     
-                    // 🌟 [DB 상태 개편] OCR 작업만 단독으로 요청된 경우 (image_extraction), 마스킹으로 넘어가지 않고 DB 갱신 후 즉시 종료합니다.
+                    // 🌟 OCR 작업만 단독으로 요청된 경우 (image_extraction), 마스킹으로 넘어가지 않고 DB 확정 후 즉시 종료합니다.
                     if task.r#type == "image_extraction" {
                         let payload = json!({
                             "task_id": task.id,
@@ -1056,9 +1066,35 @@ async fn process_task(
                             Some(&doc.from), Some(&doc.to), Some(&doc.cc), Some(&doc.bcc), Some(&doc.r#ref), Some(&doc.digest)
                         ).await;
 
-                        // 🌟 [수정] 여러 장의 이미지(Multi-image) 처리 시 루프 안에서 모델을 파기하면 
-                        // 다음 반복(iteration)에서 모델이 없어 에러가 발생하며 중복 해제(Double Purge) 문제가 발생합니다.
-                        // 루프 안에서의 개별 파기를 제거하고, 루프 종료 후 한 번에 해제하도록 하단 공통 해제 로직에 위임합니다.
+                        // 🌟 페이지 증가 반영 (메모리에 대기 중인 신규 이미지인 경우 DB 확정)
+                        if doc.id == task.id {
+                            if let Some((page_id, hostname, pathname, cc_val, from_val, to_val, bcc_val, ref_val, s_mode)) = pending_page_update.clone() {
+                                let mut page_count = 1;
+                                let mut existing_page_data = json!({
+                                    "id": page_id.clone(),
+                                    "type": "pages",
+                                    "mode": s_mode.clone(),
+                                    "hostname": hostname.clone(),
+                                    "pathname": pathname.clone(),
+                                    "cc": cc_val.clone(),
+                                    "count": 1
+                                });
+
+                                if let Ok(Some(existing_page)) = store.get_item_by_id("pages", &page_id).await {
+                                    if let Ok(mut parsed) = serde_json::from_str::<Value>(&existing_page.json_data) {
+                                        page_count = parsed.get("count").and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+                                        parsed.as_object_mut().unwrap().insert("count".to_string(), json!(page_count));
+                                        existing_page_data = parsed;
+                                    }
+                                }
+
+                                let _ = store.upsert_item(
+                                    "pages", &page_id, "pages", existing_page_data, None,
+                                    Some(&from_val), Some(&to_val), Some(&cc_val), Some(&bcc_val), Some(&ref_val), None
+                                ).await;
+                            }
+                        }
+
                         continue;
                     }
 
@@ -1106,8 +1142,20 @@ async fn process_task(
                     }
                 }
 
+                // 🌟 [CRITICAL FIX] 이미지 플레이스홀더 텍스트("Staged Image content", "[Image] ...")가 
+                // 유효한 텍스트로 오인되어 "Image", "Staged" 등이 회사명이나 이름으로 마스킹되는 대참사를 방지합니다.
+                if is_image {
+                    if doc_title.starts_with("[Image]") {
+                        doc_title.clear();
+                    }
+                    if doc_desc == "Staged Image content" {
+                        doc_desc.clear();
+                    }
+                }
+
                 // 🌟 [STEP 2] 확보된 텍스트(웹페이지 PUG 또는 이미지 OCR 결과)를 대상으로 개인정보 마스킹을 수행합니다.
-                if !target_text.is_empty() {
+                // 빈 공백(" ")만 남은 경우를 완벽히 필터링하기 위해 trim() 검사를 추가합니다.
+                if !target_text.trim().is_empty() || !doc_title.trim().is_empty() || !doc_desc.trim().is_empty() {
                     let task_marker_hash = crate::utils::hash::crc32(&task.id); // 🌟 스코프 상단에 해시 생성
 
                     // 🌟 [CRITICAL FIX] LLM 토큰 절약 및 링크 훼손 방지를 위해 href, src 속성을 해시 마커로 치환하여 장부에 격리
@@ -4478,22 +4526,31 @@ async fn process_task(
                         emit_term(&format!("[EXTRACTION] 🧹 Final Sweep 완료: 변형되거나 누락된 잔여 항목 {}번 추가 마스킹 처리됨.", final_sweep_count));
                     }
 
-                    if !all_matches.is_empty() {
-                        // 🌟 마스킹된 전체 텍스트도 masked 오브젝트 내부의 text 필드로 함께 캡슐화합니다.
+                    // 🌟 [CRITICAL FIX] 개인정보(matches)가 0건이더라도 정상적으로 검사를 완료했다면
+                    // 추출 JSON을 무조건 생성하여 DB에 is_masked = true 상태가 확정되도록 보장합니다.
+                    if is_image {
+                        extracted_json = json!({ "matches": all_matches, "image_text": masked_text, "text": masked_text, "title": doc_title.clone(), "description": doc_desc.clone() });
+                    } else {
                         extracted_json = json!({ "matches": all_matches, "text": masked_text, "title": doc_title.clone(), "description": doc_desc.clone() });
                     }
                     
                     // 🌟 [VRAM 해제 변경] 여러 문서 처리를 위해 Stanza 파이프라인 캐시를 유지하므로 여기서 drop하지 않습니다.
+                } else {
+                    // 검사할 텍스트가 완전히 비어있는 경우 (OCR 결과 없음 등)
+                    emit_term("[EXTRACTION] ⚠️ 마스킹할 유효한 텍스트가 없습니다. 빈 결과로 마스킹 단계를 스킵하고 DB를 확정합니다.");
+                    if is_image {
+                        extracted_json = json!({ "matches": [], "image_text": target_text, "text": target_text, "title": doc_title.clone(), "description": doc_desc.clone() });
+                    } else {
+                        extracted_json = json!({ "matches": [], "text": target_text, "title": doc_title.clone(), "description": doc_desc.clone() });
+                    }
                 }
 
-                // 🌟 [STEP 3] 최종 결과물(마스킹 정보)을 DB에 업데이트합니다.
+                // [STEP 3] 최종 결과물(마스킹 정보)을 DB에 업데이트합니다. (루프 하단부)
                 if !extracted_json.is_null() && !extracted_json.as_object().map(|o| o.is_empty()).unwrap_or(true) {
                     if let Some(obj) = json_data.as_object_mut() {
                         obj.insert("masked".to_string(), extracted_json);
                         obj.insert("is_masked".to_string(), json!(true));
-                        // 🌟 루트에 존재하던 masked_text 개별 삽입 로직은 삭제되었습니다.
                         
-                        // 🌟 [추가] data 객체 내부에 masked_title을 명시적으로 반영합니다.
                         if let Some(data_obj) = obj.get_mut("data").and_then(|v| v.as_object_mut()) {
                             data_obj.insert("masked_title".to_string(), json!(doc_title.clone()));
                             data_obj.insert("masked_description".to_string(), json!(doc_desc.clone()));
@@ -4502,11 +4559,39 @@ async fn process_task(
                         }
                     }
 
-                    // 🌟 [CRITICAL FIX] 하드코딩된 "items" 대신 문서를 찾아낸 실제 테이블(found_table)을 사용합니다!
                     let _ = store.upsert_item(
                         found_table, &doc.id, &doc.r#type, json_data, Some(doc.vector.clone()),
                         Some(&doc.from), Some(&doc.to), Some(&doc.cc), Some(&doc.bcc), Some(&doc.r#ref), Some(&doc.digest)
                     ).await;
+
+                    // 🌟 페이지 증가 반영 (메모리 스테이징 후 마스킹까지 완료한 경우 DB 확정)
+                    if doc.id == task.id {
+                        if let Some((page_id, hostname, pathname, cc_val, from_val, to_val, bcc_val, ref_val, s_mode)) = pending_page_update.clone() {
+                            let mut page_count = 1;
+                            let mut existing_page_data = json!({
+                                "id": page_id.clone(),
+                                "type": "pages",
+                                "mode": s_mode.clone(),
+                                "hostname": hostname.clone(),
+                                "pathname": pathname.clone(),
+                                "cc": cc_val.clone(),
+                                "count": 1
+                            });
+
+                            if let Ok(Some(existing_page)) = store.get_item_by_id("pages", &page_id).await {
+                                if let Ok(mut parsed) = serde_json::from_str::<Value>(&existing_page.json_data) {
+                                    page_count = parsed.get("count").and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+                                    parsed.as_object_mut().unwrap().insert("count".to_string(), json!(page_count));
+                                    existing_page_data = parsed;
+                                }
+                            }
+
+                            let _ = store.upsert_item(
+                                "pages", &page_id, "pages", existing_page_data, None,
+                                Some(&from_val), Some(&to_val), Some(&cc_val), Some(&bcc_val), Some(&ref_val), None
+                            ).await;
+                        }
+                    }
                 }
             }
         }
@@ -4529,7 +4614,11 @@ async fn process_task(
             *model_lock = None;
         }
 
-        let summary_msg = "Extraction & Masking complete. Refreshing list...".to_string();
+        let summary_msg = if task.r#type == "image_extraction" {
+            "Vision OCR Complete. Refreshing list...".to_string()
+        } else {
+            "Extraction & Masking complete. Refreshing list...".to_string()
+        };
 
         // 🌟 [CRITICAL FIX] 상태(1)가 UI에 덮어씌워지는 것을 방어하기 위해 Done 이벤트 발송 직전에 DB도 9로 굳힙니다.
         {
