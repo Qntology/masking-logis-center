@@ -256,19 +256,18 @@ impl LogisModel {
         println!("[DIAG-PURGE] Step 3: Synchronizing CUDA Context...");
         if !self.is_cpu_mode {
             let dev = self.device_config.device.clone();
-            let sync_res = tokio::time::timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || -> Result<(), candle_core::Error> {
+            let sync_res = tokio::time::timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || {
                 if dev.is_cuda() { 
                     println!("[DIAG-PURGE] Executing dev.synchronize()...");
-                    // 🌟 [CRITICAL FIX] 타입 추론 에러(E0282) 해결 및 확실한 동기화를 위해 클로저 반환 타입을 명시합니다.
-                    dev.synchronize()
-                } else { 
-                    Ok(()) 
+                    // 🌟 [CRITICAL FIX] 타입 추론 에러(E0282)를 원천 차단하기 위해 반환값을 아예 소비하고 명시적으로 동기화만 수행합니다.
+                    if let Err(e) = dev.synchronize() {
+                        println!("[DIAG-PURGE] CUDA Sync Inner Error: {:?}", e);
+                    }
                 }
             })).await;
             
             match sync_res {
-                Ok(Ok(Ok(_))) => println!("[DIAG-PURGE] CUDA Synchronization Successful."),
-                Ok(Ok(Err(e))) => println!("[DIAG-PURGE] CUDA Sync Error: {:?}", e),
+                Ok(Ok(_)) => println!("[DIAG-PURGE] CUDA Synchronization Successful."),
                 Ok(Err(_)) => println!("[DIAG-PURGE] CUDA Sync Task Join Error."),
                 Err(_) => println!("[DIAG-PURGE] CUDA Sync Timeout! Continuing purge."),
             }
@@ -861,10 +860,11 @@ impl LogisModel {
                 gpu_id: 0,
             };
         } else {
-            // [STABILITY] Use persistent global CUDA device (Synchronous Singleton)
-            let persistent_dev = utils::get_cuda_device(config.gpu_id);
-            config.device = persistent_dev;
-            println!("🚀 [MODEL] Running in default mode ({})", config.name);
+            // 🌟 [CRITICAL FIX] VRAM 즉각 해제를 위해 전역 캐싱(Singleton) 디바이스 사용을 중단하고 매번 새 컨텍스트를 생성합니다.
+            // utils::get_cuda_device는 내부에 메모리 풀(Caching Allocator)을 영구 보존하므로 작업 관리자에서 VRAM이 떨어지지 않는 주범입니다.
+            let fresh_dev = candle_core::Device::new_cuda(config.gpu_id as usize).unwrap_or(candle_core::Device::Cpu);
+            config.device = fresh_dev;
+            println!("🚀 [MODEL] Running in default mode ({}) with Fresh CUDA Context", config.name);
         }
 
         let app_dir = crate::utils::get_app_dir();
