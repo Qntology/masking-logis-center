@@ -521,16 +521,18 @@ pub async fn start_background_worker(
                         
                         if let Ok(mut w) = crate::ACTIVE_TASK_MEM.write() { *w = None; }
 
+                        let mut target_gpu_id = 0;
                         {
                             let mut model_lock: tokio::sync::MutexGuard<Option<LogisModel>> = model.lock().await;
                             if let Some(m) = model_lock.as_ref() {
+                                target_gpu_id = m.device_config.gpu_id as u32;
                                 println!("[Scheduler] Error detected. Performing emergency memory release...");
                                 m.deep_purge_resources().await;
                             }
                             *model_lock = None;
                         }
                         println!("[Scheduler] ⏳ 에러 복구 후 VRAM 반환 대기...");
-                        let _ = wait_for_resources_settled(1200, 800, None).await;
+                        let _ = wait_for_resources_settled(1200, 800, None, target_gpu_id).await;
 
                         if err_msg.contains("Task cancelled") {
                              println!("[Scheduler] Task cancelled: {}", task.id);
@@ -1054,9 +1056,9 @@ async fn process_task(
                             Some(&doc.from), Some(&doc.to), Some(&doc.cc), Some(&doc.bcc), Some(&doc.r#ref), Some(&doc.digest)
                         ).await;
 
-                        // 🌟 이미지 OCR 단독 작업 종료 즉시 VRAM 리소스 명시적 해제 및 모델 가비지 컬렉션 수행
-                        model.deep_purge_resources().await;
-
+                        // 🌟 [수정] 여러 장의 이미지(Multi-image) 처리 시 루프 안에서 모델을 파기하면 
+                        // 다음 반복(iteration)에서 모델이 없어 에러가 발생하며 중복 해제(Double Purge) 문제가 발생합니다.
+                        // 루프 안에서의 개별 파기를 제거하고, 루프 종료 후 한 번에 해제하도록 하단 공통 해제 로직에 위임합니다.
                         continue;
                     }
 
@@ -4857,7 +4859,7 @@ pub fn log_task_progress(app: &tauri::AppHandle, task_id: &str, payload: &serde_
     let _ = app.emit("extraction-progress", &final_payload);
 }
 
-async fn wait_for_resources_settled(target_vram_mb: u64, target_ram_mb: u64, cancellation_token: Option<&Arc<AtomicBool>>) -> Result<()> {
+async fn wait_for_resources_settled(target_vram_mb: u64, target_ram_mb: u64, cancellation_token: Option<&Arc<AtomicBool>>, target_gpu_id: u32) -> Result<()> {
     use nvml_wrapper::Nvml;
     use sysinfo::System;
     
@@ -4872,7 +4874,7 @@ async fn wait_for_resources_settled(target_vram_mb: u64, target_ram_mb: u64, can
     let mut last_report = std::time::Instant::now();
     let start_time = std::time::Instant::now();
 
-    println!("[RESOURCE-WATCH] Monitoring recovery (Target VRAM > {}MB)...", target_vram_mb);
+    println!("[RESOURCE-WATCH] Monitoring recovery (Target VRAM > {}MB) on GPU {}...", target_vram_mb, target_gpu_id);
 
     loop {
         if let Some(token) = cancellation_token {
@@ -4887,14 +4889,10 @@ async fn wait_for_resources_settled(target_vram_mb: u64, target_ram_mb: u64, can
         let mut has_gpu = false;
 
         if let Some(ref nvml_inst) = nvml {
-            if let Ok(count) = nvml_inst.device_count() {
-                for i in 0..count {
-                    if let Ok(dev) = nvml_inst.device_by_index(i) {
-                        if let Ok(mem) = dev.memory_info() {
-                            if mem.free > current_vram { current_vram = mem.free; }
-                            has_gpu = true;
-                        }
-                    }
+            if let Ok(dev) = nvml_inst.device_by_index(target_gpu_id) {
+                if let Ok(mem) = dev.memory_info() {
+                    current_vram = mem.free;
+                    has_gpu = true;
                 }
             }
         }

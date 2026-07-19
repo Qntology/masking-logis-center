@@ -156,19 +156,32 @@ pub struct LogisModel {
 
 impl LogisModel {
     pub async fn unload_generator(&self) {
-        let mut gen = self.generator.lock().await;
-        *gen = None;
-        let mut q3_gen = self.qwen3_generator.lock().await; 
-        *q3_gen = None;
-        let mut q35_gen = self.qwen3_5_generator.lock().await;
-        *q35_gen = None;
-        // 🌟 [CRITICAL FIX] Granite 350M 모델은 최초 1회만 불러오고 계속 유지하기 위해 unload 대상에서 제외합니다.
-        
-        let mut size = self.current_size.lock().await;
-        // 🌟 Granite가 상주하므로 current_size를 None으로 날리지 않고 상태를 보존합니다.
-        if *size != Some(ModelSize::Granite) {
-            *size = None;
+        {
+            let mut gen = self.generator.lock().await;
+            *gen = None;
+            let mut q3_gen = self.qwen3_generator.lock().await; 
+            *q3_gen = None;
+            let mut q35_gen = self.qwen3_5_generator.lock().await;
+            *q35_gen = None;
+            // 🌟 [CRITICAL FIX] Granite 350M 모델은 최초 1회만 불러오고 계속 유지하기 위해 unload 대상에서 제외합니다.
+            
+            let mut size = self.current_size.lock().await;
+            // 🌟 Granite가 상주하므로 current_size를 None으로 날리지 않고 상태를 보존합니다.
+            if *size != Some(ModelSize::Granite) {
+                *size = None;
+            }
         }
+
+        // [추가] 텐서가 Drop된 직후 CUDA 큐 동기화를 강제하여 VRAM 즉각 반환 유도
+        if !self.is_cpu_mode {
+            let dev = self.device_config.device.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if dev.is_cuda() {
+                    let _ = dev.synchronize();
+                }
+            }).await;
+        }
+
         println!("[MODEL] Main generators destroyed (Granite kept resident)."); 
     }
 
@@ -183,7 +196,7 @@ impl LogisModel {
     /// [CLEANUP] Aggressive Factory Reset Purge (Reinforced with Diagnostics)
     pub async fn deep_purge_resources(&self) {
         println!("[DIAG-PURGE] Step 0: Waiting for background IO to finish...");
-        crate::models::qwen::generate::wait_for_global_io().await; // [cite: 254]
+        crate::models::qwen::generate::wait_for_global_io().await; //
 
         println!("[DIAG-PURGE] Step 1: Clearing ALL Generation Slots...");
         
@@ -236,24 +249,28 @@ impl LogisModel {
             cache.clear();
         }
         
+        // 🌟 [CRITICAL FIX] 모든 락(Lock)을 완전히 벗어난 상태에서 컨텍스트 스위칭을 강제하여 Rust 런타임이 객체를 확실히 Drop 하도록 유도합니다.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
         println!("[DIAG-PURGE] Step 3: Synchronizing CUDA Context...");
         if !self.is_cpu_mode {
             let dev = self.device_config.device.clone();
-            let sync_res = tokio::time::timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || {
+            let sync_res = tokio::time::timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || -> Result<(), candle_core::Error> {
                 if dev.is_cuda() { 
                     println!("[DIAG-PURGE] Executing dev.synchronize()...");
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        dev.synchronize()
-                    }))
-                } else { Ok(Ok(())) }
+                    // 🌟 [CRITICAL FIX] 타입 추론 에러(E0282) 해결 및 확실한 동기화를 위해 클로저 반환 타입을 명시합니다.
+                    dev.synchronize()
+                } else { 
+                    Ok(()) 
+                }
             })).await;
             
             match sync_res {
-                Ok(Ok(Ok(Ok(_)))) => println!("[DIAG-PURGE] CUDA Synchronization Successful."),
-                Ok(Ok(Ok(Err(e)))) => println!("[DIAG-PURGE] CUDA Sync Error: {:?}", e),
+                Ok(Ok(Ok(_))) => println!("[DIAG-PURGE] CUDA Synchronization Successful."),
+                Ok(Ok(Err(e))) => println!("[DIAG-PURGE] CUDA Sync Error: {:?}", e),
                 Ok(Err(_)) => println!("[DIAG-PURGE] CUDA Sync Task Join Error."),
                 Err(_) => println!("[DIAG-PURGE] CUDA Sync Timeout! Continuing purge."),
-                _ => println!("[DIAG-PURGE] CUDA Sync Panicked or Failed."),
             }
         }
 
@@ -263,6 +280,7 @@ impl LogisModel {
             use windows_sys::Win32::System::Threading::*;
             use windows_sys::Win32::System::Memory::*;
             let current_process = GetCurrentProcess();
+            // 🌟 [CRITICAL FIX] OS에 묶인 물리 메모리를 완전히 털어내기 위해 EmptyWorkingSet(앱 최소화/종료와 유사한 효과)을 시도합니다.
             let _ = SetProcessWorkingSetSizeEx(current_process, usize::MAX, usize::MAX, QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE);
         }
         #[cfg(target_os = "linux")]
