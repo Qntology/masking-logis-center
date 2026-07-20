@@ -2384,6 +2384,107 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
     Ok("Started".to_string())
 }
 
+#[tauri::command]
+async fn download_gpu_engine(app_handle: tauri::AppHandle, gpu_type: String) -> Result<String, String> {
+    let app_dir = crate::utils::get_app_dir();
+    let app_dir_clone = app_dir.clone();
+    
+    tokio::task::spawn(async move {
+        let base_path = app_dir_clone.join("engines");
+        if let Err(e) = std::fs::create_dir_all(&base_path) {
+            let _ = app_handle.emit("download_error", serde_json::json!({"model": "GPU_Engine", "error": e.to_string()}));
+            return;
+        }
+
+        let filename = format!("engine_{}.zip", gpu_type.to_lowercase());
+        let file_path = base_path.join(&filename);
+
+        // 🌟 [DEV 환경 처리] 로컬 개발 환경(debug 빌드)일 경우, 다운로드 대신 로컬 프로젝트 폴더에서 바로 복사합니다.
+        #[cfg(debug_assertions)]
+        {
+            // src-tauri/engines/ 경로에 미리 준비된 파일이 있는지 확인
+            let local_engine_path = std::env::current_dir()
+                .unwrap_or_default()
+                .join("src-tauri")
+                .join("engines")
+                .join(&filename);
+            
+            if local_engine_path.exists() {
+                let _ = app_handle.emit("download_progress", serde_json::json!({
+                    "model": "GPU_Engine",
+                    "percent": 50,
+                    "message": format!("[DEV] 로컬 {} 엔진을 복사 중입니다...", gpu_type)
+                }));
+
+                match std::fs::copy(&local_engine_path, &file_path) {
+                    Ok(_) => {
+                        let _ = app_handle.emit("download_progress", serde_json::json!({"model": "GPU_Engine", "percent": 100}));
+                        let _ = app_handle.emit("download_complete", serde_json::json!({"model": "GPU_Engine"}));
+                        println!("[DEV] 로컬 엔진 파일 복사 완료: {:?}", file_path);
+                        return; // 복사에 성공했으므로 다운로드 로직은 건너뜁니다.
+                    }
+                    Err(e) => {
+                        println!("[DEV] 로컬 복사 실패, 다운로드로 전환합니다: {}", e);
+                    }
+                }
+            } else {
+                println!("[DEV] 로컬 엔진 파일을 찾을 수 없어 다운로드를 시도합니다: {:?}", local_engine_path);
+            }
+        }
+
+        // 향후 Sidecar 방식으로 엔진을 분리했을 때 받아올 서버 URL 분기
+        let download_url = if gpu_type.to_lowercase() == "nvidia" {
+            "https://your-server.com/engines/llama-server-cuda.zip"
+        } else if gpu_type.to_lowercase() == "amd" {
+            "https://your-server.com/engines/llama-server-rocm.zip"
+        } else {
+            "https://your-server.com/engines/llama-server-cpu.zip"
+        };
+        
+        let client = reqwest::Client::new();
+        
+        let _ = app_handle.emit("download_progress", serde_json::json!({
+            "model": "GPU_Engine",
+            "percent": 0,
+            "message": format!("{} 백엔드 엔진 다운로드 시작...", gpu_type)
+        }));
+
+        match client.get(download_url).send().await {
+            Ok(res) => {
+                if !res.status().is_success() {
+                    let _ = app_handle.emit("download_error", serde_json::json!({"model": "GPU_Engine", "error": format!("HTTP {}", res.status())}));
+                    return;
+                }
+                
+                let total_size = res.content_length().unwrap_or(0) as f64;
+                let mut downloaded = 0.0;
+                
+                if let Ok(mut file) = tokio::fs::File::create(&file_path).await {
+                    use tokio::io::AsyncWriteExt;
+                    use futures::StreamExt;
+                    let mut stream = res.bytes_stream();
+                    
+                    while let Some(chunk_result) = stream.next().await {
+                        if let Ok(chunk) = chunk_result {
+                            let _ = file.write_all(&chunk).await;
+                            downloaded += chunk.len() as f64;
+                            let percent = if total_size > 0.0 { ((downloaded / total_size) * 100.0) as u32 } else { 0 };
+                            let _ = app_handle.emit("download_progress", serde_json::json!({"model": "GPU_Engine", "percent": percent}));
+                        }
+                    }
+                    // 성공적으로 받아오면 압축 해제 후 외부 프로세스(Command)로 실행 가능하도록 구현
+                    let _ = app_handle.emit("download_complete", serde_json::json!({"model": "GPU_Engine"}));
+                }
+            },
+            Err(e) => {
+                let _ = app_handle.emit("download_error", serde_json::json!({"model": "GPU_Engine", "error": e.to_string()}));
+            }
+        }
+    });
+
+    Ok("GPU Engine download started".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let model = Arc::new(TokioMutex::new(None));
@@ -2600,7 +2701,7 @@ pub fn run() {
             upsert_items, set_ignore_cursor_events, mark_ui_ready, delete_document, delete_documents, delete_message, check_gpu_availability,
             save_mobile_temp_file, crate::utils::network::get_local_network_prefix, crate::utils::network::get_my_full_ip, connect_with_seed, start_listener_command, send_signal_offer, submit_signal_answer,
             get_active_task_context, check_model_status, download_model, delete_all_models,
-            rename_search_mode, start_file_drag
+            rename_search_mode, start_file_drag, download_gpu_engine
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
