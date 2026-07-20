@@ -50,7 +50,7 @@ body {
   display: flex;
   justify-content: center; /* Center horizontally */
 }
-
+#list-view{position: relative; height: 100%;}
 .empty{font-style: italic; font-size:0.8rem; color:#666;}
 
 /* The Main Wrapper */
@@ -420,7 +420,6 @@ tr:hover { background: rgba(0,0,0,0.05); }
 .chat-container, .list-container {
     position: relative;
     height: 100%;
-    overflow: hidden; 
 }
 
 .chat-scroll, .list-scroll {

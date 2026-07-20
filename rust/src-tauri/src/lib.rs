@@ -2137,17 +2137,61 @@ async fn check_model_status() -> Result<serde_json::Value, String> {
         }
     };
     
+    // 🌟 [추가] Stanza 모델 체크용 함수 추가
+    let has_valid_stanza = |dir: &std::path::PathBuf| -> bool {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            entries.flatten().any(|e| {
+                e.path().extension().map_or(false, |ext| ext == "onnx") && e.metadata().map(|m| m.len()).unwrap_or(0) > 1_000_000
+            })
+        } else {
+            false
+        }
+    };
+
     let qwen3_dir = base_path.join("Qwen3-0.6B-Instruct-gguf");
     let qwen3_5_dir = base_path.join("Qwen3.5-2B-Instruct-gguf");
     let granite_dir = base_path.join("granite-4.0-h-350m");
     let embed_dir = base_path.join("granite-embedding-97m-multilingual-r2");
 
-    Ok(serde_json::json!({
-        "Qwen3": has_valid_model(&qwen3_dir),
-        "Qwen3.5": has_valid_model(&qwen3_5_dir),
-        "Granite": has_valid_model(&granite_dir),
-        "Embedding": has_valid_model(&embed_dir)
-    }))
+    let mut status_map = serde_json::Map::new();
+    status_map.insert("Qwen3".to_string(), serde_json::json!(has_valid_model(&qwen3_dir)));
+    status_map.insert("Qwen3.5".to_string(), serde_json::json!(has_valid_model(&qwen3_5_dir)));
+    status_map.insert("Granite".to_string(), serde_json::json!(has_valid_model(&granite_dir)));
+    status_map.insert("Embedding".to_string(), serde_json::json!(has_valid_model(&embed_dir)));
+
+    let supported_stanza_langs = [
+        "korean", "english", "japanese", "chinese", "french", "german", "spanish", 
+        "italian", "portuguese", "dutch", "russian", "arabic", "thai", "hindi", 
+        "bengali", "greek", "hebrew", "vietnamese"
+    ];
+
+    for lang in supported_stanza_langs.iter() {
+        let lang_code = match *lang {
+            "korean" => "ko",
+            "english" => "en",
+            "japanese" => "ja",
+            "chinese" => "zh-hans",
+            "french" => "fr",
+            "german" => "de",
+            "spanish" => "es",
+            "italian" => "it",
+            "portuguese" => "pt",
+            "dutch" => "nl",
+            "russian" => "ru",
+            "arabic" => "ar",
+            "thai" => "th",
+            "hindi" => "hi",
+            "bengali" => "bn",
+            "greek" => "el",
+            "hebrew" => "he",
+            "vietnamese" => "vi",
+            _ => "en",
+        };
+        let stanza_dir = base_path.join(format!("stanza/{}", lang_code));
+        status_map.insert(format!("stanza_{}", lang), serde_json::json!(has_valid_stanza(&stanza_dir)));
+    }
+
+    Ok(serde_json::Value::Object(status_map))
 }
 
 
@@ -2172,7 +2216,28 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
         // 🌟 [수정] stanza 다운로드 경로 동적 맵핑 (models/stanza/{lang} 구조 지원)
         let folder_name = if model_name.starts_with("stanza_") {
             let lang = model_name.replace("stanza_", "");
-            format!("stanza/{}", lang)
+            let lang_code = match lang.as_str() {
+                "korean" => "ko",
+                "english" => "en",
+                "japanese" => "ja",
+                "chinese" => "zh-hans",
+                "french" => "fr",
+                "german" => "de",
+                "spanish" => "es",
+                "italian" => "it",
+                "portuguese" => "pt",
+                "dutch" => "nl",
+                "russian" => "ru",
+                "arabic" => "ar",
+                "thai" => "th",
+                "hindi" => "hi",
+                "bengali" => "bn",
+                "greek" => "el",
+                "hebrew" => "he",
+                "vietnamese" => "vi",
+                _ => "en",
+            };
+            format!("stanza/{}", lang_code)
         } else {
             match model_name.as_str() {
                 "Qwen3" => "Qwen3-0.6B-Instruct-gguf".to_string(),
@@ -2218,6 +2283,7 @@ async fn download_model(app_handle: tauri::AppHandle, model_name: String) -> Res
                 (format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/pos.onnx", lang_code), "pos.onnx".to_string()),
                 (format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/tokenizer.onnx", lang_code), "tokenizer.onnx".to_string()),
                 (format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/depparse.onnx", lang_code), "depparse.onnx".to_string()),
+                (format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/lemma.onnx", lang_code), "lemma.onnx".to_string()),
             ]
         } else {
             match model_name.as_str() {
