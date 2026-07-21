@@ -4,6 +4,19 @@ import { open, ask } from '@tauri-apps/plugin-dialog';
 import { listen, emit } from '@tauri-apps/api/event';
 import { readFile } from '@tauri-apps/plugin-fs';
 
+// 🌟 [추가] 프론트엔드 에러 발생 시 백엔드로 전달하여 log.txt에 기록하는 전역 에러 핸들러
+window.addEventListener("error", (event) => {
+    const msg = event.message || "Unknown Error";
+    const loc = `${event.filename || 'unknown'}:${event.lineno || 0}:${event.colno || 0}`;
+    invoke("log_frontend_error", { message: msg, location: loc }).catch(console.error);
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+    const msg = event.reason instanceof Error ? event.reason.message : String(event.reason);
+    const loc = event.reason instanceof Error && event.reason.stack ? event.reason.stack.split('\n')[1]?.trim() || "Promise" : "Promise";
+    invoke("log_frontend_error", { message: `Unhandled Rejection: ${msg}`, location: loc }).catch(console.error);
+});
+
 // Imports for Rendering & Shim
 import { item2html } from "./lib/render";
 import { Select } from "./lib/db";
@@ -60,7 +73,9 @@ let isBrowserRunning = false;
 let isAutoLaunchLocked = false; // 🌟 런처 클릭 후 stopped 시그널 전까지 버튼 강제 숨김 락
 
 // [통합 락 매니저 & 프론트엔드 큐 관리자]
-import "./dexie.min.js";
+if (!(window as any).Dexie) {
+    console.error("🚨 [ERROR] Dexie library is missing! public 폴더 안의 파일들은 반드시 절대경로(/)로 불러와야 합니다.");
+}
 const DexieLocal = (window as any).Dexie;
 
 const appDb = new DexieLocal("LogisAppDB");

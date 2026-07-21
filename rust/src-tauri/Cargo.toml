@@ -1,9 +1,9 @@
 [package]
 name = "rust"
 version = "0.1.0"
-description = "A Tauri App"
+description = "terminal.logis.center"
 authors = ["che"]
-edition = "2021"
+edition = "2026"
 
 [lib]
 name = "tauri_app_lib"
@@ -96,8 +96,10 @@ opt-level = 0      # 기본값 0(최적화 없음)을 2로 올려서 실행 속�
 incremental = true # 변경된 부분만 빌드해서 시간을 아낍니다.
 
 [profile.release]
-opt-level = 3   # 실행 속도 최대
-strip = true      # 모든 심볼 제거 (함수 이름 등 삭제)
-lto = true        # 전체 프로그램 최적화 (코드 분석을 훨씬 어렵게 함)
-panic = "abort"   # 에러 발생 시 정보를 남기지 않음
-codegen-units = 1 # 빌드 속도 개선
+opt-level = 0      # 기본값 0(최적화 없음)을 2로 올려서 실행 속도를 개선합니다.
+incremental = true # 변경된 부분만 빌드해서 시간을 아낍니다.
+# opt-level = 0   # 실행 속도 최대
+# strip = true      # 모든 심볼 제거 (함수 이름 등 삭제)
+# lto = true        # 전체 프로그램 최적화 (코드 분석을 훨씬 어렵게 함)
+# panic = "abort"   # 에러 발생 시 정보를 남기지 않음
+# codegen-units = 1 # 빌드 속도 개선

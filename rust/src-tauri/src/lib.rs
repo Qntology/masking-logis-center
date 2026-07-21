@@ -2485,8 +2485,84 @@ async fn download_gpu_engine(app_handle: tauri::AppHandle, gpu_type: String) -> 
     Ok("GPU Engine download started".to_string())
 }
 
+#[tauri::command]
+async fn log_frontend_error(message: String, location: String) {
+    let log_msg = format!("Frontend Error in {}: {}\n", location, message);
+    
+    // 1. 실행 파일 경로에 log.txt 저장 시도
+    let mut log_path1 = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    log_path1.pop();
+    log_path1.push("log.txt");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path1) {
+        use std::io::Write;
+        let _ = writeln!(file, "{}", log_msg);
+    }
+
+    // 2. AppData 폴더에 log.txt 저장 시도
+    let mut log_path2 = crate::utils::get_app_dir();
+    log_path2.push("log.txt");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path2) {
+        use std::io::Write;
+        let _ = writeln!(file, "{}", log_msg);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // [ADD] 패닉 발생 시 log.txt 파일에 에러를 기록하는 훅 설정
+    std::panic::set_hook(Box::new(|info| {
+        let msg = match info.payload().downcast_ref::<&'static str>() {
+            Some(s) => *s,
+            None => match info.payload().downcast_ref::<String>() {
+                Some(s) => &s[..],
+                None => "Box<dyn Any>",
+            },
+        };
+        let location = match info.location() {
+            Some(loc) => format!("file '{}' at line {}", loc.file(), loc.line()),
+            None => "unknown location".to_string(),
+        };
+        let log_msg = format!("Panic occurred in {}: {}\n", location, msg);
+        
+        // 1. 설치/실행 파일 경로에 log.txt 저장 (쓰기 권한이 있을 경우)
+        let mut log_path1 = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        log_path1.pop();
+        log_path1.push("log.txt");
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path1) {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", log_msg);
+        }
+
+        // 2. AppData 폴더에 log.txt 저장 (Program Files 설치 등으로 쓰기 권한이 없을 경우 방어)
+        let mut log_path2 = crate::utils::get_app_dir();
+        log_path2.push("log.txt");
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path2) {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", log_msg);
+        }
+    }));
+
+    // [ADD] 실행 파일 위치(.exe) 및 dlls 폴더를 PATH 환경 변수 최상단에 추가하여 확실하게 DLL 로드
+    if let Ok(mut exe_path) = std::env::current_exe() {
+        exe_path.pop(); // exe 위치
+        let dlls_path = exe_path.join("dlls"); // 빌드 시 생성되는 dlls 폴더 경로
+        
+        if exe_path.exists() {
+            if let Some(path_var) = std::env::var_os("PATH") {
+                let mut paths = std::env::split_paths(&path_var).collect::<Vec<_>>();
+                // dlls 폴더와 루트 폴더를 모두 PATH에 등록하여 경로 어그러짐 100% 방어
+                paths.insert(0, dlls_path.clone());
+                paths.insert(0, exe_path.clone());
+                if let Ok(new_path) = std::env::join_paths(paths) {
+                    std::env::set_var("PATH", new_path);
+                }
+            } else {
+                let new_path = format!("{};{}", dlls_path.display(), exe_path.display());
+                std::env::set_var("PATH", new_path);
+            }
+        }
+    }
+
     let model = Arc::new(TokioMutex::new(None));
     let store = Arc::new(TokioMutex::new(None));
     let cancellation_token = Arc::new(AtomicBool::new(false));
@@ -2701,7 +2777,7 @@ pub fn run() {
             upsert_items, set_ignore_cursor_events, mark_ui_ready, delete_document, delete_documents, delete_message, check_gpu_availability,
             save_mobile_temp_file, crate::utils::network::get_local_network_prefix, crate::utils::network::get_my_full_ip, connect_with_seed, start_listener_command, send_signal_offer, submit_signal_answer,
             get_active_task_context, check_model_status, download_model, delete_all_models,
-            rename_search_mode, start_file_drag, download_gpu_engine
+            rename_search_mode, start_file_drag, download_gpu_engine, log_frontend_error
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
