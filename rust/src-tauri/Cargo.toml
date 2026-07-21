@@ -3,7 +3,7 @@ name = "rust"
 version = "0.1.0"
 description = "terminal.logis.center"
 authors = ["che"]
-edition = "2026"
+edition = "2021"
 
 [lib]
 name = "tauri_app_lib"
