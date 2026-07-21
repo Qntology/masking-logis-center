@@ -1471,16 +1471,14 @@ async fn process_task(
                             // 🌟 [UNSAFE BYPASS] 구버전 onnxruntime(0.0.14)은 내부 C++ 포인터(*mut)에 대해 
                             // Rust의 스레드 간 전송(Send) 트레이트 구현을 누락하는 설계 결함이 있습니다.
                             // 컴파일러의 락을 강제로 해제하기 위해 Unsafe 래퍼 구조체를 선언하여 전송 자격을 억지로 부여합니다.
-                            struct UnsafePipelineWrapper(StanzaPipeline);
+                            struct UnsafePipelineWrapper(crate::scheduler::StanzaPipeline);
                             unsafe impl Send for UnsafePipelineWrapper {}
                             
-                            let (tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<UnsafePipelineWrapper>>();
-                            std::thread::spawn(move || {
-                                let res = StanzaPipeline::new(base_dir_clone, &lang_code_clone).map(UnsafePipelineWrapper);
-                                let _ = tx.send(res);
-                            });
-                            
-                            let pipeline_res = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("OS 스레드 통신 채널이 끊어졌습니다.")));
+                            // StanzaPipeline::new는 async 함수이므로 await를 호출하여 결과를 기다려야 합니다.
+                            // 불필요한 OS 스레드 생성(std::thread::spawn) 및 채널을 제거하고, 현재의 비동기 런타임에서 직접 처리합니다.
+                            let pipeline_res = crate::scheduler::StanzaPipeline::new(base_dir_clone, &lang_code_clone)
+                                .await
+                                .map(UnsafePipelineWrapper);
 
                             match pipeline_res {
                                 Ok(wrapper) => {
