@@ -1031,22 +1031,23 @@ async fn delete_document(
         if let Ok(Some(doc)) = store.get_item_by_id("items", &uuid).await {
             if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
                 let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("");
-                // 🌟 [추가] 이미지 타입인지 판별합니다.
-                let is_image = doc.r#type == "draft" && (doc.text.contains("[Image]") || doc.json_data.contains("file://"));
+                // 🌟 [수정] 로컬 파일 여부를 판별하고, 확장자에 따라 이미지/문서를 정확히 구분합니다.
+                let is_local_file = doc.r#type == "draft" && url.starts_with("file://");
 
                 let mut hostname = String::new();
                 let mut pathname = String::new();
 
-                // 🌟 [보강] http 웹 문서와 로컬 이미지의 경로를 모두 커버하여 Pages 트리를 탐색합니다.
+                // 🌟 [보강] http 웹 문서와 로컬 파일(이미지/문서)의 경로를 모두 커버하여 Pages 트리를 탐색합니다.
                 if url.starts_with("http") {
                     if let Ok(parsed_url) = url::Url::parse(url) {
                         hostname = parsed_url.host_str().unwrap_or("").to_string();
                         pathname = parsed_url.path().to_string();
                     }
-                } else if is_image {
-                    hostname = "Local Image".to_string();
+                } else if is_local_file {
                     let filename = url.replace("file://", "");
                     let ext = std::path::Path::new(&filename).extension().and_then(|e| e.to_str()).unwrap_or("file").to_lowercase();
+                    let is_doc = ["csv", "xlsx", "xls", "docx", "hwpx", "hwp", "txt", "md", "json"].contains(&ext.as_str());
+                    hostname = if is_doc { "Local Document".to_string() } else { "Local Image".to_string() };
                     pathname = format!(".{}", ext);
                 }
 
@@ -1101,7 +1102,8 @@ async fn delete_documents(
             if let Ok(Some(doc)) = store.get_item_by_id("items", uuid).await {
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
                     let url = json_val.get("link").and_then(|v| v.as_str()).unwrap_or("");
-                    let is_image = doc.r#type == "draft" && (doc.text.contains("[Image]") || doc.json_data.contains("file://"));
+                    // 🌟 [수정] 로컬 파일 여부를 판별하고, 확장자에 따라 이미지/문서를 정확히 구분합니다.
+                    let is_local_file = doc.r#type == "draft" && url.starts_with("file://");
 
                     let mut hostname = String::new();
                     let mut pathname = String::new();
@@ -1111,10 +1113,11 @@ async fn delete_documents(
                             hostname = parsed_url.host_str().unwrap_or("").to_string();
                             pathname = parsed_url.path().to_string();
                         }
-                    } else if is_image {
-                        hostname = "Local Image".to_string();
+                    } else if is_local_file {
                         let filename = url.replace("file://", "");
                         let ext = std::path::Path::new(&filename).extension().and_then(|e| e.to_str()).unwrap_or("file").to_lowercase();
+                        let is_doc = ["csv", "xlsx", "xls", "docx", "hwpx", "hwp", "txt", "md", "json"].contains(&ext.as_str());
+                        hostname = if is_doc { "Local Document".to_string() } else { "Local Image".to_string() };
                         pathname = format!(".{}", ext);
                     }
 
