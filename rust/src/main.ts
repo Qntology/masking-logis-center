@@ -2172,8 +2172,13 @@ btnExtract?.addEventListener("click", async () => {
                 console.log("[WIDGET] Routing task to Cloud Server...");
                 let payloadBody = "";
                 let format = "";
+                let taskType = "html_extraction";
 
                 if (currentImage) {
+                    const ext = currentImage.split('.').pop()?.toLowerCase() || '';
+                    const isDoc = ['csv', 'xlsx', 'xls', 'docx', 'hwpx', 'hwp', 'txt', 'md', 'json'].includes(ext);
+                    taskType = isDoc ? "document_extraction" : "image_extraction";
+
                     const contents = await readFile(currentImage);
                     const blob = new Blob([contents]);
                     const base64Data = await new Promise<string>((resolve) => {
@@ -2183,7 +2188,7 @@ btnExtract?.addEventListener("click", async () => {
                     });
                     
                     payloadBody = base64Data;
-                    format = "image/png"; 
+                    format = isDoc ? "application/octet-stream" : "image/png"; 
                 } else {
                     payloadBody = await invoke<string>("extract_html_from_current_tab");
                     format = "text/html";
@@ -2198,7 +2203,7 @@ btnExtract?.addEventListener("click", async () => {
                     ref: activeContext.ref || "",
                     body: payloadBody,
                     link: currentDetectedUrl || "local",
-                    type: currentImage ? "image_extraction" : "html_extraction"
+                    type: taskType
                 };
 
                 const urlObj = new URL(API_HOST);
@@ -2229,16 +2234,21 @@ btnExtract?.addEventListener("click", async () => {
                 // 💻 [LOCAL MODE]
                 // ==========================================
                 if (currentImage) {
-                    console.log("[WIDGET] Queuing LOCAL IMAGE task...");
+                    const ext = currentImage.split('.').pop()?.toLowerCase() || '';
+                    const isDoc = ['csv', 'xlsx', 'xls', 'docx', 'hwpx', 'hwp', 'txt', 'md', 'json'].includes(ext);
+                    const taskType = isDoc ? "document_extraction" : "image_extraction";
+                    const linkLabel = isDoc ? "Local Document" : "Local Image";
+
+                    console.log(`[WIDGET] Queuing LOCAL ${isDoc ? 'DOCUMENT' : 'IMAGE'} task...`);
                     const imageRefHash = await hashId(currentImage);
 
                     // 🚀 큐에 등록
-                    await GlobalTaskManager.addToQueue(taskId, "image_extraction", { 
-                        id: taskId, type: "image_extraction", image_path: currentImage, 
+                    await GlobalTaskManager.addToQueue(taskId, taskType, { 
+                        id: taskId, type: taskType, image_path: currentImage, file_path: currentImage,
                         ref: imageRefHash, 
                         cc: activeContext.cc || "",
                         bcc: activeContext.bcc || "",
-                        link: "Local Image",
+                        link: linkLabel,
                         device_preference: getDevicePref(), search_mode: currentSearchMode
                     });
                 } else {
@@ -4475,17 +4485,25 @@ async function handleImageUpload(path: string) {
         }
         if (btnExtract) btnExtract.style.display = "flex";
         
-        try {
-            const contents = await readFile(currentImage);
-            const blob = new Blob([contents]);
-            const reader = new FileReader();
-            reader.onloadend = () => { navImgThumbnail.src = reader.result as string; };
-            reader.readAsDataURL(blob);
-        } catch (e) { 
-            navImgThumbnail.src = convertFileSrc(currentImage); 
+        const ext = path.split('.').pop()?.toLowerCase() || '';
+        const isDoc = ['csv', 'xlsx', 'xls', 'docx', 'hwpx', 'hwp', 'txt', 'md', 'json'].includes(ext);
+
+        if (isDoc) {
+            // 문서 파일일 경우 문서 아이콘(SVG Base64) 출력
+            navImgThumbnail.src = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 24 24' fill='none' stroke='%23999999' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'></path><polyline points='14 2 14 8 20 8'></polyline><line x1='16' y1='13' x2='8' y2='13'></line><line x1='16' y1='17' x2='8' y2='17'></line><polyline points='10 9 9 9 8 9'></polyline></svg>";
+        } else {
+            try {
+                const contents = await readFile(currentImage);
+                const blob = new Blob([contents]);
+                const reader = new FileReader();
+                reader.onloadend = () => { navImgThumbnail.src = reader.result as string; };
+                reader.readAsDataURL(blob);
+            } catch (e) { 
+                navImgThumbnail.src = convertFileSrc(currentImage); 
+            }
         }
 
-        console.log("[WIDGET] Image selected. Extraction button (⚡) is now visible.");
+        console.log("[WIDGET] File selected. Extraction button (⚡) is now visible.");
         
         // 🌟 [추가] 이미지 선택 시 설정(채팅) 탭으로 화면을 전환하고 스크롤을 맨 아래로 내립니다.
         openWidget("settings");
@@ -4523,7 +4541,13 @@ navImgClear?.addEventListener("click", async () => {
 });
 
 navUploadBtn?.addEventListener("click", async () => {
-    const file = await open({ multiple: false, filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg'] }] });
+    const file = await open({ 
+        multiple: false, 
+        filters: [{ 
+            name: 'Files', 
+            extensions: ['png', 'jpg', 'jpeg', 'csv', 'xlsx', 'xls', 'docx', 'hwpx', 'hwp', 'txt', 'md', 'json'] 
+        }] 
+    });
     if (file) await handleImageUpload(file as string);
 });
 

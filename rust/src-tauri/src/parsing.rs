@@ -403,10 +403,11 @@ pub struct TableContext {
     pub headers: Vec<Vec<String>>, // Row -> Col -> Title
     pub current_row_idx: usize,
     pub current_col_idx: usize,
+    pub row_occupancy: std::collections::HashMap<usize, usize>, // 🌟 [추가] col_idx -> remaining rowspan
     pub is_in_tbody: bool,
     pub base_url: Option<String>, 
-    pub inline_buffer: String, // 🌟 누적된 인라인 텍스트 버퍼
-    pub inline_indent: usize,  // 🌟 첫 텍스트가 시작된 들여쓰기 뎁스
+    pub inline_buffer: String,
+    pub inline_indent: usize, 
 }
 
 // 🌟 블록 요소를 만나거나 태그가 닫힐 때, 그동안 누적된 인라인 텍스트를 하나의 라인(|)으로 묶어 방출합니다.
@@ -513,8 +514,22 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
             }
 
             // Context Management
-            if tag_name == "tbody" { if let Some(c) = ctx.as_mut() { c.is_in_tbody = true; c.current_row_idx = 0; } }
-            if tag_name == "tr" { if let Some(c) = ctx.as_mut() { c.current_col_idx = 0; } }
+            if tag_name == "tbody" { 
+                if let Some(c) = ctx.as_mut() { 
+                    c.is_in_tbody = true; 
+                    c.current_row_idx = 0; 
+                    c.row_occupancy.clear();
+                } 
+            }
+            if tag_name == "tr" { 
+                if let Some(c) = ctx.as_mut() { 
+                    c.current_col_idx = 0; 
+                    // 새로운 행이 시작될 때 이전 행들에서 내려온 rowspan 잔여치를 1씩 감소시킵니다.
+                    for span in c.row_occupancy.values_mut() {
+                        if *span > 0 { *span -= 1; }
+                    }
+                } 
+            }
 
             
             // 껍데기 태그 자체가 출력되지 않고 자식에게 뎁스(indent)를 그대로 패스합니다.
@@ -603,16 +618,34 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
                 }
             }
 
-            // Inject alt from headers for tbody cells
+            // Inject alt from headers for tbody cells (colspan, rowspan 완벽 매칭 반영)
             if tag_name == "td" || tag_name == "th" {
                 if let Some(c) = ctx.as_mut() {
                     if c.is_in_tbody && !c.headers.is_empty() {
+                        // 🌟 [CRITICAL FIX] 이전 행의 rowspan으로 인해 현재 열이 이미 점유되어 있다면 열을 건너뜁니다.
+                        while *c.row_occupancy.get(&c.current_col_idx).unwrap_or(&0) > 0 {
+                            c.current_col_idx += 1;
+                        }
+
+                        let colspan = element.attr("colspan").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
+                        let rowspan = element.attr("rowspan").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
+
+                        // 현재 셀이 아래 행까지 점유한다면 장부에 기록합니다.
+                        if rowspan > 1 {
+                            for col in c.current_col_idx..(c.current_col_idx + colspan) {
+                                c.row_occupancy.insert(col, rowspan - 1);
+                            }
+                        }
+
                         let h_row = &c.headers[c.current_row_idx % c.headers.len()];
                         if let Some(title) = h_row.get(c.current_col_idx) {
                             if !title.is_empty() {
                                 other_attributes.push(format!("alt=\"{}\"", title.replace("\"", "'")));
                             }
                         }
+                        
+                        // 🌟 셀 속성 주입이 끝났으므로 다음 셀을 위해 현재 열 인덱스를 colspan 만큼 전진시킵니다.
+                        c.current_col_idx += colspan;
                     }
                 }
             }
@@ -745,7 +778,6 @@ pub fn generate_pug_lines(node: NodeRef<scraper::Node>, indent_level: usize, out
 
             // End of Tag Updates
             if tag_name == "tr" { if let Some(c) = ctx.as_mut() { if c.is_in_tbody { c.current_row_idx += 1; } } }
-            if tag_name == "td" || tag_name == "th" { if let Some(c) = ctx.as_mut() { if c.is_in_tbody { c.current_col_idx += 1; } } }
             if tag_name == "tbody" { if let Some(c) = ctx.as_mut() { c.is_in_tbody = false; } }
         }
         Node::Text(text) => {
@@ -877,13 +909,44 @@ pub fn extract_table_headers(html: &str, table_selector: &str) -> Vec<Vec<String
                             if let Ok(thead_sel) = Selector::parse("thead") {
                                 if let Some(thead) = table_ref.select(&thead_sel).next() {
                                     if let Ok(tr_sel) = Selector::parse("tr") {
+                                        let mut row_occupancy: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+                                        let mut row_texts: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+
                                         for tr in thead.select(&tr_sel) {
+                                            let mut current_col = 0;
                                             let mut row_headers = Vec::new();
+                                            
+                                            for span in row_occupancy.values_mut() {
+                                                if *span > 0 { *span -= 1; }
+                                            }
+
                                             if let Ok(cell_sel) = Selector::parse("th, td") {
                                                 for cell in tr.select(&cell_sel) {
-                                                    row_headers.push(cell.text().collect::<Vec<_>>().join(" ").trim().to_string());
+                                                    while *row_occupancy.get(&current_col).unwrap_or(&0) > 0 {
+                                                        row_headers.push(row_texts.get(&current_col).cloned().unwrap_or_default());
+                                                        current_col += 1;
+                                                    }
+
+                                                    let colspan = cell.value().attr("colspan").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
+                                                    let rowspan = cell.value().attr("rowspan").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
+                                                    let text = cell.text().collect::<Vec<_>>().join(" ").trim().to_string();
+
+                                                    for c in current_col..(current_col + colspan) {
+                                                        if rowspan > 1 {
+                                                            row_occupancy.insert(c, rowspan - 1);
+                                                            row_texts.insert(c, text.clone());
+                                                        }
+                                                        row_headers.push(text.clone());
+                                                    }
+                                                    current_col += colspan;
                                                 }
                                             }
+                                            
+                                            while *row_occupancy.get(&current_col).unwrap_or(&0) > 0 {
+                                                row_headers.push(row_texts.get(&current_col).cloned().unwrap_or_default());
+                                                current_col += 1;
+                                            }
+
                                             if !row_headers.is_empty() { all_headers.push(row_headers); }
                                         }
                                     }
@@ -2265,4 +2328,308 @@ pub fn generate_mnemonic() -> String {
     let noun = noun_list.choose(&mut rng).unwrap_or(&"data");
 
     format!("{}-{}", adj, noun)
+}
+
+// 🌟 문서 파일(엑셀, 워드, 한글, CSV 등) 텍스트 추출 헬퍼
+pub fn extract_document_text(file_path: &str) -> anyhow::Result<String> {
+    use std::path::Path;
+    let path = Path::new(file_path);
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+
+    // 표 데이터를 (헤더명: 값) 형태의 Key-Value 문맥으로 변환하는 지능형 헬퍼 함수
+    fn parse_table_to_kv_string(mut grid: Vec<Vec<String>>) -> String {
+        if grid.is_empty() { return String::new(); }
+        let rows = grid.len();
+        let cols = grid.iter().map(|r| r.len()).max().unwrap_or(0);
+        
+        // 그리드 규격 정규화
+        for r in &mut grid { r.resize(cols, String::new()); }
+
+        // 1. 데이터 패턴 분석을 통한 헤더/본문 경계선(Boundary) 동적 유추를 먼저 수행합니다.
+        let mut data_start_row = 1;
+        let mut data_start_col = 0; // [개선] 기본적으로 0번 열을 데이터 영역으로 강제하여 유실 방지
+
+        // 1-1. 가로 헤더 경계 (어디서부터 본문 행이 시작되는가?)
+        let re_date = regex::Regex::new(r"^\d{2,4}[-/.]\d{1,2}[-/.]\d{1,2}").unwrap();
+        for r in 0..rows {
+            let mut data_like_count = 0;
+            for c in 0..cols {
+                let val = grid[r][c].trim();
+                if !val.is_empty() {
+                    let is_numeric = val.replace(",", "").parse::<f64>().is_ok();
+                    let is_date = re_date.is_match(val);
+                    
+                    if is_numeric || is_date {
+                        data_like_count += 1;
+                    }
+                }
+            }
+            
+            if r > 0 && data_like_count > 0 {
+                data_start_row = r;
+                break;
+            }
+        }
+
+        // 테이블 전체가 문자열이라서 본문을 찾지 못했다면 2번째 줄(1)을 본문으로 지정
+        if data_start_row >= rows {
+            data_start_row = if rows > 1 { 1 } else { 0 };
+        }
+
+        // 1-2. 세로 헤더 경계 유추 로직 안정화
+        let mut col0_empty_header = false;
+        for r in 0..data_start_row {
+            if grid[r][0].trim().is_empty() {
+                col0_empty_header = true;
+            }
+        }
+        
+        if col0_empty_header {
+            let mut col0_text_only = true;
+            for r in data_start_row..rows {
+                let val = grid[r][0].trim();
+                if !val.is_empty() && (val.replace(",", "").parse::<f64>().is_ok() || re_date.is_match(val)) {
+                    col0_text_only = false;
+                    break;
+                }
+            }
+            if col0_text_only && rows > data_start_row {
+                data_start_col = 1;
+            }
+        }
+
+        // 🌟 [CRITICAL FIX] 본문 데이터가 오염되지 않도록, 셀 병합 해제(빈칸 채우기)는 오직 '헤더 영역'에만 적용합니다.
+        // colspan 대응 (가로 방향 확산)
+        for r in 0..data_start_row {
+            for c in 1..cols {
+                if grid[r][c].trim().is_empty() { 
+                    let left_val = grid[r][c-1].clone();
+                    if !left_val.trim().is_empty() { grid[r][c] = left_val; }
+                }
+            }
+        }
+        
+        // rowspan 대응 (세로 방향 확산)
+        for c in 0..cols {
+            for r in 1..data_start_row {
+                if grid[r][c].trim().is_empty() { 
+                    let top_val = grid[r-1][c].clone();
+                    if !top_val.trim().is_empty() { grid[r][c] = top_val; }
+                }
+            }
+        }
+
+        // 테이블 전체가 문자열이라서 본문을 찾지 못했다면 2번째 줄(1)을 본문으로 지정
+        if data_start_row >= rows {
+            data_start_row = if rows > 1 { 1 } else { 0 };
+        }
+
+        // 3-2. 세로 헤더 경계 유추 로직 안정화
+        let mut col0_empty_header = false;
+        for r in 0..data_start_row {
+            if grid[r][0].trim().is_empty() {
+                col0_empty_header = true;
+            }
+        }
+        
+        // [개선] 가로 헤더의 0번 열이 의도적으로 비워져 있고, 본문 0번 열이 순수 텍스트 카테고리일 때만 세로 헤더로 취급
+        if col0_empty_header {
+            let mut col0_text_only = true;
+            for r in data_start_row..rows {
+                let val = grid[r][0].trim();
+                if !val.is_empty() && (val.replace(",", "").parse::<f64>().is_ok() || re_date.is_match(val)) {
+                    col0_text_only = false;
+                    break;
+                }
+            }
+            if col0_text_only && rows > data_start_row {
+                data_start_col = 1;
+            }
+        }
+
+        let mut parsed_result = String::new();
+        
+        // 4. 경계선을 바탕으로 확정된 영역 안에서만 헤더 수집 및 데이터 매핑
+        for r in data_start_row..rows {
+            let mut row_has_data = false;
+            let mut row_result = String::new();
+            
+            for c in data_start_col..cols {
+                let val = grid[r][c].trim();
+                if !val.is_empty() {
+                    // 현재 셀 기준 확정된 '가로 헤더 영역(0 ~ data_start_row)'의 명칭만 수집
+                    let mut col_headers = Vec::new();
+                    for hr in 0..data_start_row {
+                        let h_val = grid[hr][c].trim();
+                        if !h_val.is_empty() && !col_headers.contains(&h_val) && h_val != val {
+                            col_headers.push(h_val);
+                        }
+                    }
+                    
+                    // 현재 셀 기준 확정된 '세로 헤더 영역(0 ~ data_start_col)'의 명칭만 수집
+                    let mut row_headers = Vec::new();
+                    for hc in 0..data_start_col {
+                        let h_val = grid[r][hc].trim();
+                        if !h_val.is_empty() && !row_headers.contains(&h_val) && h_val != val {
+                            row_headers.push(h_val);
+                        }
+                    }
+                    
+                    // 가로 세로 헤더 조합
+                    let mut combined_headers = col_headers;
+                    for rh in row_headers {
+                        if !combined_headers.contains(&rh) {
+                            combined_headers.push(rh);
+                        }
+                    }
+                    
+                    let clean_val = val.replace("\"", "'").replace("\n", " ");
+                    if combined_headers.is_empty() {
+                        row_result.push_str(&format!("\"Column_{}\": \"{}\", ", c, clean_val));
+                    } else {
+                        let clean_header = combined_headers.join(" - ").replace("\"", "'");
+                        row_result.push_str(&format!("\"{}\": \"{}\", ", clean_header, clean_val));
+                    }
+                    row_has_data = true;
+                }
+            }
+            if row_has_data {
+                let clean_row = row_result.trim_end_matches(", ");
+                parsed_result.push_str(&format!("{{ {} }}\n", clean_row));
+            }
+        }
+        
+        // 1행/1열 구조이거나 모든 매칭이 실패한 경우 단순 결합으로 Fallback
+        if parsed_result.trim().is_empty() {
+            let mut fallback = String::new();
+            for r in grid {
+                let mut row_json = String::new();
+                for (i, s) in r.into_iter().enumerate() {
+                    let val = s.trim();
+                    if !val.is_empty() {
+                        row_json.push_str(&format!("\"Column_{}\": \"{}\", ", i, val.replace("\"", "'").replace("\n", " ")));
+                    }
+                }
+                if !row_json.is_empty() {
+                    let clean_row = row_json.trim_end_matches(", ");
+                    fallback.push_str(&format!("{{ {} }}\n", clean_row));
+                }
+            }
+            return fallback;
+        }
+        parsed_result
+    }
+
+    match ext.as_str() {
+        "csv" => {
+            let mut rdr = csv::ReaderBuilder::new().has_headers(false).from_path(path).map_err(|e| anyhow::anyhow!("CSV error: {:?}", e))?;
+            let mut result = String::new();
+
+            let mut grid: Vec<Vec<String>> = Vec::new();
+            for result_row in rdr.records() {
+                if let Ok(record) = result_row {
+                    let row_str: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+                    grid.push(row_str);
+                }
+            }
+            if !grid.is_empty() {
+                let csv_parsed = parse_table_to_kv_string(grid);
+                result.push_str(&csv_parsed);
+            }
+            
+            Ok(result)
+        },
+        "xlsx" | "xls" => {
+            use calamine::{Reader, open_workbook_auto, DataType};
+            let mut excel = open_workbook_auto(path).map_err(|e| anyhow::anyhow!("Excel error: {:?}", e))?;
+            let mut result = String::new();
+
+            let sheets = excel.sheet_names().to_owned();
+            for sheet in sheets {
+                if let Some(Ok(range)) = excel.worksheet_range(&sheet) {
+                    let mut grid: Vec<Vec<String>> = Vec::new();
+                    for row in range.rows() {
+                        let row_str: Vec<String> = row.iter().map(|cell| {
+                            match cell {
+                                DataType::String(s) => s.to_string(),
+                                DataType::Float(f) => f.to_string(),
+                                DataType::Int(i) => i.to_string(),
+                                DataType::Bool(b) => b.to_string(),
+                                _ => "".to_string(),
+                            }
+                        }).collect();
+                        grid.push(row_str);
+                    }
+                    if !grid.is_empty() {
+                        let sheet_parsed = parse_table_to_kv_string(grid);
+                        result.push_str(&sheet_parsed);
+                        result.push('\n');
+                    }
+                }
+            }
+            Ok(result)
+        },
+        "docx" | "hwpx" => {
+            // DOCX와 HWPX는 모두 내부가 XML로 이루어진 ZIP 압축 파일입니다.
+            let file = std::fs::File::open(path)?;
+            let mut archive = zip::ZipArchive::new(file).map_err(|e| anyhow::anyhow!("Zip error: {:?}", e))?;
+            let mut result = String::new();
+
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i).unwrap();
+                let name = file.name().to_string();
+                
+                // docx: word/document.xml, hwpx: Contents/section*.xml
+                if (ext == "docx" && name == "word/document.xml") || 
+                   (ext == "hwpx" && name.starts_with("Contents/section") && name.ends_with(".xml")) {
+                    let mut xml_content = String::new();
+                    use std::io::Read;
+                    if file.read_to_string(&mut xml_content).is_ok() {
+                        let mut reader = quick_xml::Reader::from_str(&xml_content);
+                        
+                        loop {
+                            match reader.read_event() {
+                                Ok(quick_xml::events::Event::Text(e)) => {
+                                    if let Ok(text) = e.unescape() {
+                                        let trimmed = text.trim();
+                                        if !trimmed.is_empty() {
+                                            result.push_str(trimmed);
+                                            result.push(' ');
+                                        }
+                                    }
+                                },
+                                Ok(quick_xml::events::Event::Eof) => break,
+                                Err(_) => break,
+                                _ => (),
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(result)
+        },
+        "hwp" => {
+            // 구형 HWP 바이너리 포맷의 경우 순수 Rust에서 파편화된 스트링 풀만 추출합니다.
+            let bytes = std::fs::read(path)?;
+            let mut result = String::new();
+            let mut current_str = String::new();
+            
+            for b in bytes {
+                if (b >= 32 && b <= 126) || b > 127 {
+                    current_str.push(b as char);
+                } else {
+                    if current_str.len() > 5 {
+                        result.push_str(&current_str);
+                        result.push(' ');
+                    }
+                    current_str.clear();
+                }
+            }
+            Ok(format!("[주의: HWP 바이너리 포맷은 추출이 불안정할 수 있으므로 HWPX 변환을 권장합니다]\n{}", result))
+        },
+        "txt" | "md" | "json" => {
+            std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!(e))
+        },
+        _ => Err(anyhow::anyhow!("Unsupported file extension for text extraction: {}", ext)),
+    }
 }

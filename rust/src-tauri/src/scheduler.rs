@@ -400,7 +400,7 @@ impl StanzaPipeline {
             
         println!("[STANZA] ✅ LEMMA 모델 세션 빌드 완료! (소요 시간: {:.2}초)", lemma_start_time.elapsed().as_secs_f32());
 
-        println!("[STANZA] 🚀 모든 세션 로드 완료! (총 소요 시간: {:.2}초)", total_start_time.elapsed().as_secs_f32());
+        println!("[STANZA] 모든 세션 로드 완료! (총 소요 시간: {:.2}초)", total_start_time.elapsed().as_secs_f32());
         
         Ok(Self {
             preprocessor,
@@ -833,42 +833,56 @@ async fn process_task(
     let mut in_memory_doc: Option<StagedDoc> = None;
     let mut pending_page_update = None;
 
-    // --- Image Extraction & Masking Workflow ---
-    if task.r#type == "image_extraction" {
-        let image_path = task_data.get("image_path").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    // --- Image & Document Extraction & Masking Workflow ---
+    if task.r#type == "image_extraction" || task.r#type == "document_extraction" {
+        let file_path = task_data.get("file_path").or_else(|| task_data.get("image_path")).and_then(|s| s.as_str()).unwrap_or("").to_string();
         let uuids = task_data.get("uuids").and_then(|v| v.as_array());
 
-        if !image_path.is_empty() {
-            emit_term(&format!("[PROCESS] Task type is 'image_extraction'. Staging raw image in memory for OCR."));
+        if !file_path.is_empty() {
+            emit_term(&format!("[PROCESS] Task type is '{}'. Staging file in memory.", task.r#type));
             
-            use base64::{Engine, prelude::BASE64_STANDARD};
-            let b64_img = if let Ok(bytes) = std::fs::read(&image_path) {
-                format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&bytes))
-            } else {
-                format!("file://{}", image_path)
-            };
-
-            let filename = std::path::Path::new(&image_path)
+            let filename = std::path::Path::new(&file_path)
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("Uploaded Image")
+                .unwrap_or("Uploaded File")
                 .to_string();
 
-            let extracted_title = format!("[Image] {}", filename);
-            let extracted_desc = "Staged Image content".to_string();
+            let ext = std::path::Path::new(&filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("file")
+                .to_lowercase();
 
-            let safe_image_path = image_path.replace("\\", "/");
-            let pug_image_tag = format!("img(src=\"file://{}\", alt=\"{}\")", safe_image_path, filename);
+            let is_image = task.r#type == "image_extraction";
+            
+            // 🌟 이미지와 문서를 분기하여 메모리 캐시에 올립니다. (문서는 OCR 없이 즉시 텍스트 주입)
+            let (b64_data, pug_tag, extracted_title, extracted_desc, staged_text, pre_extracted_text) = if is_image {
+                use base64::{Engine, prelude::BASE64_STANDARD};
+                let b64 = if let Ok(bytes) = std::fs::read(&file_path) {
+                    format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&bytes))
+                } else {
+                    format!("file://{}", file_path)
+                };
+                let safe_path = file_path.replace("\\", "/");
+                let tag = format!("img(src=\"file://{}\", alt=\"{}\")", safe_path, filename);
+                (b64, tag, format!("[Image] {}", filename), "Staged Image content".to_string(), "Staged Image content".to_string(), "".to_string())
+            } else {
+                emit_term(&format!("[PROCESS] Extracting text from document: {}", filename));
+                let parsed_text = crate::parsing::extract_document_text(&file_path).unwrap_or_else(|e| format!("Document parsing error: {}", e));
+                let tag = format!("div(class=\"document-content\" data-filename=\"{}\")\n    | {}", filename, parsed_text.replace("\n", "\n    | "));
+                (format!("file://{}", file_path), tag, format!("[Document] {}", filename), "Parsed Document Content".to_string(), parsed_text.clone(), parsed_text)
+            };
 
             let draft_data = json!({
                 "id": task.id.clone(),
                 "type": "draft",
                 "link": format!("file://{}", filename),
-                "html": b64_img.clone(),
-                "yaml": pug_image_tag, 
+                "html": b64_data,
+                "yaml": pug_tag, 
                 "title": extracted_title.clone(),
                 "description": extracted_desc.clone(),
-                "text": "Staged Image content",
+                "text": staged_text,
+                "image_text": pre_extracted_text, // 🌟 문서인 경우 미리 추출한 텍스트를 OCR 결과처럼 주입하여 OCR을 패스하고 바로 마스킹 단계로 넘김
                 "updated_at": chrono::Utc::now().timestamp_millis(),
                 "mode": search_mode.clone(),
                 "masked_text": ""
@@ -878,7 +892,7 @@ async fn process_task(
             in_memory_doc = Some(StagedDoc {
                 id: task.id.clone(),
                 r#type: "draft".to_string(),
-                text: "Staged Image content".to_string(),
+                text: staged_text.clone(),
                 json_data: draft_data.to_string(),
                 vector: vec![0.0; 384],
                 from: task.from.clone(),
@@ -889,12 +903,7 @@ async fn process_task(
                 digest: "".to_string(),
             });
 
-            let hostname = "Local Image".to_string();
-            let ext = std::path::Path::new(&filename)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("file")
-                .to_lowercase();
+            let hostname = if is_image { "Local Image".to_string() } else { "Local Document".to_string() };
             let pathname = format!(".{}", ext);
             
             let cc_val = task.cc.clone();
@@ -903,18 +912,23 @@ async fn process_task(
             // 페이지 카운트 업데이트 정보 역시 대기열에 보관합니다.
             pending_page_update = Some((page_id, hostname, pathname, cc_val, task.from.clone(), team_id.clone(), task.bcc.clone(), task.r#ref.clone(), search_mode.clone()));
 
-            emit_term("[PROCESS] Image staged in memory. Triggering OCR workflow...");
+            if is_image {
+                emit_term("[PROCESS] Image staged in memory. Triggering OCR workflow...");
+            } else {
+                emit_term("[PROCESS] Document parsed and staged in memory. Triggering Masking workflow...");
+            }
+
             if let Some(obj) = task_data.as_object_mut() {
                 obj.insert("uuids".to_string(), json!([task.id.clone()]));
             }
         } else if uuids.is_some() && !uuids.unwrap().is_empty() {
-            emit_term("[PROCESS] Task type is 'image_extraction' with selected uuids. Bypassing staging.");
+            emit_term(&format!("[PROCESS] Task type is '{}' with selected uuids. Bypassing staging.", task.r#type));
         } else {
-             return Err(anyhow::anyhow!("Image path is missing."));
+             return Err(anyhow::anyhow!("File path is missing."));
         }
     }
 
-    if task.r#type == "mask_documents" || task.r#type == "image_extraction" {
+    if task.r#type == "mask_documents" || task.r#type == "image_extraction" || task.r#type == "document_extraction" {
         let model = {
             println!("[Scheduler] 🛡️ Attempting to acquire Model Lock...");
             let mut model_lock = model_mutex.lock().await;
@@ -953,8 +967,10 @@ async fn process_task(
 
         if task.r#type == "image_extraction" {
             emit_term("[PROCESS] Starting OCR workflow for selected images...");
+        } else if task.r#type == "document_extraction" {
+            emit_term("[PROCESS] Starting extraction and masking for selected documents...");
         } else {
-            emit_term("[PROCESS] Starting batch masking for selected documents...");
+            emit_term("[PROCESS] Starting batch masking for selected data...");
         }
 
         let uuids = task_data.get("uuids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
@@ -1012,11 +1028,12 @@ async fn process_task(
 
             if let Some(doc) = found_doc {
                 let is_img_task = task.r#type == "image_extraction";
+                let is_doc_task = task.r#type == "document_extraction";
                 let payload = json!({
                     "task_id": task.id,
-                    "category": if is_img_task { format!("OCR ({}/{})", idx + 1, total) } else { format!("Processing ({}/{})", idx + 1, total) },
-                    "summary": if is_img_task { format!("Performing Vision OCR on {}...", doc_id) } else { format!("Extracting data from draft {}...", doc_id) },
-                    "spinner": if is_img_task { "🔍" } else { "⠋" }
+                    "category": if is_img_task { format!("OCR ({}/{})", idx + 1, total) } else if is_doc_task { format!("File Parsing ({}/{})", idx + 1, total) } else { format!("Processing ({}/{})", idx + 1, total) },
+                    "summary": if is_img_task { format!("Performing Vision OCR on {}...", doc_id) } else if is_doc_task { format!("Parsing document {}...", doc_id) } else { format!("Extracting data from draft {}...", doc_id) },
+                    "spinner": if is_img_task { "🔍" } else if is_doc_task { "📄" } else { "⠋" }
                 });
                 log_task_progress(app_handle, &task.id, &payload);
                 emit_term(&format!("[EXTRACTION] Processing document: {} (Table: {})", doc_id, found_table));
@@ -1309,7 +1326,7 @@ async fn process_task(
                     // 🌟 [CRITICAL FIX] 순차적 로딩 강제 (Concurrency Deadlock 원천 차단)
                     // LLM(Granite) 백그라운드 로딩은 상단 최초 1회 로드로 이동되었으므로 즉시 ONNX를 로드합니다.
                     // =====================================================================
-                    emit_term("[EXTRACTION] 🧠 LLM 로딩 완료 확인. ONNX 로딩 진입...");
+                    emit_term("[EXTRACTION] LLM 로딩 완료 확인. ONNX 로딩 진입...");
                     
                     for current_lang in &detected_languages_vec {
                         // 이미 로드된 모델은 재로드하지 않고 스킵하여 속도 극대화 및 Box::leak 중복 메모리 누수 방지
@@ -1463,7 +1480,7 @@ async fn process_task(
                         }
 
                         if stanza_lang_dir.exists() {
-                            emit_term(&format!("[STANZA] 🧠 Loading Stanza ONNX models for '{}'...", stanza_lang_code));
+                            emit_term(&format!("[STANZA] Loading Stanza ONNX models for '{}'...", stanza_lang_code));
                             
                             let base_dir_clone = stanza_base_dir.clone();
                             let lang_code_clone = stanza_lang_code.to_string();
@@ -1516,7 +1533,7 @@ async fn process_task(
                         if norm_a == 0.0 || norm_b == 0.0 { 0.0 } else { dot_product / (norm_a * norm_b) }
                     }
 
-                    emit_term("[EXTRACTION] 🧠 [포그라운드] Embedding 모델 로드 및 벡터 유사도 사전 검증 시작...");
+                    emit_term("[EXTRACTION] [포그라운드] Embedding 모델 로드 및 벡터 유사도 사전 검증 시작...");
                     model.ensure_embedding().await?;
 
                     // 🌟 전역 상태 변수들 최상단으로 호이스팅 (1차, 2차 패스 공유)
@@ -1640,9 +1657,9 @@ async fn process_task(
                     if !doc_desc.trim().is_empty() { lines.push(doc_desc.trim().to_string()); }
 
                     // =====================================================================
-                    // 🌟 [PASS 2: NMS 기반 전체 추출] 동적 접두사 기반 벡터 검색 및 타이브레이커 적용
+                    // 🌟 [PASS 2: 기반 전체 추출] 동적 접두사 기반 벡터 검색 및 타이브레이커 적용
                     // =====================================================================
-                    emit_term("[EXTRACTION] ⚔️ [PASS 2] 텍스트 단위 NMS 배틀 및 전체 항목 추출 시작...");
+                    emit_term("[EXTRACTION] [PASS 2] 텍스트 단위 중복 제거 및 전체 항목 추출 시작...");
                     
                     lines = masked_text.lines()
                         .map(|s| s.trim().trim_start_matches('|').trim().to_string())
@@ -1656,7 +1673,7 @@ async fn process_task(
                     if !doc_title.trim().is_empty() { lines.push(doc_title.trim().to_string()); }
                     if !doc_desc.trim().is_empty() { lines.push(doc_desc.trim().to_string()); }
                         
-                    emit_term(&format!("[EXTRACTION] 문서 제목, 요약, 본문을 총 {}개의 라인으로 분할하여 순차 임베딩 및 NMS 배틀 진행 중...", lines.len()));
+                    emit_term(&format!("[EXTRACTION] 문서 제목, 요약, 본문을 총 {}개의 라인으로 분할하여 순차 임베딩 및 분석 진행 중...", lines.len()));
 
                     // 🌟 1. 다국어 접두사가 결합된 타겟(도메인) 및 서술어(verb_expression) 임베딩 장전
                     let mut target_biases_embs = Vec::new();
@@ -1871,14 +1888,23 @@ async fn process_task(
                         eval_spans.push(ChunkSpan { score: final_context_score, ..target.clone() });
                     }
 
-                    // 🌟 4. NMS BATTLE (Pass 3) - 오버랩 충돌 해결 (LLM Granite 기반)
-                    emit_term("  ⚔️ [PASS 3: NMS BATTLE] Resolving Overlaps across all targets using LLM Granite...");
+                    // 🌟 4. 항목 중복 제거 및 확정 (Pass 3) - 오버랩 충돌 해결
+                    emit_term("  [PASS 3: RESOLUTION] 중복 추출 항목 병합 및 최적화 진행 중...");
                     eval_spans.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
                     
                     let mut final_spans: Vec<ChunkSpan> = Vec::new();
                     let mut remaining_spans = eval_spans.clone();
+                    let nms_total_items = remaining_spans.len();
+                    let mut last_nms_percent = 0;
 
                     while !remaining_spans.is_empty() {
+                        let processed = nms_total_items - remaining_spans.len();
+                        let current_percent = if nms_total_items > 0 { (processed as f32 / nms_total_items as f32 * 100.0) as usize } else { 100 };
+                        if current_percent >= last_nms_percent + 10 {
+                            emit_term(&format!("    ⏳ 항목 중복 제거 진행 중... {}% 완료 ({} / {})", current_percent, processed, nms_total_items));
+                            last_nms_percent = current_percent;
+                        }
+
                         let current = remaining_spans.remove(0); // 가장 점수 높은 조각
                         let mut overlaps = Vec::new();
                         let mut next_remaining = Vec::new();
@@ -1894,7 +1920,7 @@ async fn process_task(
                         if overlaps.is_empty() {
                             for &t_idx in &current.target_indices {
                                 let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                emit_term(&format!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", current.text, context_name.replace("_", " "), current.score));
+                                println!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", current.text, context_name.replace("_", " "), current.score);
                             }
                             final_spans.push(current);
                         } else {
@@ -1922,11 +1948,11 @@ async fn process_task(
                                 let winner = unique_cands[0].clone();
                                 for &t_idx in &winner.target_indices {
                                     let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                    emit_term(&format!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", winner.text, context_name.replace("_", " "), winner.score));
+                                    println!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", winner.text, context_name.replace("_", " "), winner.score);
                                 }
                                 final_spans.push(winner);
                             } else {
-                                emit_term(&format!("    ⚖️ [SCORE NMS] 중첩 충돌 발생! 벡터 점수 기반 판별: {:?}", unique_texts));
+                                println!("    ⚖️ [SCORE RESOLUTION] 중첩 충돌 발생! 벡터 점수 기반 판별: {:?}", unique_texts);
                                 
                                 // 점수가 가장 높은 후보를 승자로 선택 (동점일 경우 텍스트 길이가 긴 것을 선호)
                                 let mut sorted_cands = unique_cands.clone();
@@ -1938,14 +1964,14 @@ async fn process_task(
                                 
                                 for &t_idx in &winner.target_indices {
                                     let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                    emit_term(&format!("    👑 [WINNER-SCORE] '{}' -> {} (Score: {:.4})", winner.text, context_name.replace("_", " "), winner.score));
+                                    println!("    👑 [WINNER-SCORE] '{}' -> {} (Score: {:.4})", winner.text, context_name.replace("_", " "), winner.score);
                                 }
                                 
                                 for (i, cand) in unique_cands.iter().enumerate() {
                                     if i != winner_idx {
                                         for &t_idx in &cand.target_indices {
                                             let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                            emit_term(&format!("    💀 [DEFEAT-SCORE] '{}' -> {} (Rejected, Score: {:.4})", cand.text, context_name.replace("_", " "), cand.score));
+                                            println!("    💀 [DEFEAT-SCORE] '{}' -> {} (Rejected, Score: {:.4})", cand.text, context_name.replace("_", " "), cand.score);
                                         }
                                     }
                                 }
@@ -1956,172 +1982,197 @@ async fn process_task(
 
                         remaining_spans = next_remaining;
                     }
+                    emit_term(&format!("    ✅ 중복 항목 제거 완료 (총 {}개 처리)", nms_total_items));
 
                     // 🌟 [추가] 4.5 인접 청크 동적 스팬 확장 (Dynamic Span Expansion)
                     // 물리적으로 인접한 청크들이 만들어낼 수 있는 모든 결합 경우의 수를 파생시켜 후보군에 추가합니다.
-                    emit_term("  🔗 [PASS 3.5: GAP BRIDGING] Dynamic Span Expansion for adjacent winner chunks...");
-                    final_spans.sort_by(|a, b| a.line_idx.cmp(&b.line_idx).then(a.start.cmp(&b.start)));
                     
-                    let mut expanded_spans: Vec<ChunkSpan> = final_spans.clone(); // 기존 단일 조각들 보존
-                    
-                    // 연속된 청크들을 그룹화
-                    let mut contiguous_groups: Vec<Vec<ChunkSpan>> = Vec::new();
-                    let mut current_group: Vec<ChunkSpan> = Vec::new();
-                    
-                    for span in &final_spans {
-                        if let Some(last) = current_group.last() {
-                            // 🌟 [CRITICAL FIX] 무분별한 이종 카테고리(예: 이름+주민번호) 결합을 막기 위해,
-                            // 타겟 도메인(target_indices)에 최소 1개 이상의 교집합이 존재할 때만 결합을 허용합니다.
-                            let has_common_target = last.target_indices.iter().any(|idx| span.target_indices.contains(idx));
-                            
-                            if last.line_idx == span.line_idx && last.end == span.start && has_common_target {
-                                // 🌟 두 청크 중 최소 하나는 '단어 1개'로 구성된 경우에만 연속성을 인정하여 과잉 그룹화 방지
-                                let last_word_count = last.end - last.start;
-                                let span_word_count = span.end - span.start;
-                                
-                                if last_word_count == 1 || span_word_count == 1 {
-                                    current_group.push(span.clone());
-                                    continue;
-                                }
-                            }
-                        }
-                        if !current_group.is_empty() {
-                            contiguous_groups.push(current_group.clone());
-                        }
-                        current_group = vec![span.clone()];
-                    }
-                    if !current_group.is_empty() {
-                        contiguous_groups.push(current_group);
-                    }
-                    
-                    // 🌟 [CRITICAL FIX] 결합 파생 조각만 별도로 격리하여 보관합니다.
+                    let link_val = json_data.get("link").and_then(|v| v.as_str()).unwrap_or("");
+                    let ext_for_tabular = std::path::Path::new(link_val).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                    let is_tabular = ext_for_tabular == "csv" || ext_for_tabular == "xlsx" || ext_for_tabular == "xls";
+
                     let mut expanded_only_spans: Vec<ChunkSpan> = Vec::new(); 
 
-                    // 🌟 [CRITICAL FIX] 2조각뿐만 아니라 최대 3조각(단어)까지 확장하여 고유명사가 파편화되는 것을 방지합니다.
-                    for group in contiguous_groups {
-                        let n = group.len();
-                        if n >= 2 {
-                            let max_len = n.min(3); // 최대 3조각 조합 허용
-                            for len in 2..=max_len {
-                                for start_idx in 0..=(n - len) {
-                                    let sub_group = &group[start_idx..(start_idx + len)];
+                    if is_tabular {
+                        emit_term("  🔗 [PASS 3.5: GAP BRIDGING] CSV/Excel 표 데이터이므로 인접 단어 결합(Span Expansion) 절차를 패스합니다.");
+                    } else {
+                        emit_term("  🔗 [PASS 3.5: GAP BRIDGING] Dynamic Span Expansion for adjacent winner chunks...");
+                        final_spans.sort_by(|a, b| a.line_idx.cmp(&b.line_idx).then(a.start.cmp(&b.start)));
+                        
+                        // 연속된 청크들을 그룹화
+                        let mut contiguous_groups: Vec<Vec<ChunkSpan>> = Vec::new();
+                        let mut current_group: Vec<ChunkSpan> = Vec::new();
+                        
+                        for span in &final_spans {
+                            if let Some(last) = current_group.last() {
+                                // 🌟 [CRITICAL FIX] 무분별한 이종 카테고리(예: 이름+주민번호) 결합을 막기 위해,
+                                // 타겟 도메인(target_indices)에 최소 1개 이상의 교집합이 존재할 때만 결합을 허용합니다.
+                                let has_common_target = last.target_indices.iter().any(|idx| span.target_indices.contains(idx));
+                                
+                                if last.line_idx == span.line_idx && last.end == span.start && has_common_target {
+                                    // 🌟 두 청크 중 최소 하나는 '단어 1개'로 구성된 경우에만 연속성을 인정하여 과잉 그룹화 방지
+                                    let last_word_count = last.end - last.start;
+                                    let span_word_count = span.end - span.start;
                                     
-                                    // 🌟 [CRITICAL FIX] 단순 공백 결합이 아닌 원본 텍스트 기반 정규식 발췌 로직 적용 (PASS 3.5)
-                                    // 결합되는 조각들 사이의 원래 띄어쓰기(다중 공백 등) 간격을 그대로 가져옵니다.
-                                    let combined_words: Vec<&str> = sub_group.iter().map(|s| s.text.as_str()).collect();
-                                    let mut regex_pattern = String::new();
-                                    for (i, word) in combined_words.iter().enumerate() {
-                                        let escaped_word = regex::escape(word).replace("\\ ", r"\s+");
-                                        if i > 0 { regex_pattern.push_str(r"\s+"); }
-                                        regex_pattern.push_str(&escaped_word);
+                                    if last_word_count == 1 || span_word_count == 1 {
+                                        current_group.push(span.clone());
+                                        continue;
                                     }
-                                    
-                                    let line_text = &lines[sub_group[0].line_idx];
-                                    let combined_text = if let Ok(re) = regex::Regex::new(&regex_pattern) {
-                                        if let Some(mat) = re.find(line_text) {
-                                            mat.as_str().to_string()
+                                }
+                            }
+                            if !current_group.is_empty() {
+                                contiguous_groups.push(current_group.clone());
+                            }
+                            current_group = vec![span.clone()];
+                        }
+                        if !current_group.is_empty() {
+                            contiguous_groups.push(current_group);
+                        }
+                        
+                        let total_groups = contiguous_groups.len();
+                        let mut last_expand_percent = 0;
+
+                        // 🌟 [CRITICAL FIX] 2조각뿐만 아니라 최대 3조각(단어)까지 확장하여 고유명사가 파편화되는 것을 방지합니다.
+                        for (g_idx, group) in contiguous_groups.into_iter().enumerate() {
+                            let current_percent = if total_groups > 0 { (g_idx as f32 / total_groups as f32 * 100.0) as usize } else { 100 };
+                            if current_percent >= last_expand_percent + 10 {
+                                emit_term(&format!("    ⏳ 인접 단어 결합(Span Expansion) 분석 중... {}% 완료 ({} / {})", current_percent, g_idx, total_groups));
+                                last_expand_percent = current_percent;
+                            }
+
+                            let n = group.len();
+                            if n >= 2 {
+                                let max_len = n.min(3); // 최대 3조각 조합 허용
+                                for len in 2..=max_len {
+                                    for start_idx in 0..=(n - len) {
+                                        let sub_group = &group[start_idx..(start_idx + len)];
+                                        
+                                        // 🌟 [CRITICAL FIX] 단순 공백 결합이 아닌 원본 텍스트 기반 정규식 발췌 로직 적용 (PASS 3.5)
+                                        // 결합되는 조각들 사이의 원래 띄어쓰기(다중 공백 등) 간격을 그대로 가져옵니다.
+                                        let combined_words: Vec<&str> = sub_group.iter().map(|s| s.text.as_str()).collect();
+                                        let mut regex_pattern = String::new();
+                                        for (i, word) in combined_words.iter().enumerate() {
+                                            let escaped_word = regex::escape(word).replace("\\ ", r"\s+");
+                                            if i > 0 { regex_pattern.push_str(r"\s+"); }
+                                            regex_pattern.push_str(&escaped_word);
+                                        }
+                                        
+                                        let line_text = &lines[sub_group[0].line_idx];
+                                        let combined_text = if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                            if let Some(mat) = re.find(line_text) {
+                                                mat.as_str().to_string()
+                                            } else {
+                                                combined_words.join(" ")
+                                            }
                                         } else {
                                             combined_words.join(" ")
-                                        }
-                                    } else {
-                                        combined_words.join(" ")
-                                    };
-                                    
-                                    // 🌟 파생된 거대 조각은 결합된 모든 조각들의 타겟(카테고리)을 합집합으로 가집니다.
-                                    let mut combined_targets = Vec::new();
-                                    for s in sub_group {
-                                        combined_targets.extend(s.target_indices.clone());
-                                    }
-                                    combined_targets.sort();
-                                    combined_targets.dedup();
-
-                                    // 🌟 [수정] Granite 임베딩을 호출하여 결합된 텍스트의 진짜 문맥 점수를 재계산합니다.
-                                    let combined_emb = model.get_embedding(combined_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
-                                    let mut real_max_score = 0.0_f32;
-                                    
-                                    for &t_idx in &combined_targets {
-                                        let b_score = cosine_similarity(&combined_emb, &target_biases_embs[t_idx]);
-                                        let p_score = cosine_similarity(&combined_emb, &target_prejs_embs[t_idx]);
-                                        
-                                        // 🌟 [CRITICAL FIX] "연임에 성공한", "바르셀로나에 맞서" 등 서술어/동사가 섞인 무의미한 확장을 원천 차단하기 위해 
-                                        // 결합된 텍스트에 대한 verb_penalty 가중치를 대폭 상향(0.10 -> 0.25)하여 NMS 경쟁에서 패배하도록 유도합니다.
-                                        let v_sim = cosine_similarity(&combined_emb, &verb_emb);
-                                        let verb_penalty = v_sim * 0.25; 
-                                        
-                                        let mut title_bonus = 0.0;
-                                        let t_sim = cosine_similarity(&combined_emb, &title_emb);
-                                        if t_sim > 0.0 { title_bonus = t_sim * 0.35; }
-                                        
-                                        let target_score = b_score - (p_score * 0.7) - verb_penalty + title_bonus;
-                                        if target_score > real_max_score {
-                                            real_max_score = target_score;
-                                        }
-                                    }
-
-                                    // 🌟 [CRITICAL FIX] 동사 패널티로 인해 점수가 폭락한 경우(예: '연임에 성공한'), 
-                                    // 기존 조각의 점수를 무조건 상속(90%)받지 못하도록 방어 코드를 추가합니다.
-                                    // 서술어 유사도(v_sim)가 특정 수치를 초과하면 상속을 완전히 끊어버려 탈락(Drop)을 유도합니다.
-                                    let v_sim_for_drop = cosine_similarity(&combined_emb, &verb_emb);
-                                    let final_score = if v_sim_for_drop > 0.40 {
-                                        real_max_score // 동사성이 강하면 상속 없이 순수 계산 점수만 반영 (NMS 탈락 유도)
-                                    } else {
-                                        let inherited_max = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
-                                        real_max_score.max(inherited_max * 0.9)
-                                    };
-                                    
-                                    // 0.3 커트라인을 넘지 못하면 아예 후보군에 넣지 않음
-                                    if final_score > 0.3 {
-                                        let new_span = ChunkSpan {
-                                            line_idx: sub_group[0].line_idx,
-                                            start: sub_group[0].start,
-                                            end: sub_group.last().unwrap().end,
-                                            text: combined_text.clone(),
-                                            target_indices: combined_targets,
-                                            score: final_score,
                                         };
                                         
-                                        emit_term(&format!("    🤝 [EXPANDED] {}조각 결합 파생: '{}' (재평가 스코어: {:.4})", len, combined_text, final_score));
-                                        expanded_only_spans.push(new_span);
-                                    } else {
-                                        emit_term(&format!("    🚫 [EXPANDED DROP] 동사/서술어 패널티로 결합 기각: '{}'", combined_text));
+                                        // 🌟 파생된 거대 조각은 결합된 모든 조각들의 타겟(카테고리)을 합집합으로 가집니다.
+                                        let mut combined_targets = Vec::new();
+                                        for s in sub_group {
+                                            combined_targets.extend(s.target_indices.clone());
+                                        }
+                                        combined_targets.sort();
+                                        combined_targets.dedup();
+
+                                        // 🌟 [수정] Granite 임베딩을 호출하여 결합된 텍스트의 진짜 문맥 점수를 재계산합니다.
+                                        let combined_emb = model.get_embedding(combined_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                                        let mut real_max_score = 0.0_f32;
+                                        
+                                        for &t_idx in &combined_targets {
+                                            let b_score = cosine_similarity(&combined_emb, &target_biases_embs[t_idx]);
+                                            let p_score = cosine_similarity(&combined_emb, &target_prejs_embs[t_idx]);
+                                            
+                                            // 🌟 [CRITICAL FIX] "연임에 성공한", "바르셀로나에 맞서" 등 서술어/동사가 섞인 무의미한 확장을 원천 차단하기 위해 
+                                            // 결합된 텍스트에 대한 verb_penalty 가중치를 대폭 상향(0.10 -> 0.25)하여 NMS 경쟁에서 패배하도록 유도합니다.
+                                            let v_sim = cosine_similarity(&combined_emb, &verb_emb);
+                                            let verb_penalty = v_sim * 0.25; 
+                                            
+                                            let mut title_bonus = 0.0;
+                                            let t_sim = cosine_similarity(&combined_emb, &title_emb);
+                                            if t_sim > 0.0 { title_bonus = t_sim * 0.35; }
+                                            
+                                            let target_score = b_score - (p_score * 0.7) - verb_penalty + title_bonus;
+                                            if target_score > real_max_score {
+                                                real_max_score = target_score;
+                                            }
+                                        }
+
+                                        // 🌟 [CRITICAL FIX] 동사 패널티로 인해 점수가 폭락한 경우(예: '연임에 성공한'), 
+                                        // 기존 조각의 점수를 무조건 상속(90%)받지 못하도록 방어 코드를 추가합니다.
+                                        // 서술어 유사도(v_sim)가 특정 수치를 초과하면 상속을 완전히 끊어버려 탈락(Drop)을 유도합니다.
+                                        let v_sim_for_drop = cosine_similarity(&combined_emb, &verb_emb);
+                                        let final_score = if v_sim_for_drop > 0.40 {
+                                            real_max_score // 동사성이 강하면 상속 없이 순수 계산 점수만 반영 (NMS 탈락 유도)
+                                        } else {
+                                            let inherited_max = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
+                                            real_max_score.max(inherited_max * 0.9)
+                                        };
+                                        
+                                        // 0.3 커트라인을 넘지 못하면 아예 후보군에 넣지 않음
+                                        if final_score > 0.3 {
+                                            let new_span = ChunkSpan {
+                                                line_idx: sub_group[0].line_idx,
+                                                start: sub_group[0].start,
+                                                end: sub_group.last().unwrap().end,
+                                                text: combined_text.clone(),
+                                                target_indices: combined_targets,
+                                                score: final_score,
+                                            };
+                                            
+                                            println!("    🤝 [EXPANDED] {}조각 결합 파생: '{}' (재평가 스코어: {:.4})", len, combined_text, final_score);
+                                            expanded_only_spans.push(new_span);
+                                        } else {
+                                            println!("    🚫 [EXPANDED DROP] 동사/서술어 패널티로 결합 기각: '{}'", combined_text);
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    
-                    // 🌟 [추가] 4.6 EXPANDED 결합 조각과 기존 조각 간의 중복(Overlap) 제거 (2차 NMS)
-                    emit_term("  🧹 [PASS 3.6: EXPANDED NMS CLEANUP] Resolving Overlaps between Expanded and Original chunks...");
-                    
-                    let mut all_pool = final_spans.clone();
-                    all_pool.extend(expanded_only_spans);
+                        emit_term(&format!("    ✅ 인접 단어 결합 분석 완료 (총 {} 그룹 처리)", total_groups));
 
-                    // 점수 기준 내림차순 정렬 (동점이면 텍스트 길이가 긴 것 우선)
-                    all_pool.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(b.text.len().cmp(&a.text.len())));
+                        // 🌟 [추가] 4.6 EXPANDED 결합 조각과 기존 조각 간의 중복(Overlap) 제거 (2차 중복 제거)
+                        emit_term("  🧹 [PASS 3.6: EXPANDED CLEANUP] 결합된 조각과 원본 조각 간의 최종 중복 항목을 정리합니다...");
+                        
+                        let mut all_pool = final_spans.clone();
+                        all_pool.extend(expanded_only_spans);
 
-                    let mut cleaned_spans: Vec<ChunkSpan> = Vec::new();
+                        // 점수 기준 내림차순 정렬 (동점이면 텍스트 길이가 긴 것 우선)
+                        all_pool.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(b.text.len().cmp(&a.text.len())));
 
-                    for cand in all_pool {
-                        let mut is_overlapped = false;
-                        for selected in &cleaned_spans {
-                            if cand.line_idx == selected.line_idx {
-                                if cand.start < selected.end && cand.end > selected.start {
-                                    is_overlapped = true;
-                                    break;
+                        let mut cleaned_spans: Vec<ChunkSpan> = Vec::new();
+                        let total_cleanup = all_pool.len();
+                        let mut last_cleanup_percent = 0;
+
+                        for (c_idx, cand) in all_pool.into_iter().enumerate() {
+                            let current_percent = if total_cleanup > 0 { (c_idx as f32 / total_cleanup as f32 * 100.0) as usize } else { 100 };
+                            if current_percent >= last_cleanup_percent + 10 {
+                                emit_term(&format!("    ⏳ 최종 정리 진행 중... {}% 완료 ({} / {})", current_percent, c_idx, total_cleanup));
+                                last_cleanup_percent = current_percent;
+                            }
+
+                            let mut is_overlapped = false;
+                            for selected in &cleaned_spans {
+                                if cand.line_idx == selected.line_idx {
+                                    if cand.start < selected.end && cand.end > selected.start {
+                                        is_overlapped = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if !is_overlapped {
+                                cleaned_spans.push(cand);
+                            } else {
+                                if let Some(overlap_target) = cleaned_spans.iter().find(|s| s.line_idx == cand.line_idx && cand.start < s.end && cand.end > s.start) {
+                                    println!("    🗑️ [CLEANUP] 조각 기각됨 (중첩 흡수): '{}' (Score: {:.4}) -> 승자: '{}' (Score: {:.4})", cand.text, cand.score, overlap_target.text, overlap_target.score);
                                 }
                             }
                         }
-
-                        if !is_overlapped {
-                            cleaned_spans.push(cand);
-                        } else {
-                            if let Some(overlap_target) = cleaned_spans.iter().find(|s| s.line_idx == cand.line_idx && cand.start < s.end && cand.end > s.start) {
-                                emit_term(&format!("    🗑️ [CLEANUP] 조각 기각됨 (중첩 흡수): '{}' (Score: {:.4}) -> 승자: '{}' (Score: {:.4})", cand.text, cand.score, overlap_target.text, overlap_target.score));
-                            }
-                        }
+                        emit_term(&format!("    ✅ 최종 항목 정리 완료 (총 {}개 검증)", total_cleanup));
+                        final_spans = cleaned_spans;
                     }
-                    
-                    let final_spans = cleaned_spans;
 
                     // 🌟 5. NMS 승자들을 바탕으로 매칭된 라인 및 valid_targets 재조립
                     // 구조: (target_name, base_target, target_desc, bias_keyword, prejudice, is_phase2, specific_line_text, specific_candidate_text)
@@ -2171,7 +2222,7 @@ async fn process_task(
                         }
                     }
 
-                    emit_term("[EXTRACTION] 🧠 2차 패스 벡터 유사도 검증 완료. 추론 준비...");
+                    emit_term("[EXTRACTION] 2차 패스 벡터 유사도 검증 완료. 추론 준비...");
                     
                     emit_term("[EXTRACTION] ✅ LLM 2차 추론 루프 시작.");
 
@@ -2881,13 +2932,13 @@ async fn process_task(
                             let _ = app_handle.emit("extraction-progress", &payload);
                             crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
 
-                            // LLM 로직 우회 후 NMS 추출 단어 직접 채택
+                            // LLM 로직 우회 후 후보 단어 직접 채택
                             let mut extracted_val = specific_candidate.clone();
                             let parsed = serde_json::json!({
                                 "is_target_mismatch": false
                             });
 
-                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 (LLM 우회 - NMS 👑 [WINNER/EXPANDED] 직접 채택: '{}')", base_target, extracted_val));
+                            emit_term(&format!("[DEBUG-OOM] [{}] 항목 추출 완료 (자체 채택: '{}')", base_target, extracted_val));
 
                             // 🌟 [CRITICAL FIX] 빈 값 반환 시 재시도 없이 해당 트랙을 즉시 종료합니다.
                             if extracted_val.is_empty() || extracted_val == "..." || extracted_val == "null" {
@@ -4002,7 +4053,7 @@ async fn process_task(
                                     }
                                 }
 
-                                // 🌟 [NMS BATTLE] 추출된 서브 청크 중첩을 LLM Granite 기반으로 해결합니다.
+                                // 🌟 [RESOLUTION] 추출된 서브 청크 중첩을 벡터 점수 기반으로 해결합니다.
                                 sub_chunks.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
                                 let mut final_sub_chunks: Vec<(usize, usize, String, f32, f32)> = Vec::new();
                                 let mut remaining_subs = sub_chunks.clone();
@@ -4038,7 +4089,7 @@ async fn process_task(
                                         if unique_cands.len() == 1 {
                                             final_sub_chunks.push(unique_cands[0].clone());
                                         } else {
-                                            emit_term(&format!("    ⚖️ [SCORE NMS] 수축 로테이션 오버랩 발생! 벡터 점수 기반 판별: {:?}", unique_texts));
+                                            println!("    ⚖️ [SCORE RESOLUTION] 수축 로테이션 오버랩 발생! 벡터 점수 기반 판별: {:?}", unique_texts);
                                             
                                             let mut sorted_cands = unique_cands.clone();
                                             // 튜플 구조: (start, end, chunk_text, base_score, verb_penalty)
@@ -4048,11 +4099,11 @@ async fn process_task(
                                             let winner = sorted_cands[0].clone();
                                             let winner_idx = unique_cands.iter().position(|x| x.2 == winner.2).unwrap_or(0);
 
-                                            emit_term(&format!("    👑 [WINNER-SCORE] 수축 로테이션 승리: '{}' (Score: {:.4})", winner.2, winner.3));
+                                            println!("    👑 [WINNER-SCORE] 수축 로테이션 승리: '{}' (Score: {:.4})", winner.2, winner.3);
                                             
                                             for (i, cand) in unique_cands.iter().enumerate() {
                                                 if i != winner_idx {
-                                                    emit_term(&format!("    💀 [DEFEAT-SCORE] 수축 로테이션 기각: '{}' (Score: {:.4})", cand.2, cand.3));
+                                                    println!("    💀 [DEFEAT-SCORE] 수축 로테이션 기각: '{}' (Score: {:.4})", cand.2, cand.3);
                                                 }
                                             }
                                             
