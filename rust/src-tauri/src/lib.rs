@@ -326,9 +326,11 @@ async fn start_file_drag(
                         .map(|s| s.to_string());
 
                     if let Some(masked_text) = masked_text_owned {
-                        // 마스킹된 텍스트가 정상적으로 존재하면 기존 yaml 값을 안전하게 덮어씁니다.
-                        if let Some(obj) = json_val.as_object_mut() {
-                            obj.insert("yaml".to_string(), json!(masked_text));
+                        // 🌟 [CRITICAL FIX] 마스킹 텍스트가 비어있지 않을 때만 안전하게 덮어씁니다.
+                        if !masked_text.trim().is_empty() {
+                            if let Some(obj) = json_val.as_object_mut() {
+                                obj.insert("yaml".to_string(), json!(masked_text));
+                            }
                         }
                     } else if is_image {
                         // 마스킹 객체가 분리되기 이전의 구버전 데이터 호환성을 위한 차선책(Fallback) 로직
@@ -365,8 +367,11 @@ async fn start_file_drag(
                             .map(|s| s.to_string());
 
                         if let Some(masked_text) = masked_text_owned {
-                            if let Some(obj) = json_val.as_object_mut() {
-                                obj.insert("yaml".to_string(), json!(masked_text));
+                            // 🌟 [CRITICAL FIX] 마스킹 텍스트가 비어있지 않을 때만 안전하게 덮어씁니다.
+                            if !masked_text.trim().is_empty() {
+                                if let Some(obj) = json_val.as_object_mut() {
+                                    obj.insert("yaml".to_string(), json!(masked_text));
+                                }
                             }
                         } else if is_image {
                             // 🌟 [CRITICAL FIX 1] 마스킹이 안 된 이미지는 포함하지 않고 건너뜀

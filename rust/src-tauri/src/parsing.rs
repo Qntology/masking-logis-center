@@ -34,7 +34,7 @@ pub fn sanitize_llm_input(text: &str) -> String {
 
 pub fn pre_clean_html(html: &str) -> String {
     // 1. 주석 제거
-    let re_comm = Regex::new(r"(?s)").unwrap();
+    let re_comm = Regex::new(r"(?s)<!--.*?-->").unwrap();
     let html = re_comm.replace_all(html, "");
 
     // 2. 불필요한 태그 및 내부 콘텐츠 통째로 제거
@@ -77,30 +77,20 @@ pub fn pre_clean_html(html: &str) -> String {
 
 pub fn extract_speedreader_content(html: &str) -> String {
     let document = Html::parse_document(html);
-    
-    // Speedreader가 주로 타겟팅하는 핵심 본문(Main Content) 셀렉터 우선순위 목록
     let selectors = [
-        "article",
-        "main",
-        "[role='main']",
-        ".main-content",
-        "#main-content",
-        ".post-content",
-        ".article-content",
-        "#article",
-        ".content"
+        "article", "main", "[role='main']", ".main-content", "#main-content", ".post-content", ".article-content", "#article", ".content"
     ];
-
     for sel_str in selectors.iter() {
         if let Ok(sel) = Selector::parse(sel_str) {
             if let Some(element) = document.select(&sel).next() {
-                // 핵심 본문 영역이 발견되면 해당 영역의 HTML만 반환하여 LLM 토큰 낭비 방지
-                return element.inner_html();
+                let inner = element.inner_html();
+                // 🌟 [CRITICAL FIX] 추출된 본문이 너무 짧거나 비어있는 껍데기 레이아웃이면 무시하고 다음 셀렉터를 찾습니다.
+                if inner.trim().len() > 50 {
+                    return inner;
+                }
             }
         }
     }
-    
-    // 지정된 핵심 본문 영역을 찾지 못했다면 원본 HTML을 그대로 반환하여 데이터 유실 방지
     html.to_string()
 }
 
