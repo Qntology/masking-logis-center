@@ -9,8 +9,6 @@ use tauri::Emitter;
 use std::sync::Arc;
 use once_cell::sync::Lazy;
 use serde_json::json;
-use regex::Regex;
-use reqwest::Url;
 
 // Global storage to keep browser alive
 pub(crate) static GLOBAL_BROWSER: Lazy<Arc<tokio::sync::Mutex<Option<Arc<Browser>>>>> = Lazy::new(|| {
@@ -27,50 +25,6 @@ pub struct BrowserStatus {
     pub is_supported: bool, // Chrome/Edge = Driverless Supported
     pub is_installed: bool,
     pub needs_driver: bool, // Firefox/Safari = True
-}
-
-// --- URL Patterns (Ported from JS) ---
-const CLIENT_PATTERNS: &[&str] = &[
-    "*.cafe24.com", "*.makeshop.co.kr", "admin.godo.co.kr", "*.godo.co.kr", "*.firstmall.kr",
-    "admin.sixshop.com", "sixshop.com", "admin.imweb.me", "www.imweb.me", "*.myshopify.com",
-    "sell.smartstore.naver.com", "wing.coupang.com", "soffice.11st.co.kr", "scm.gmarket.co.kr",
-    "scm.auction.co.kr", "seller.interpark.com", "seller.wemakeprice.com", "sell.ssg.com",
-    "marketplus.co.kr", "admin.shopby.co.kr", "creators.kakaomakers.com", "sell.storefarm.naver.com",
-    "partner.wemakeprice.com", "activeitzone.com", "demofran.com", "*.demofran.com",
-    "cafe24.com", "makeshop.co.kr", "godo.co.kr", "firstmall.kr", "myshopify.com"
-];
-
-const ADMIN_PATTERNS: &[&str] = &[
-    "*.cafe24.com", "*.makeshop.co.kr", "*.godomall.com", "*.godo.co.kr", "*.firstmall.kr",
-    "*.sixshop.com", "*.imweb.me", "*.myshopify.com", "*.shopby.co.kr", "*.wisa.co.kr",
-    "*.sellstore.co.kr", "*.squarespace.com", "*.storefarm.naver.com", "*.smartstore.naver.com",
-    "*.gmkt.kr", "*.gmarket.co.kr", "*.auction.co.kr", "*.interpark.com", "*.wemakeprice.com",
-    "*.ssg.com", "*.coupang.com", "*.11st.co.kr", "*.kakaomakers.com", "*.activeitzone.com", "*.demofran.com",
-    "demofran.com", "activeitzone.com"
-];
-
-fn is_shop(url: &str, patterns: &[&str]) -> bool {
-    let host = if let Ok(parsed_url) = Url::parse(url) {
-        parsed_url.host_str().unwrap_or("").to_lowercase()
-    } else {
-        url.to_lowercase()
-    };
-
-    if host.is_empty() { return false; }
-
-    for pattern in patterns {
-        let clean_pattern = pattern.to_lowercase();
-        let regex_str = format!("^{}$", clean_pattern.replace(".", "\\.").replace("*", ".*"));
-        if let Ok(re) = Regex::new(&regex_str) {
-            if re.is_match(&host) { return true; }
-        }
-        
-        let root = clean_pattern.replace("*.", "");
-        if host == root || host.ends_with(&format!(".{}", root)) {
-            return true;
-        }
-    }
-    false
 }
 
 pub async fn is_browser_reachable() -> bool {
@@ -147,12 +101,110 @@ pub(crate) static LAST_DETECTED_STATE: Lazy<Arc<tokio::sync::Mutex<DetectedState
     }))
 });
 
+// --- [모듈화 헬퍼 1] 현재 페이지(DOM)에서 포커스 및 URL 정보를 추출 ---
+async fn detect_active_page_info(page: &chromiumoxide::Page) -> Option<(String, String, bool, bool)> {
+    let script = r#"
+        (function() {
+            try {
+                window.__logis_tab_id = window.__logis_tab_id || Math.random().toString(36).substring(2);
+                return JSON.stringify({
+                    id: window.__logis_tab_id,
+                    url: window.location.href,
+                    focus: document.hasFocus ? document.hasFocus() : false,
+                    visible: document.visibilityState === 'visible'
+                });
+            } catch(e) { return null; }
+        })();
+    "#;
+
+    if let Ok(Ok(res)) = tokio::time::timeout(Duration::from_millis(300), page.evaluate(script)).await {
+        if let Some(val_str) = res.into_value::<String>().ok() {
+            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val_str) {
+                let tab_id = json_val.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let tab_url = json_val.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let has_focus = json_val.get("focus").and_then(|v| v.as_bool()).unwrap_or(false);
+                let is_visible = json_val.get("visible").and_then(|v| v.as_bool()).unwrap_or(false);
+                
+                return Some((tab_id, tab_url, has_focus, is_visible));
+            }
+        }
+    }
+    None
+}
+
+// --- [모듈화 헬퍼 2] 컨텍스트 메뉴 액션(마스킹 적용/복원)을 처리 ---
+async fn handle_context_menu_action(page: &chromiumoxide::Page, app_handle: &tauri::AppHandle) {
+    if let Ok(Ok(res)) = tokio::time::timeout(Duration::from_millis(300), page.evaluate("window.__logis_action || ''")).await {
+        if let Some(action) = res.into_value::<String>().ok() {
+            if action == "recover" || action == "mask" {
+                use tauri::Manager;
+                let store_opt = app_handle.state::<crate::AppState>().store.clone();
+                let mut dict = Vec::new();
+                
+                if let Some(store) = store_opt.lock().await.as_ref() {
+                    if let Ok(docs) = store.get_all_items("items", 10000, 0, Some("is_masked = true".to_string())).await {
+                        for doc in docs {
+                            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
+                                if let Some(matches) = json_val.get("masked").and_then(|m| m.get("matches")).and_then(|v| v.as_array()) {
+                                    for m in matches {
+                                        let original = m.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                                        let mnemonic_val = m.get("mnemonic").and_then(|v| v.as_str()).unwrap_or("");
+                                        let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                        if !original.is_empty() && !mnemonic_val.is_empty() {
+                                            dict.push(serde_json::json!({
+                                                "original": original,
+                                                "mnemonic": format!("[{}: {}]", name, mnemonic_val)
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                let dict_json = serde_json::to_string(&dict).unwrap_or("[]".to_string());
+                let js_code = format!(r#"
+                    (function() {{
+                        const dict = {};
+                        const direction = '{}';
+                        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                        let node;
+                        let changeCount = 0;
+                        while (node = walker.nextNode()) {{
+                            if (node.parentElement && (node.parentElement.tagName === 'SCRIPT' || node.parentElement.tagName === 'STYLE')) continue;
+                            
+                            let text = node.nodeValue;
+                            let changed = false;
+                            for (const item of dict) {{
+                                const target = direction === 'recover' ? item.mnemonic : item.original;
+                                const replacement = direction === 'recover' ? item.original : item.mnemonic;
+                                if (text.includes(target)) {{
+                                    text = text.split(target).join(replacement);
+                                    changed = true;
+                                }}
+                            }}
+                            if (changed) {{
+                                node.nodeValue = text;
+                                changeCount++;
+                            }}
+                        }}
+                        window.__logis_action = '';
+                        return changeCount;
+                    }})();
+                "#, dict_json, action);
+
+                let _ = page.evaluate(js_code).await;
+            }
+        }
+    }
+}
+
+// --- [모듈화된 Main 런타임] 브라우저 모니터링 루프 ---
 fn spawn_browser_monitor(browser: Arc<Browser>, app_handle: tauri::AppHandle) {
     tokio::spawn(async move {
         let mut last_detected_url = String::new();
-        let mut last_is_shop = false;
         let mut fail_count = 0; 
-        
         
         let mut last_focused_tab_id = String::new();
 
@@ -178,243 +230,93 @@ fn spawn_browser_monitor(browser: Arc<Browser>, app_handle: tauri::AppHandle) {
 
             let mut active_url = String::new();
             let mut active_tab_id = String::new();
-            let mut is_client = false;
-            let mut is_admin = false;
 
             let mut found_focus = false;
             let mut remembered_url = String::new();
             let mut remembered_visible = false;
 
-            let mut target_page = None; // 🌟 [추가] DOM 조작을 위해 현재 페이지 객체를 참조로 보관합니다.
+            let mut target_page = None;
 
+            // 1. 활성화된 탭 탐색
             for page in pages.iter().rev() {
-                let script = r#"
-                    (function() {
-                        try {
-                            window.__logis_tab_id = window.__logis_tab_id || Math.random().toString(36).substring(2);
-                            return JSON.stringify({
-                                id: window.__logis_tab_id,
-                                url: window.location.href,
-                                focus: document.hasFocus ? document.hasFocus() : false,
-                                visible: document.visibilityState === 'visible'
-                            });
-                        } catch(e) { return null; }
-                    })();
-                "#;
+                if let Some((tab_id, tab_url, has_focus, is_visible)) = detect_active_page_info(page).await {
+                    if tab_url.starts_with("devtools://") { continue; }
 
-                
-                let eval_result = tokio::time::timeout(Duration::from_millis(300), page.evaluate(script)).await;
+                    if has_focus {
+                        last_focused_tab_id = tab_id.clone();
+                        active_tab_id = tab_id.clone();
+                        active_url = tab_url.clone();
+                        found_focus = true;
+                        target_page = Some(page.clone());
+                        break;
+                    }
 
-                match eval_result {
-                    Ok(Ok(res)) => {
-                        if let Some(val_str) = res.into_value::<String>().ok() {
-                            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val_str) {
-                                let tab_id = json_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                let tab_url = json_val.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                                let has_focus = json_val.get("focus").and_then(|v| v.as_bool()).unwrap_or(false);
-
-                                
-                                if tab_url.starts_with("devtools://") {
-                                    continue;
-                                }
-
-                                if has_focus {
-                                    last_focused_tab_id = tab_id.to_string();
-                                    active_tab_id = tab_id.to_string();
-                                    active_url = tab_url.to_string();
-                                    found_focus = true;
-                                    target_page = Some(page.clone()); // 🌟 [추가] 타겟 페이지 할당
-                                    break;
-                                }
-
-                                if !last_focused_tab_id.is_empty() && tab_id == last_focused_tab_id {
-                                    remembered_url = tab_url.to_string();
-                                    remembered_visible = json_val.get("visible").and_then(|v| v.as_bool()).unwrap_or(false);
-                                    target_page = Some(page.clone()); // 🌟 [추가] 타겟 페이지 할당
-                                }
-                            }
-                        }
-                    },
-                    _ => continue, // 타임아웃이나 에러 발생 시 해당 탭은 무시하고 루프 유지
+                    if !last_focused_tab_id.is_empty() && tab_id == last_focused_tab_id {
+                        remembered_url = tab_url;
+                        remembered_visible = is_visible;
+                        target_page = Some(page.clone());
+                    }
                 }
             }
 
-            
+            // 2. 포커스를 못 찾았을 경우 Fallback 처리
             if !found_focus {
                 if !remembered_url.is_empty() && remembered_visible {
-                    // 장부에 적힌 탭이 아직 살아있고 화면에 "보이는(visible)" 상태일 때만 유지!
-                    // (만약 다른 탭(chrome:// 등)으로 이동했다면 기존 탭은 hidden이 되므로 이 조건을 통과하지 못함)
                     active_url = remembered_url;
                     active_tab_id = last_focused_tab_id.clone();
                 } else {
-                    // 장부에 적힌 탭이 닫혀버렸거나 백그라운드(hidden)로 밀려났음 -> 장부 초기화
                     last_focused_tab_id.clear();
                     
-                    // Fallback 1: 처음 켰거나 탭이 다 닫힌 경우, 화면에 보이는(visible) 첫 번째 탭을 강제 픽업하여 장부에 등록
                     for page in pages.iter().rev() {
-                        let script = r#"
-                            (function() {
-                                try {
-                                    window.__logis_tab_id = window.__logis_tab_id || Math.random().toString(36).substring(2);
-                                    return JSON.stringify({ id: window.__logis_tab_id, url: window.location.href, visible: document.visibilityState === 'visible' });
-                                } catch(e) { return null; }
-                            })();
-                        "#;
-                        if let Ok(Ok(res)) = tokio::time::timeout(Duration::from_millis(300), page.evaluate(script)).await {
-                            if let Some(val_str) = res.into_value::<String>().ok() {
-                                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val_str) {
-                                    let tab_url = json_val.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                                    
-                                    
-                                    if tab_url.starts_with("devtools://") {
-                                        continue;
-                                    }
+                        if let Some((tab_id, tab_url, _, is_visible)) = detect_active_page_info(page).await {
+                            if tab_url.starts_with("devtools://") { continue; }
 
-                                    let is_visible = json_val.get("visible").and_then(|v| v.as_bool()).unwrap_or(false);
-                                    if is_visible {
-                                        let tab_id = json_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                        
-                                        last_focused_tab_id = tab_id.to_string(); // 장부 각인!
-                                        active_tab_id = tab_id.to_string();
-                                        active_url = tab_url.to_string();
-                                        target_page = Some(page.clone()); // 🌟 [추가] 타겟 페이지 할당
-                                        break;
-                                    }
-                                }
+                            if is_visible {
+                                last_focused_tab_id = tab_id.clone();
+                                active_tab_id = tab_id.clone();
+                                active_url = tab_url;
+                                target_page = Some(page.clone());
+                                break;
                             }
                         }
                     }
 
-                    
-                    // visible 상태를 읽어올 수 없는 경우, 엉뚱한 백그라운드 탭을 잡지 않도록 
-                    // 명시적으로 "about:blank"를 주어 프론트엔드가 즉시 번개 버튼(extract)을 숨기도록 유도합니다!
                     if active_url.is_empty() {
                         active_url = "about:blank".to_string();
                     }
                 }
             }
 
-            // 🌟 [추가] 우클릭 컨텍스트 메뉴에서 선택된 액션(recover/mask)이 있는지 감지하고 DB와 연동하여 DOM 치환
+            // 3. 컨텍스트 메뉴 조작 확인
             if let Some(page) = target_page {
-                if let Ok(Ok(res)) = tokio::time::timeout(Duration::from_millis(300), page.evaluate("window.__logis_action || ''")).await {
-                    if let Some(action) = res.into_value::<String>().ok() {
-                        if action == "recover" || action == "mask" {
-                            use tauri::Manager;
-                            let store_opt = app_handle.state::<crate::AppState>().store.clone();
-                            let mut dict = Vec::new();
-                            if let Some(store) = store_opt.lock().await.as_ref() {
-                                // DB에서 마스킹 처리가 완료된 문서들을 가져옵니다.
-                                if let Ok(docs) = store.get_all_items("items", 10000, 0, Some("is_masked = true".to_string())).await {
-                                    for doc in docs {
-                                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&doc.json_data) {
-                                            if let Some(matches) = json_val.get("masked").and_then(|m| m.get("matches")).and_then(|v| v.as_array()) {
-                                                for m in matches {
-                                                    let original = m.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                                                    let mnemonic_val = m.get("mnemonic").and_then(|v| v.as_str()).unwrap_or("");
-                                                    let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                                    if !original.is_empty() && !mnemonic_val.is_empty() {
-                                                        dict.push(serde_json::json!({
-                                                            "original": original,
-                                                            "mnemonic": format!("[{}: {}]", name, mnemonic_val)
-                                                        }));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            let dict_json = serde_json::to_string(&dict).unwrap_or("[]".to_string());
-                            let js_code = format!(r#"
-                                (function() {{
-                                    const dict = {};
-                                    const direction = '{}';
-                                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-                                    let node;
-                                    let changeCount = 0;
-                                    while (node = walker.nextNode()) {{
-                                        if (node.parentElement && (node.parentElement.tagName === 'SCRIPT' || node.parentElement.tagName === 'STYLE')) continue;
-                                        
-                                        let text = node.nodeValue;
-                                        let changed = false;
-                                        for (const item of dict) {{
-                                            const target = direction === 'recover' ? item.mnemonic : item.original;
-                                            const replacement = direction === 'recover' ? item.original : item.mnemonic;
-                                            if (text.includes(target)) {{
-                                                text = text.split(target).join(replacement);
-                                                changed = true;
-                                            }}
-                                        }}
-                                        if (changed) {{
-                                            node.nodeValue = text;
-                                            changeCount++;
-                                        }}
-                                    }}
-                                    window.__logis_action = '';
-                                    return changeCount;
-                                }})();
-                            "#, dict_json, action);
-
-                            let _ = page.evaluate(js_code).await;
-                        }
-                    }
-                }
+                handle_context_menu_action(&page, &app_handle).await;
             }
 
-            // URL 판별 로직
-            if !active_url.is_empty() && active_url != "about:blank" && !active_url.starts_with("chrome://") && !active_url.starts_with("edge://") {
-                is_client = is_shop(&active_url, CLIENT_PATTERNS);
-                is_admin = is_shop(&active_url, ADMIN_PATTERNS);
-            }
+            // 4. URL 판별 (사용하지 않는 Shop 패턴 매칭 로직 제거됨)
 
-            let current_is_shop = is_client || is_admin;
-
-            // 전역 상태에 탭 ID와 URL 저장
             {
                 let mut state = LAST_DETECTED_STATE.lock().await;
                 state.url = active_url.clone();
                 state.tab_id = active_tab_id.clone();
-                state.is_client = is_client;
-                state.is_admin = is_admin;
+                state.is_client = false;
+                state.is_admin = false;
             }
 
-            // UI 통신: URL이 변경되지 않았더라도 브라우저가 물리적으로 살아있다면 
-            // 프론트엔드에 "running" 상태와 현재 URL 정보를 매 루프(800ms)마다 강제 동기화합니다.
-            // URL이 비어있어도(about:blank) status가 running이면 Launch 버튼은 숨겨져야 합니다.
+            // 5. 프론트엔드 UI 상태 동기화
             let payload = json!({
                 "url": active_url.clone(),
-                "is_client": is_client,
-                "is_admin": is_admin,
+                "is_client": false,
+                "is_admin": false,
                 "status": "running",
                 "hide_button": true
             });
             
-            // URL 변경 시 즉시 알림 및 3회 루프마다 생존 신호(Heartbeat) 발송
-            if active_url != last_detected_url || current_is_shop != last_is_shop {
+            if active_url != last_detected_url {
                 let _ = app_handle.emit("browser-match-found", &payload);
                 let _ = app_handle.emit("browser-status", &payload);
                 
                 last_detected_url = active_url;
-                last_is_shop = current_is_shop;
-                
-                if current_is_shop {
-                    println!("[AUTO] Active Shop Context Sync: {}", last_detected_url);
-                    let tmp_root = crate::utils::paths::get_app_tmp_root(None);
-                    let _ = std::fs::create_dir_all(&tmp_root);
-                    let shared_data = json!({
-                        "origin": last_detected_url,
-                        "type": "",
-                        "step": "idle",
-                        "session_id": "",
-                        "kv_path": crate::utils::paths::get_kv_dir(None).to_string_lossy().into_owned()
-                    });
-                    if let Ok(json_str) = serde_json::to_string(&shared_data) {
-                        let _ = std::fs::write(tmp_root.join("index.json"), json_str);
-                    }
-                }
             } else {
-                // 변경이 없더라도 브라우저가 실행 중임을 UI에 주기적으로 알려 플리커링 방지
                 let _ = app_handle.emit("browser-status", &payload);
             }
             tokio::time::sleep(Duration::from_millis(800)).await; 

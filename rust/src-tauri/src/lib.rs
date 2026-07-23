@@ -5,6 +5,7 @@ pub mod parsing;
 mod logic;
 mod scheduler;
 pub mod analytic; 
+pub mod stanza;
 
 pub mod models;
 pub mod utils;

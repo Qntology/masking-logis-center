@@ -32,384 +32,6 @@ use tokio::sync::Notify;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 
-// 🌟 [추가] Stanza ONNX 모델(pos.onnx, depparse.onnx) 입력용 전처리 모듈 (Vocab -> ndarray Tensor)
-use std::collections::HashMap;
-use std::path::Path;
-use ndarray::Array2;
-use onnxruntime::environment::Environment;
-use onnxruntime::session::Session;
-use onnxruntime::GraphOptimizationLevel;
-
-#[derive(Debug, Clone)]
-pub struct StanzaPreprocessor {
-    pub word_vocab: HashMap<String, i64>,
-    pub char_vocab: HashMap<char, i64>,
-    pub id_to_char: HashMap<i64, char>, // 🌟 Lemma 복원용 역방향 맵 추가
-    pub upos_vocab: Vec<String>,
-    pub word_unk_id: i64,
-    pub char_unk_id: i64,
-}
-
-impl StanzaPreprocessor {
-    pub fn new<P: AsRef<Path>>(vocab_path: P) -> anyhow::Result<Self> {
-        let data = std::fs::read_to_string(vocab_path.as_ref())
-            .map_err(|e| anyhow::anyhow!("Failed to read vocab.json: {}", e))?;
-        
-        let json_val: serde_json::Value = serde_json::from_str(&data)
-            .map_err(|e| anyhow::anyhow!("Failed to parse vocab.json as JSON: {}", e))?;
-            
-        let mut word_vocab: HashMap<String, i64> = HashMap::new();
-        let mut char_vocab: HashMap<char, i64> = HashMap::new();
-        let mut id_to_char: HashMap<i64, char> = HashMap::new();
-        let mut upos_vocab = Vec::new();
-        
-        // 🌟 1. Word Vocab 파싱 (기존 로직 보존 및 통합)
-        let word_target = if let Some(pos) = json_val.get("pos") {
-            pos.get("word").unwrap_or(&json_val)
-        } else if let Some(tokenize) = json_val.get("tokenize") {
-            tokenize.get("main").unwrap_or(&json_val)
-        } else {
-            &json_val
-        };
-
-        Self::extract_vocab_from_node(word_target, &mut word_vocab);
-
-        // 🌟 2. Char Vocab 파싱 (Stanza OOV 극복의 핵심 + Lemma 지원)
-        let char_target = if let Some(lemma) = json_val.get("lemma") {
-            lemma.get("char").unwrap_or(&serde_json::Value::Null)
-        } else if let Some(pos) = json_val.get("pos") {
-            pos.get("char").unwrap_or(&serde_json::Value::Null)
-        } else if let Some(ner) = json_val.get("ner") {
-            ner.get("char").unwrap_or(&serde_json::Value::Null)
-        } else {
-            &serde_json::Value::Null
-        };
-
-        let mut temp_char_vocab: HashMap<String, i64> = HashMap::new();
-        Self::extract_vocab_from_node(char_target, &mut temp_char_vocab);
-        
-        for (k, v) in temp_char_vocab {
-            if let Some(c) = k.chars().next() {
-                char_vocab.insert(c, v);
-                id_to_char.insert(v, c); // 🌟 원형(Lemma) 문자열 복원용 생성
-            }
-        }
-
-        // 🌟 3. UPOS Vocab 동적 파싱 (하드코딩을 파괴하고 파일에서 인덱스 배열 정답을 그대로 수집)
-        if let Some(pos_node) = json_val.get("pos") {
-            if let Some(upos_arr) = pos_node.get("upos").and_then(|v| v.as_array()) {
-                for v in upos_arr {
-                    if let Some(s) = v.as_str() {
-                        upos_vocab.push(s.to_string());
-                    }
-                }
-            }
-        }
-
-        if word_vocab.is_empty() {
-            return Err(anyhow::anyhow!("vocab.json 내부에서 단어 매핑(Vocab) 구조를 찾을 수 없습니다."));
-        }
-        
-        let word_unk_id = *word_vocab.get("<unk>")
-            .or_else(|| word_vocab.get("<UNK>"))
-            .or_else(|| word_vocab.get("[UNK]"))
-            .unwrap_or(&0);
-            
-        let char_unk_id = *char_vocab.get(&'<').unwrap_or(&0); // '<unk>' 처리용
-        
-        Ok(Self { word_vocab, char_vocab, id_to_char, upos_vocab, word_unk_id, char_unk_id })
-    }
-
-    // 🌟 중복된 JSON 파싱 로직을 공통 헬퍼 함수로 분리
-    fn extract_vocab_from_node(target_value: &serde_json::Value, vocab: &mut HashMap<String, i64>) {
-        if let Some(arr) = target_value.as_array() {
-            for (i, v) in arr.iter().enumerate() {
-                if let Some(s) = v.as_str() {
-                    vocab.insert(s.to_string(), i as i64);
-                } else if let Some(obj) = v.as_object() {
-                    let word_opt = obj.get("word").and_then(|w| w.as_str());
-                    let id_opt = obj.get("id").and_then(|id| id.as_i64()).unwrap_or(i as i64);
-                    if let Some(w) = word_opt {
-                        vocab.insert(w.to_string(), id_opt);
-                    } else {
-                        for (k, val) in obj {
-                            if let Some(id_val) = val.get("id").and_then(|id| id.as_i64()) {
-                                vocab.insert(k.clone(), id_val);
-                            } else if let Some(id_val) = val.as_i64() {
-                                vocab.insert(k.clone(), id_val);
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            let target_obj = if let Some(model) = target_value.get("model") {
-                model.get("vocab").and_then(|v| v.as_object())
-            } else if let Some(vocab_node) = target_value.get("vocab") {
-                vocab_node.as_object()
-            } else if let Some(id_to_string) = target_value.get("id_to_string") {
-                if let Some(obj) = id_to_string.as_object() {
-                    for (id_str, word_val) in obj {
-                        if let (Ok(parsed_id), Some(w)) = (id_str.parse::<i64>(), word_val.as_str()) {
-                            vocab.insert(w.to_string(), parsed_id);
-                        }
-                    }
-                }
-                None
-            } else {
-                target_value.as_object()
-            };
-
-            if let Some(obj) = target_obj {
-                for (k, v) in obj {
-                    if let Some(id) = v.as_i64() {
-                        vocab.insert(k.clone(), id);
-                    } else if let Some(s) = v.as_str() {
-                        if let Ok(parsed_id) = s.parse::<i64>() {
-                            vocab.insert(k.clone(), parsed_id);
-                        }
-                    } else if let Some(id_val) = v.get("id").and_then(|i| i.as_i64()) {
-                        vocab.insert(k.clone(), id_val);
-                    } else if v.is_object() || v.is_array() {
-                        if let Some(id_val) = v.get("id").and_then(|i| i.as_i64()) {
-                            vocab.insert(k.clone(), id_val);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// 품사 태깅(pos.onnx)을 위해 분할된 단어 배열을 Word 텐서와 Wordchar(길이) 텐서로 변환합니다.
-    pub fn encode_to_tensor(&self, words: &[&str], session: &Session<'static>) -> Result<Vec<ndarray::ArrayD<i64>>, anyhow::Error> {
-        let seq_len = words.len();
-        
-        // 🌟 [CRITICAL FIX] 빈 배열(seq_len == 0)이 주어지면 ONNX LSTM Reshape 노드에서 치명적인 에러가 발생하므로 사전에 차단합니다.
-        if seq_len == 0 {
-            return Err(anyhow::anyhow!("입력된 단어 배열이 비어있어 ONNX 텐서 변환을 수행할 수 없습니다."));
-        }
-
-        let mut word_ids = Vec::with_capacity(seq_len);
-        let mut wlen_vec = Vec::with_capacity(seq_len);
-        let mut oidx_vec = Vec::with_capacity(seq_len);
-        
-        // 🌟 [CRITICAL FIX] Python Export 시 charmodel의 시퀀스 길이가 32로 고정(Hardcoded)되어 있습니다.
-        // 동적 길이를 사용하면 ONNX Runtime에서 차원 불일치(Shape Mismatch) 에러가 발생하므로 32로 강제 고정합니다.
-        let max_word_len = 32; 
-        
-        let mut chars_raw = ndarray::Array2::<i64>::zeros((seq_len, max_word_len));
-        let mut chars_mask_raw = ndarray::Array2::<i64>::zeros((seq_len, max_word_len));
-
-        for (w_idx, w) in words.iter().enumerate() {
-            let token_id = *self.word_vocab.get(*w)
-                .or_else(|| self.word_vocab.get(&w.to_lowercase()))
-                .unwrap_or(&self.word_unk_id);
-            word_ids.push(token_id);
-            
-            let w_chars: Vec<char> = w.chars().collect();
-            // 🌟 [CRITICAL FIX] 32자를 초과하는 단어 길이는 ONNX Gather 연산 시 Out of Bounds 에러를 유발하므로 32로 제한(Clamp)합니다.
-            let safe_wlen = w_chars.len().min(32);
-            wlen_vec.push(safe_wlen as i64);
-            oidx_vec.push(w_idx as i64);
-            
-            for (c_idx, c) in w_chars.iter().take(32).enumerate() {
-                let c_id = *self.char_vocab.get(c).unwrap_or(&self.char_unk_id);
-                chars_raw[[w_idx, c_idx]] = c_id;
-                chars_mask_raw[[w_idx, c_idx]] = 1; // ONNX Runtime 0.0.14 대응을 위해 bool을 1/0 i64로 강제 래핑
-            }
-        }
-        
-        let word_tensor = ndarray::Array2::from_shape_vec((1, seq_len), word_ids)
-            .map_err(|e| anyhow::anyhow!("Failed to build word tensor: {}", e))?.into_dyn();
-        let mask_tensor = ndarray::Array2::<i64>::ones((1, seq_len)).into_dyn();
-        let chars_tensor = chars_raw.into_dyn();
-        let chars_mask_tensor = chars_mask_raw.into_dyn();
-        let pre_tensor = ndarray::Array2::<i64>::zeros((1, seq_len)).into_dyn();
-        let oidx_tensor = ndarray::Array1::from_vec(oidx_vec).into_dyn();
-        let slen_tensor = ndarray::Array1::from_vec(vec![seq_len as i64]).into_dyn();
-        let wlen_tensor = ndarray::Array1::from_vec(wlen_vec).into_dyn();
-        
-        // 🌟 [개선] 휴리스틱(조건부) 탐색을 배제하고 ONNX 파이프라인에서 튀어나올 수 있는 모든 변형 스키마를 1:1 Key-Value 매핑
-        let mut tensor_pool = std::collections::HashMap::new();
-        tensor_pool.insert("word", word_tensor.clone());
-        tensor_pool.insert("word_mask", mask_tensor.clone());
-        tensor_pool.insert("mask", mask_tensor.clone());
-        
-        tensor_pool.insert("wordchar", chars_tensor.clone());
-        tensor_pool.insert("chars", chars_tensor.clone());
-        tensor_pool.insert("char", chars_tensor.clone());
-        
-        tensor_pool.insert("wordchar_mask", chars_mask_tensor.clone());
-        tensor_pool.insert("chars_mask", chars_mask_tensor.clone());
-        tensor_pool.insert("char_mask", chars_mask_tensor.clone());
-        
-        tensor_pool.insert("pretrained", pre_tensor.clone());
-        tensor_pool.insert("pre", pre_tensor.clone());
-        
-        let pos_tensor = ndarray::Array2::<i64>::zeros((1, seq_len)).into_dyn();
-        tensor_pool.insert("pos", pos_tensor.clone());
-        tensor_pool.insert("upos", pos_tensor.clone());
-        
-        tensor_pool.insert("word_len", wlen_tensor.clone());
-        tensor_pool.insert("wordchar_len", wlen_tensor.clone());
-        tensor_pool.insert("wlen", wlen_tensor.clone());
-        
-        tensor_pool.insert("oidx", oidx_tensor.clone());
-        tensor_pool.insert("orig", oidx_tensor.clone());
-        
-        tensor_pool.insert("seq_lengths", slen_tensor.clone());
-        tensor_pool.insert("seq", slen_tensor.clone());
-        tensor_pool.insert("slen", slen_tensor.clone());
-
-        let mut final_inputs = Vec::new();
-
-        for input_meta in &session.inputs {
-            let exact_name = input_meta.name.clone();
-            
-            // 모델 메타데이터의 정확한 이름(Exact Key)으로만 풀에서 텐서를 꺼내옵니다.
-            if let Some(tensor) = tensor_pool.get(exact_name.as_str()) {
-                final_inputs.push(tensor.clone());
-            } else {
-                // 모델을 있는 그대로 존중하므로, 사전에 정의되지 않은 입력을 모델이 요구할 경우 유추하지 않고 즉시 에러를 반환합니다.
-                return Err(anyhow::anyhow!("ONNX Schema 불일치: 모델이 알 수 없는 입력({})을 요구합니다.", exact_name));
-            }
-        }
-        
-        Ok(final_inputs)
-    }
-}
-
-static STANZA_ENV: once_cell::sync::Lazy<&'static onnxruntime::environment::Environment> = once_cell::sync::Lazy::new(|| {
-    Box::leak(Box::new(
-        onnxruntime::environment::Environment::builder()
-            .with_name("stanza_global_env")
-            .build()
-            .expect("Failed to initialize global ONNX Runtime Environment")
-    ))
-});
-
-// 🌟 [추가] ONNX Runtime 세션을 초기화하고 보유하는 파이프라인 구조체
-pub struct StanzaPipeline {
-    pub preprocessor: StanzaPreprocessor,
-    pub tokenize_session: Session<'static>,
-    pub pos_session: Session<'static>,
-    pub lemma_session: Session<'static>, // 🌟 Lemma 세션 추가
-}
-
-// (로컬 라이브러리 onnxruntime crate 자체에 Send/Sync를 구현하였으므로 더 이상 unsafe 래퍼가 필요 없습니다!)
-
-impl StanzaPipeline {
-    /// Stanza 파이프라인에 필요한 필수 모델 파일들의 존재 여부를 체크하고,
-    /// 디렉터리나 파일이 없을 경우 원격 서버에서 자동으로 다운로드합니다.
-    pub async fn ensure_models_downloaded<P: AsRef<Path>>(lang_dir: P, lang: &str) -> anyhow::Result<()> {
-        let dir = lang_dir.as_ref();
-        if !dir.exists() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| anyhow::anyhow!("Stanza 모델 디렉터리 생성 실패 {:?}: {}", dir, e))?;
-        }
-
-        let required_files = [
-            "vocab.json",
-            "tokenizer.onnx",
-            "pos.onnx",
-            "lemma.onnx",
-        ];
-
-        // Stanza ONNX 모델 파일 저장 원격 Base URL
-        let remote_base_url = format!("https://huggingface.co/stanfordnlp/stanza-{}/resolve/main/onnx", lang);
-
-        for file_name in required_files.iter() {
-            let file_path = dir.join(file_name);
-            if !file_path.exists() {
-                println!("[STANZA] 필수 모델 파일이 존재하지 않습니다: {:?}. 다운로드를 시작합니다...", file_path);
-                let download_url = format!("{}/{}", remote_base_url, file_name);
-
-                let response = reqwest::get(&download_url).await
-                    .map_err(|e| anyhow::anyhow!("{} 다운로드 요청 실패: {}", file_name, e))?;
-
-                if !response.status().is_success() {
-                    return Err(anyhow::anyhow!("{} 다운로드 실패 (HTTP 상태 코드: {})", file_name, response.status()));
-                }
-
-                let bytes = response.bytes().await
-                    .map_err(|e| anyhow::anyhow!("{} 응답 데이터 읽기 실패: {}", file_name, e))?;
-
-                std::fs::write(&file_path, &bytes)
-                    .map_err(|e| anyhow::anyhow!("{} 파일 저장 실패 ({:?}): {}", file_name, file_path, e))?;
-
-                println!("[STANZA] ✅ 다운로드 완료: {:?}", file_path);
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn new<P: AsRef<Path>>(base_dir: P, lang: &str) -> anyhow::Result<Self> {
-        let lang_dir = base_dir.as_ref().join(lang);
-
-        // 🌟 [자동 다운로드 검사] 세션 생성 전 필요한 모델 파일 존재 여부 검사 및 다운로드 실행
-        Self::ensure_models_downloaded(&lang_dir, lang).await?;
-
-        let vocab_path = lang_dir.join("vocab.json");
-        let tokenize_path = lang_dir.join("tokenizer.onnx");
-        let pos_path = lang_dir.join("pos.onnx");
-        let lemma_path = lang_dir.join("lemma.onnx"); // 🌟 Lemma 경로 추가
-
-        let preprocessor = StanzaPreprocessor::new(&vocab_path)?;
-
-        let total_start_time = std::time::Instant::now();
-
-        // onnxruntime 0.0.14 요구사항: Environment 전역 싱글톤 사용 (메모리 릭 방지)
-        let env = *STANZA_ENV;
-
-        // 🌟 [onnxruntime 0.0.14 버그 우회] 
-        // 구버전 라이브러리의 설계 결함으로 인해, 파일 경로 문자열의 수명(Lifetime)이 
-        // Session<'static>과 동일하게 'static으로 유지되어야 컴파일이 통과됩니다.
-        // 경로 문자열을 메모리에 영구 고정(Leak)하여 수명 문제를 완벽히 해결합니다.
-        let tokenize_path_static: &'static str = Box::leak(tokenize_path.to_string_lossy().into_owned().into_boxed_str());
-        let pos_path_static: &'static str = Box::leak(pos_path.to_string_lossy().into_owned().into_boxed_str());
-        let lemma_path_static: &'static str = Box::leak(lemma_path.to_string_lossy().into_owned().into_boxed_str()); // 🌟 Leak 생성
-
-        let tok_start_time = std::time::Instant::now();
-        println!("[STANZA] TOKENIZER 모델 세션을 빌드합니다...");
-        
-        let tokenize_session = env.new_session_builder()
-            .map_err(|e| anyhow::anyhow!("Tokenizer Session builder error: {}", e))?
-            .with_model_from_file(tokenize_path_static)
-            .map_err(|e| anyhow::anyhow!("tokenizer.onnx 모델 파일 로드 실패: {}", e))?;
-            
-        println!("[STANZA] ✅ TOKENIZER 모델 세션 빌드 완료! (소요 시간: {:.2}초)", tok_start_time.elapsed().as_secs_f32());
-
-        let pos_start_time = std::time::Instant::now();
-        println!("[STANZA] POS 모델 세션을 빌드합니다 (onnxruntime 0.0.14)...");
-        
-        let pos_session = env.new_session_builder()
-            .map_err(|e| anyhow::anyhow!("POS Session builder error: {}", e))?
-            .with_model_from_file(pos_path_static)
-            .map_err(|e| anyhow::anyhow!("pos.onnx 모델 파일 로드 실패: {}", e))?;
-            
-        println!("[STANZA] ✅ POS 모델 세션 빌드 완료! (소요 시간: {:.2}초)", pos_start_time.elapsed().as_secs_f32());
-
-        let lemma_start_time = std::time::Instant::now();
-        println!("[STANZA] LEMMA 모델 세션을 빌드합니다...");
-        
-        let lemma_session = env.new_session_builder()
-            .map_err(|e| anyhow::anyhow!("Lemma Session builder error: {}", e))?
-            .with_model_from_file(lemma_path_static)
-            .map_err(|e| anyhow::anyhow!("lemma.onnx 모델 파일 로드 실패: {}", e))?;
-            
-        println!("[STANZA] ✅ LEMMA 모델 세션 빌드 완료! (소요 시간: {:.2}초)", lemma_start_time.elapsed().as_secs_f32());
-
-        println!("[STANZA] 모든 세션 로드 완료! (총 소요 시간: {:.2}초)", total_start_time.elapsed().as_secs_f32());
-        
-        Ok(Self {
-            preprocessor,
-            tokenize_session,
-            pos_session,
-            lemma_session,
-        })
-    }
-}
 pub static PROGRESS_TX: OnceCell<tokio::sync::mpsc::UnboundedSender<serde_json::Value>> = OnceCell::new();
 
 // [UI-SYNC] Instant notification system to wake up the worker
@@ -425,6 +47,628 @@ pub fn mark_ui_ready() {
 
 pub fn notify_new_task() {
     TASK_QUEUED_SIGNAL.notify_waiters();
+}
+
+
+#[derive(Clone, Debug)]
+pub struct ChunkSpan {
+    pub line_idx: usize,
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
+    pub target_indices: Vec<usize>,
+    pub score: f32,
+}
+
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 { 0.0 } else { dot_product / (norm_a * norm_b) }
+}
+
+// --- [모듈화 헬퍼] Sliding Window & NMS 기반 타겟 추출 및 스팬 확장 ---
+async fn execute_sliding_window_nms<F>(
+    masked_text: &str,
+    doc_title: &str,
+    doc_desc: &str,
+    structural_tags: &[&str],
+    dynamic_target_items: &[(String, String, String)],
+    detected_languages_vec: &[String],
+    bias_json: &serde_json::Value,
+    model: &crate::model::LogisModel,
+    cancellation_token: &std::sync::atomic::AtomicBool,
+    json_data: &serde_json::Value,
+    emit_term: &F
+) -> anyhow::Result<(Vec<String>, Vec<ChunkSpan>)> 
+where F: Fn(&str) {
+    emit_term("[EXTRACTION] [PASS 2] 텍스트 단위 중복 제거 및 전체 항목 추출 시작...");
+                    
+    let mut lines: Vec<String> = masked_text.lines()
+        .map(|s| s.trim().trim_start_matches('|').trim().to_string())
+        .filter(|s| {
+            let s_lower = s.to_lowercase();
+            s.len() > 2 && !structural_tags.contains(&s_lower.as_str())
+        })
+        .collect();
+        
+    // 🌟 [추가] 2차 패스 초기화 직후에도 제목과 요약 텍스트를 재장전합니다.
+    if !doc_title.trim().is_empty() { lines.push(doc_title.trim().to_string()); }
+    if !doc_desc.trim().is_empty() { lines.push(doc_desc.trim().to_string()); }
+        
+    emit_term(&format!("[EXTRACTION] 문서 제목, 요약, 본문을 총 {}개의 라인으로 분할하여 순차 임베딩 및 분석 진행 중...", lines.len()));
+
+    // 🌟 1. 다국어 접두사가 결합된 타겟(도메인) 및 서술어(verb_expression) 임베딩 장전
+    let mut target_biases_embs = Vec::new();
+    let mut target_prejs_embs = Vec::new();
+
+    for (c_name, base_target, _) in dynamic_target_items {
+        let mut b_val = "".to_string();
+        let mut p_val = "".to_string();
+        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
+            b_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            p_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        }
+        if p_val.trim().is_empty() { p_val = "random unrelated noise".to_string(); }
+
+        let lang_prefix = c_name.split('_').next().unwrap_or("english");
+        
+        let prefixed_b_val = b_val.split(',')
+            .map(|s| format!("{} {}", lang_prefix, s.trim()))
+            .collect::<Vec<_>>().join(", ");
+        let prefixed_p_val = p_val.split(',')
+            .map(|s| format!("{} {}", lang_prefix, s.trim()))
+            .collect::<Vec<_>>().join(", ");
+
+        let b_emb = model.get_embedding(prefixed_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
+        let p_emb = model.get_embedding(prefixed_p_val).await.unwrap_or_else(|_| vec![0.0; 384]);
+        target_biases_embs.push(b_emb);
+        target_prejs_embs.push(p_emb);
+    }
+
+    // 🌟 1-1. 서술어구(verb_expression) 타이브레이커 가이드 벡터 생성
+    let mut prefixed_verb_b_vals = Vec::new();
+    for lang in detected_languages_vec {
+        let verb_val = bias_json.get("verb").and_then(|v| v.get("bias")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("verb, predicate");
+        let expr_val = bias_json.get("expression").and_then(|v| v.get("bias")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("idiom, phrase");
+        let combined_verb_expr = format!("{}, {}", verb_val, expr_val);
+        let prefixed = combined_verb_expr.split(',').map(|s| format!("{} {}", lang, s.trim())).collect::<Vec<_>>().join(", ");
+        prefixed_verb_b_vals.push(prefixed);
+    }
+    let combined_verb_b_val = prefixed_verb_b_vals.join(", ");
+    let verb_emb = model.get_embedding(combined_verb_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
+
+    // 🌟 문서 제목(Title) 임베딩 생성
+    let title_emb = model.get_embedding(doc_title.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
+
+    let mut raw_spans = Vec::new();
+    let redacted_marker_prefix = "[___REDACTED_".to_string();
+
+    // 🌟 2. Sliding Window를 통한 단어 단위 청크(Chunk) 생성 및 기초 점수 산출
+    for (line_idx, line) in lines.iter().enumerate() {
+        if cancellation_token.load(std::sync::atomic::Ordering::Relaxed) { break; }
+        
+        let words: Vec<&str> = line.split_whitespace().collect();
+        for start in 0..words.len() {
+            let max_end = words.len().min(start + 2); // 1~2 단어 조합
+            for end in (start + 1)..=max_end {
+                let clean_words: Vec<&str> = words[start..end].iter()
+                    .filter(|&&w| !w.starts_with(&redacted_marker_prefix))
+                    .copied()
+                    .collect();
+                
+                if clean_words.is_empty() { continue; }
+                
+                let mut regex_pattern = String::new();
+                for (i, word) in clean_words.iter().enumerate() {
+                    let escaped_word = regex::escape(word);
+                    if i > 0 { regex_pattern.push_str(r"\s+"); }
+                    regex_pattern.push_str(&escaped_word);
+                }
+                
+                let line_text = &lines[line_idx];
+                let chunk_text = if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                    if let Some(mat) = re.find(line_text) { mat.as_str().to_string() } else { clean_words.join(" ") }
+                } else { clean_words.join(" ") };
+
+                if chunk_text.trim().chars().all(|c| !c.is_alphanumeric()) { continue; }
+
+                let char_count = chunk_text.chars().filter(|c| !c.is_whitespace()).count();
+                if char_count <= 1 { continue; }
+
+                let mut clean_for_emb = String::new();
+                for c in chunk_text.chars() {
+                    if c.is_alphanumeric() || c == '-' { clean_for_emb.push(c); } else { clean_for_emb.push(' '); }
+                }
+                let chunk_emb = model.get_embedding(clean_for_emb).await.unwrap_or_else(|_| vec![0.0; 384]);
+                let word_count = end - start;
+                let length_weight = 1.0; 
+
+                let v_sim = cosine_similarity(&chunk_emb, &verb_emb);
+                let beta = if word_count <= 2 { 0.05 } else { 0.10 };
+                let verb_penalty = v_sim * beta;
+
+                let mut top_targets: Vec<(usize, f32)> = Vec::new();
+
+                for i in 0..dynamic_target_items.len() {
+                    let b_score = cosine_similarity(&chunk_emb, &target_biases_embs[i]);
+                    let p_score = cosine_similarity(&chunk_emb, &target_prejs_embs[i]);
+                    let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
+                    
+                    let mut title_bonus = 0.0;
+                    let t_sim = cosine_similarity(&chunk_emb, &title_emb);
+                    if t_sim > 0.0 { title_bonus = t_sim * 0.35; }
+                    
+                    let score = b_score - (p_score * penalty_weight) - verb_penalty + title_bonus;
+                    top_targets.push((i, score));
+                }
+
+                top_targets.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let best_score = top_targets[0].1;
+
+                if best_score > 0.3 {
+                    let final_score = best_score * length_weight;
+                    if verb_penalty > 0.05 {
+                        emit_term(&format!("  📉 [VERB PENALTY] '{}' -> 감점: {:.4} (최종 반영 스코어: {:.4})", chunk_text, verb_penalty, final_score));
+                    }
+                    let mut selected_indices = Vec::new();
+                    for (idx, score) in top_targets {
+                        if best_score - score <= 0.05 && score > 0.3 {
+                            selected_indices.push(idx);
+                        } else { break; }
+                    }
+                    raw_spans.push(ChunkSpan { line_idx, start, end, text: chunk_text, target_indices: selected_indices, score: final_score });
+                }
+            }
+        }
+    }
+
+    // 🌟 3. 앞뒤 교차 문장(Context) 점수 합산 (Pass 2)
+    emit_term("  🔄 [PASS 2: CONTEXT ADJUSTMENT] Merging adjacent scores...");
+    let mut eval_spans = Vec::new();
+    for i in 0..raw_spans.len() {
+        let target = &raw_spans[i];
+        let mut prev_bonus = 0.0;
+        let mut next_bonus = 0.0;
+
+        for j in 0..raw_spans.len() {
+            if i == j { continue; }
+            let other = &raw_spans[j];
+            let has_common_target = other.target_indices.iter().any(|idx| target.target_indices.contains(idx));
+            if other.line_idx == target.line_idx && has_common_target {
+                if other.start < target.start && other.end > target.start && other.score > prev_bonus { prev_bonus = other.score; }
+                if other.end > target.end && other.start < target.end && other.score > next_bonus { next_bonus = other.score; }
+            }
+        }
+        let final_context_score = target.score + (prev_bonus * 0.5) + (next_bonus * 0.5);
+        eval_spans.push(ChunkSpan { score: final_context_score, ..target.clone() });
+    }
+
+    // 🌟 4. 항목 중복 제거 및 확정 (Pass 3)
+    emit_term("  [PASS 3: RESOLUTION] 중복 추출 항목 병합 및 최적화 진행 중...");
+    eval_spans.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    
+    let mut final_spans: Vec<ChunkSpan> = Vec::new();
+    let mut remaining_spans = eval_spans.clone();
+    let nms_total_items = remaining_spans.len();
+    let mut last_nms_percent = 0;
+
+    while !remaining_spans.is_empty() {
+        let processed = nms_total_items - remaining_spans.len();
+        let current_percent = if nms_total_items > 0 { (processed as f32 / nms_total_items as f32 * 100.0) as usize } else { 100 };
+        if current_percent >= last_nms_percent + 10 {
+            emit_term(&format!("    ⏳ 항목 중복 제거 진행 중... {}% 완료 ({} / {})", current_percent, processed, nms_total_items));
+            last_nms_percent = current_percent;
+        }
+
+        let current = remaining_spans.remove(0); 
+        let mut overlaps = Vec::new();
+        let mut next_remaining = Vec::new();
+
+        for span in remaining_spans {
+            if current.line_idx == span.line_idx && current.start < span.end && current.end > span.start {
+                overlaps.push(span);
+            } else {
+                next_remaining.push(span);
+            }
+        }
+
+        if overlaps.is_empty() {
+            for &t_idx in &current.target_indices {
+                let (context_name, _, _) = &dynamic_target_items[t_idx];
+                println!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", current.text, context_name.replace("_", " "), current.score);
+            }
+            final_spans.push(current);
+        } else {
+            let mut candidates = vec![current.clone()];
+            candidates.extend(overlaps.clone());
+            
+            let mut unique_texts = Vec::new();
+            let mut unique_cands = Vec::new();
+            for cand in &candidates {
+                if !unique_texts.contains(&cand.text) {
+                    unique_texts.push(cand.text.clone());
+                    unique_cands.push(cand.clone());
+                } else {
+                    if let Some(pos) = unique_texts.iter().position(|x| x == &cand.text) {
+                        for &idx in &cand.target_indices {
+                            if !unique_cands[pos].target_indices.contains(&idx) {
+                                unique_cands[pos].target_indices.push(idx);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if unique_cands.len() == 1 {
+                let winner = unique_cands[0].clone();
+                for &t_idx in &winner.target_indices {
+                    let (context_name, _, _) = &dynamic_target_items[t_idx];
+                    println!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", winner.text, context_name.replace("_", " "), winner.score);
+                }
+                final_spans.push(winner);
+            } else {
+                println!("    ⚖️ [SCORE RESOLUTION] 중첩 충돌 발생! 벡터 점수 기반 판별: {:?}", unique_texts);
+                let mut sorted_cands = unique_cands.clone();
+                sorted_cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(b.text.len().cmp(&a.text.len())));
+                
+                let winner = sorted_cands[0].clone();
+                let winner_idx = unique_cands.iter().position(|x| x.text == winner.text).unwrap_or(0);
+                
+                for &t_idx in &winner.target_indices {
+                    let (context_name, _, _) = &dynamic_target_items[t_idx];
+                    println!("    👑 [WINNER-SCORE] '{}' -> {} (Score: {:.4})", winner.text, context_name.replace("_", " "), winner.score);
+                }
+                for (i, cand) in unique_cands.iter().enumerate() {
+                    if i != winner_idx {
+                        for &t_idx in &cand.target_indices {
+                            let (context_name, _, _) = &dynamic_target_items[t_idx];
+                            println!("    💀 [DEFEAT-SCORE] '{}' -> {} (Rejected, Score: {:.4})", cand.text, context_name.replace("_", " "), cand.score);
+                        }
+                    }
+                }
+                final_spans.push(winner);
+            }
+        }
+        remaining_spans = next_remaining;
+    }
+    emit_term(&format!("    ✅ 중복 항목 제거 완료 (총 {}개 처리)", nms_total_items));
+
+    // 🌟 4.5 인접 청크 동적 스팬 확장
+    let link_val = json_data.get("link").and_then(|v| v.as_str()).unwrap_or("");
+    let ext_for_tabular = std::path::Path::new(link_val).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let is_tabular = ext_for_tabular == "csv" || ext_for_tabular == "xlsx" || ext_for_tabular == "xls";
+    let mut expanded_only_spans: Vec<ChunkSpan> = Vec::new(); 
+
+    if is_tabular {
+        emit_term("  🔗 [PASS 3.5: GAP BRIDGING] CSV/Excel 표 데이터이므로 인접 단어 결합(Span Expansion) 절차를 패스합니다.");
+    } else {
+        emit_term("  🔗 [PASS 3.5: GAP BRIDGING] Dynamic Span Expansion for adjacent winner chunks...");
+        final_spans.sort_by(|a, b| a.line_idx.cmp(&b.line_idx).then(a.start.cmp(&b.start)));
+        
+        let mut contiguous_groups: Vec<Vec<ChunkSpan>> = Vec::new();
+        let mut current_group: Vec<ChunkSpan> = Vec::new();
+        
+        for span in &final_spans {
+            if let Some(last) = current_group.last() {
+                let has_common_target = last.target_indices.iter().any(|idx| span.target_indices.contains(idx));
+                if last.line_idx == span.line_idx && last.end == span.start && has_common_target {
+                    let last_word_count = last.end - last.start;
+                    let span_word_count = span.end - span.start;
+                    if last_word_count == 1 || span_word_count == 1 {
+                        current_group.push(span.clone());
+                        continue;
+                    }
+                }
+            }
+            if !current_group.is_empty() { contiguous_groups.push(current_group.clone()); }
+            current_group = vec![span.clone()];
+        }
+        if !current_group.is_empty() { contiguous_groups.push(current_group); }
+        
+        let total_groups = contiguous_groups.len();
+        let mut last_expand_percent = 0;
+
+        for (g_idx, group) in contiguous_groups.into_iter().enumerate() {
+            let current_percent = if total_groups > 0 { (g_idx as f32 / total_groups as f32 * 100.0) as usize } else { 100 };
+            if current_percent >= last_expand_percent + 10 {
+                emit_term(&format!("    ⏳ 인접 단어 결합(Span Expansion) 분석 중... {}% 완료 ({} / {})", current_percent, g_idx, total_groups));
+                last_expand_percent = current_percent;
+            }
+
+            let n = group.len();
+            if n >= 2 {
+                let max_len = n.min(3);
+                for len in 2..=max_len {
+                    for start_idx in 0..=(n - len) {
+                        let sub_group = &group[start_idx..(start_idx + len)];
+                        let combined_words: Vec<&str> = sub_group.iter().map(|s| s.text.as_str()).collect();
+                        let mut regex_pattern = String::new();
+                        for (i, word) in combined_words.iter().enumerate() {
+                            let escaped_word = regex::escape(word).replace("\\ ", r"\s+");
+                            if i > 0 { regex_pattern.push_str(r"\s+"); }
+                            regex_pattern.push_str(&escaped_word);
+                        }
+                        
+                        let line_text = &lines[sub_group[0].line_idx];
+                        let combined_text = if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                            if let Some(mat) = re.find(line_text) { mat.as_str().to_string() } else { combined_words.join(" ") }
+                        } else { combined_words.join(" ") };
+                        
+                        let mut combined_targets = Vec::new();
+                        for s in sub_group { combined_targets.extend(s.target_indices.clone()); }
+                        combined_targets.sort();
+                        combined_targets.dedup();
+
+                        let combined_emb = model.get_embedding(combined_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                        let mut real_max_score = 0.0_f32;
+                        
+                        for &t_idx in &combined_targets {
+                            let b_score = cosine_similarity(&combined_emb, &target_biases_embs[t_idx]);
+                            let p_score = cosine_similarity(&combined_emb, &target_prejs_embs[t_idx]);
+                            let v_sim = cosine_similarity(&combined_emb, &verb_emb);
+                            let verb_penalty = v_sim * 0.25; 
+                            let mut title_bonus = 0.0;
+                            let t_sim = cosine_similarity(&combined_emb, &title_emb);
+                            if t_sim > 0.0 { title_bonus = t_sim * 0.35; }
+                            
+                            let target_score = b_score - (p_score * 0.7) - verb_penalty + title_bonus;
+                            if target_score > real_max_score { real_max_score = target_score; }
+                        }
+
+                        let v_sim_for_drop = cosine_similarity(&combined_emb, &verb_emb);
+                        let final_score = if v_sim_for_drop > 0.40 {
+                            real_max_score
+                        } else {
+                            let inherited_max = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
+                            real_max_score.max(inherited_max * 0.9)
+                        };
+                        
+                        if final_score > 0.3 {
+                            let new_span = ChunkSpan {
+                                line_idx: sub_group[0].line_idx,
+                                start: sub_group[0].start,
+                                end: sub_group.last().unwrap().end,
+                                text: combined_text.clone(),
+                                target_indices: combined_targets,
+                                score: final_score,
+                            };
+                            println!("    🤝 [EXPANDED] {}조각 결합 파생: '{}' (재평가 스코어: {:.4})", len, combined_text, final_score);
+                            expanded_only_spans.push(new_span);
+                        } else {
+                            println!("    🚫 [EXPANDED DROP] 동사/서술어 패널티로 결합 기각: '{}'", combined_text);
+                        }
+                    }
+                }
+            }
+        }
+        emit_term(&format!("    ✅ 인접 단어 결합 분석 완료 (총 {} 그룹 처리)", total_groups));
+
+        // 🌟 4.6 EXPANDED 결합 조각과 기존 조각 간의 중복(Overlap) 제거
+        emit_term("  🧹 [PASS 3.6: EXPANDED CLEANUP] 결합된 조각과 원본 조각 간의 최종 중복 항목을 정리합니다...");
+        let mut all_pool = final_spans.clone();
+        all_pool.extend(expanded_only_spans);
+        all_pool.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(b.text.len().cmp(&a.text.len())));
+
+        let mut cleaned_spans: Vec<ChunkSpan> = Vec::new();
+        let total_cleanup = all_pool.len();
+        let mut last_cleanup_percent = 0;
+
+        for (c_idx, cand) in all_pool.into_iter().enumerate() {
+            let current_percent = if total_cleanup > 0 { (c_idx as f32 / total_cleanup as f32 * 100.0) as usize } else { 100 };
+            if current_percent >= last_cleanup_percent + 10 {
+                emit_term(&format!("    ⏳ 최종 정리 진행 중... {}% 완료 ({} / {})", current_percent, c_idx, total_cleanup));
+                last_cleanup_percent = current_percent;
+            }
+
+            let mut is_overlapped = false;
+            for selected in &cleaned_spans {
+                if cand.line_idx == selected.line_idx {
+                    if cand.start < selected.end && cand.end > selected.start {
+                        is_overlapped = true;
+                        break;
+                    }
+                }
+            }
+
+            if !is_overlapped {
+                cleaned_spans.push(cand);
+            } else {
+                if let Some(overlap_target) = cleaned_spans.iter().find(|s| s.line_idx == cand.line_idx && cand.start < s.end && cand.end > s.start) {
+                    println!("    🗑️ [CLEANUP] 조각 기각됨 (중첩 흡수): '{}' (Score: {:.4}) -> 승자: '{}' (Score: {:.4})", cand.text, cand.score, overlap_target.text, overlap_target.score);
+                }
+            }
+        }
+        emit_term(&format!("    ✅ 최종 항목 정리 완료 (총 {}개 검증)", total_cleanup));
+        final_spans = cleaned_spans;
+    }
+    
+    Ok((lines, final_spans))
+}
+
+// --- [모듈화 헬퍼] Stanza NLP 모델 검증 및 다운로드, 로딩 ---
+async fn ensure_stanza_models_loaded<F>(
+    detected_languages: &[String],
+    stanza_pipelines: &mut std::collections::HashMap<String, crate::stanza::StanzaPipeline>,
+    stanza_base_dir: &std::path::Path,
+    task_id: &str,
+    app_handle: &tauri::AppHandle,
+    emit_term: &F
+) where F: Fn(&str) {
+    use tauri::Emitter;
+    
+    for current_lang in detected_languages {
+        if stanza_pipelines.contains_key(current_lang) {
+            emit_term(&format!("[STANZA] ⚡ '{}' 언어 모델이 이미 메모리에 로드되어 있습니다. 캐시를 재사용합니다.", current_lang));
+            continue;
+        }
+
+        let stanza_lang_code = match current_lang.as_str() {
+            "korean" => "ko",
+            "english" => "en",
+            "japanese" => "ja",
+            "chinese" => "zh-hans",
+            "french" => "fr",
+            "german" => "de",
+            "spanish" => "es",
+            "italian" => "it",
+            "portuguese" => "pt",
+            "dutch" => "nl",
+            "russian" => "ru",
+            "arabic" => "ar",
+            "thai" => "th",
+            "hindi" => "hi",
+            "bengali" => "bn",
+            "greek" => "el",
+            "hebrew" => "he",
+            "vietnamese" => "vi",
+            _ => "en",
+        };
+
+        let stanza_lang_dir = stanza_base_dir.join(stanza_lang_code);
+        let supported_stanza_langs = ["korean", "japanese", "chinese", "russian", "arabic", "thai", "hindi", "bengali", "greek", "hebrew", "vietnamese", "french", "german", "spanish", "italian", "portuguese", "dutch"];
+        let dl_lang = if supported_stanza_langs.contains(&current_lang.as_str()) {
+            current_lang.clone()
+        } else {
+            "english".to_string()
+        };
+
+        if !stanza_lang_dir.exists() {
+            let msg = format!("모델이 존재하지 않아 '{}' 언어 모델 자동 다운로드를 시작합니다...", dl_lang);
+            emit_term(&format!("[STANZA] ⬇️ {}", msg));
+            
+            let payload = serde_json::json!({ 
+                "task_id": task_id,
+                "category": "Downloading Model", 
+                "summary": msg,
+                "spinner": "⬇️"
+            });
+            let _ = app_handle.emit("extraction-progress", &payload);
+            crate::scheduler::log_task_progress(app_handle, task_id, &payload);
+
+            let _ = std::fs::create_dir_all(&stanza_lang_dir);
+            
+            let files = ["vocab.json", "pos.onnx", "tokenizer.onnx", "depparse.onnx", "lemma.onnx"];
+            let client = reqwest::Client::new();
+            let mut all_success = true;
+            
+            for file in files {
+                let url = format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/{}", stanza_lang_code, file);
+                let file_path = stanza_lang_dir.join(file);
+                
+                let dl_msg = format!("다운로드 중: {} (URL: {})", file, url);
+                emit_term(&format!("[STANZA] {}", dl_msg));
+                
+                let payload = serde_json::json!({ 
+                    "task_id": task_id,
+                    "category": "Downloading Model", 
+                    "summary": dl_msg,
+                    "spinner": "⬇️"
+                });
+                let _ = app_handle.emit("extraction-progress", &payload);
+
+                match client.get(&url).send().await {
+                    Ok(res) if res.status().is_success() => {
+                        let total_size = res.content_length().unwrap_or(0);
+                        if let Ok(mut dest) = tokio::fs::File::create(&file_path).await {
+                            use tokio::io::AsyncWriteExt;
+                            use futures::StreamExt;
+                            let mut stream = res.bytes_stream();
+                            let mut downloaded: u64 = 0;
+                            let mut last_percent = 0;
+                            while let Some(chunk_res) = stream.next().await {
+                                if let Ok(chunk) = chunk_res {
+                                    if dest.write_all(&chunk).await.is_err() {
+                                        all_success = false;
+                                        break;
+                                    }
+                                    downloaded += chunk.len() as u64;
+                                    if total_size > 0 {
+                                        let percent = (downloaded as f64 / total_size as f64 * 100.0) as u32;
+                                        if percent >= last_percent + 10 {
+                                            let pct_msg = format!("{} 다운로드 진행률: {}%", file, percent);
+                                            emit_term(&format!("[STANZA] {}", pct_msg));
+                                            
+                                            let payload = serde_json::json!({ 
+                                                "task_id": task_id,
+                                                "category": "Downloading Model", 
+                                                "summary": pct_msg,
+                                                "spinner": "⬇️"
+                                            });
+                                            let _ = app_handle.emit("extraction-progress", &payload);
+                                            
+                                            last_percent = percent;
+                                        }
+                                    }
+                                } else {
+                                    all_success = false;
+                                    break;
+                                }
+                            }
+                        } else {
+                            all_success = false;
+                        }
+                    },
+                    _ => {
+                        all_success = false;
+                    }
+                }
+                if !all_success { 
+                    emit_term(&format!("[STANZA] ❌ 다운로드 실패: {}", file));
+                    break; 
+                }
+            }
+            
+            if all_success {
+                let msg = "모델 다운로드 완료!";
+                emit_term(&format!("[STANZA] ✅ {}", msg));
+                let payload = serde_json::json!({ 
+                    "task_id": task_id,
+                    "category": "Downloading Model", 
+                    "summary": msg,
+                    "spinner": "✅"
+                });
+                let _ = app_handle.emit("extraction-progress", &payload);
+                crate::scheduler::log_task_progress(app_handle, task_id, &payload);
+            } else {
+                let msg = "다운로드 중 오류 발생. 진행을 위해 다운로드된 파일을 삭제합니다.";
+                emit_term(&format!("[STANZA] ⚠️ {}", msg));
+                let payload = serde_json::json!({ 
+                    "task_id": task_id,
+                    "category": "Error", 
+                    "summary": msg,
+                    "spinner": "❌"
+                });
+                let _ = app_handle.emit("extraction-progress", &payload);
+                crate::scheduler::log_task_progress(app_handle, task_id, &payload);
+                let _ = std::fs::remove_dir_all(&stanza_lang_dir);
+            }
+        }
+
+        if stanza_lang_dir.exists() {
+            emit_term(&format!("[STANZA] Loading Stanza ONNX models for '{}'...", stanza_lang_code));
+            
+            let base_dir_clone = stanza_base_dir.clone();
+            let lang_code_clone = stanza_lang_code.to_string();
+            
+            struct UnsafePipelineWrapper(crate::stanza::StanzaPipeline);
+            unsafe impl Send for UnsafePipelineWrapper {}
+            
+            let pipeline_res = crate::stanza::StanzaPipeline::new(base_dir_clone, &lang_code_clone)
+                .await
+                .map(UnsafePipelineWrapper);
+
+            match pipeline_res {
+                Ok(wrapper) => {
+                    stanza_pipelines.insert(current_lang.clone(), wrapper.0);
+                    emit_term(&format!("[STANZA] ✅ Stanza Pipeline for '{}' loaded successfully.", current_lang));
+                },
+                Err(e) => emit_term(&format!("[STANZA] ⚠️ Failed to load Stanza models for '{}' (상세 원인): {:?}", current_lang, e)),
+            }
+        } else {
+            emit_term(&format!("[STANZA] ⚠️ Stanza models for '{}' not found. Skipping POS/Depparse filtering.", stanza_lang_code));
+        }
+    }
 }
 
 pub async fn start_background_worker(
@@ -979,7 +1223,7 @@ async fn process_task(
         let total = uuids.len();
 
         let stanza_base_dir = crate::utils::get_app_dir().join("models").join("stanza");
-        let mut stanza_pipelines: std::collections::HashMap<String, StanzaPipeline> = std::collections::HashMap::new();
+        let mut stanza_pipelines: std::collections::HashMap<String, crate::stanza::StanzaPipeline> = std::collections::HashMap::new();
 
         for (idx, uuid_val) in uuids.iter().enumerate() {
             if cancellation_token.load(Ordering::Relaxed) { return Err(anyhow::anyhow!("Task cancelled")); }
@@ -1328,192 +1572,19 @@ async fn process_task(
                     // =====================================================================
                     emit_term("[EXTRACTION] LLM 로딩 완료 확인. ONNX 로딩 진입...");
                     
-                    for current_lang in &detected_languages_vec {
-                        // 이미 로드된 모델은 재로드하지 않고 스킵하여 속도 극대화 및 Box::leak 중복 메모리 누수 방지
-                        if stanza_pipelines.contains_key(current_lang) {
-                            emit_term(&format!("[STANZA] ⚡ '{}' 언어 모델이 이미 메모리에 로드되어 있습니다. 캐시를 재사용합니다.", current_lang));
-                            continue;
-                        }
-
-                        let stanza_lang_code = match current_lang.as_str() {
-                            "korean" => "ko",
-                            "english" => "en",
-                            "japanese" => "ja",
-                            "chinese" => "zh-hans",
-                            "french" => "fr",
-                            "german" => "de",
-                            "spanish" => "es",
-                            "italian" => "it",
-                            "portuguese" => "pt",
-                            "dutch" => "nl",
-                            "russian" => "ru",
-                            "arabic" => "ar",
-                            "thai" => "th",
-                            "hindi" => "hi",
-                            "bengali" => "bn",
-                            "greek" => "el",
-                            "hebrew" => "he",
-                            "vietnamese" => "vi",
-                            _ => "en",
-                        };
-
-                        let stanza_lang_dir = stanza_base_dir.join(stanza_lang_code);
-                        let supported_stanza_langs = ["korean", "japanese", "chinese", "russian", "arabic", "thai", "hindi", "bengali", "greek", "hebrew", "vietnamese", "french", "german", "spanish", "italian", "portuguese", "dutch"];
-                        let dl_lang = if supported_stanza_langs.contains(&current_lang.as_str()) {
-                            current_lang.clone()
-                        } else {
-                            "english".to_string()
-                        };
-
-                        if !stanza_lang_dir.exists() {
-                            let msg = format!("모델이 존재하지 않아 '{}' 언어 모델 자동 다운로드를 시작합니다...", dl_lang);
-                            emit_term(&format!("[STANZA] ⬇️ {}", msg));
-                            
-                            let payload = json!({ 
-                                "task_id": task.id.clone(),
-                                "category": "Downloading Model", 
-                                "summary": msg,
-                                "spinner": "⬇️"
-                            });
-                            let _ = app_handle.emit("extraction-progress", &payload);
-                            crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
-
-                            let _ = std::fs::create_dir_all(&stanza_lang_dir);
-                            
-                            // 🌟 Lemma 모델(lemma.onnx)을 다운로드 리스트에 추가합니다.
-                            let files = ["vocab.json", "pos.onnx", "tokenizer.onnx", "depparse.onnx", "lemma.onnx"];
-                            let client = reqwest::Client::new();
-                            let mut all_success = true;
-                            
-                            for file in files {
-                                let url = format!("https://huggingface.co/PopupLink/stanza-{}/resolve/main/{}", stanza_lang_code, file);
-                                let file_path = stanza_lang_dir.join(file);
-                                
-                                // 🌟 [추가] 다운로드 링크 URL 로그 포함
-                                let dl_msg = format!("다운로드 중: {} (URL: {})", file, url);
-                                emit_term(&format!("[STANZA] {}", dl_msg));
-                                
-                                let payload = json!({ 
-                                    "task_id": task.id.clone(),
-                                    "category": "Downloading Model", 
-                                    "summary": dl_msg,
-                                    "spinner": "⬇️"
-                                });
-                                let _ = app_handle.emit("extraction-progress", &payload);
-
-                                match client.get(&url).send().await {
-                                    Ok(res) if res.status().is_success() => {
-                                        let total_size = res.content_length().unwrap_or(0);
-                                        if let Ok(mut dest) = tokio::fs::File::create(&file_path).await {
-                                            use tokio::io::AsyncWriteExt;
-                                            use futures::StreamExt;
-                                            let mut stream = res.bytes_stream();
-                                            let mut downloaded: u64 = 0;
-                                            let mut last_percent = 0;
-                                            while let Some(chunk_res) = stream.next().await {
-                                                if let Ok(chunk) = chunk_res {
-                                                    if dest.write_all(&chunk).await.is_err() {
-                                                        all_success = false;
-                                                        break;
-                                                    }
-                                                    downloaded += chunk.len() as u64;
-                                                    if total_size > 0 {
-                                                        let percent = (downloaded as f64 / total_size as f64 * 100.0) as u32;
-                                                        if percent >= last_percent + 10 { // 10% 단위로 UI 로그 출력
-                                                            let pct_msg = format!("{} 다운로드 진행률: {}%", file, percent);
-                                                            emit_term(&format!("[STANZA] {}", pct_msg));
-                                                            
-                                                            let payload = json!({ 
-                                                                "task_id": task.id.clone(),
-                                                                "category": "Downloading Model", 
-                                                                "summary": pct_msg,
-                                                                "spinner": "⬇️"
-                                                            });
-                                                            let _ = app_handle.emit("extraction-progress", &payload);
-                                                            
-                                                            last_percent = percent;
-                                                        }
-                                                    }
-                                                } else {
-                                                    all_success = false;
-                                                    break;
-                                                }
-                                            }
-                                        } else {
-                                            all_success = false;
-                                        }
-                                    },
-                                    _ => {
-                                        all_success = false;
-                                    }
-                                }
-                                if !all_success { 
-                                    emit_term(&format!("[STANZA] ❌ 다운로드 실패: {}", file));
-                                    break; 
-                                }
-                            }
-                            
-                            if all_success {
-                                let msg = "모델 다운로드 완료!";
-                                emit_term(&format!("[STANZA] ✅ {}", msg));
-                                let payload = json!({ 
-                                    "task_id": task.id.clone(),
-                                    "category": "Downloading Model", 
-                                    "summary": msg,
-                                    "spinner": "✅"
-                                });
-                                let _ = app_handle.emit("extraction-progress", &payload);
-                                crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
-                            } else {
-                                let msg = "다운로드 중 오류 발생. 진행을 위해 다운로드된 파일을 삭제합니다.";
-                                emit_term(&format!("[STANZA] ⚠️ {}", msg));
-                                let payload = json!({ 
-                                    "task_id": task.id.clone(),
-                                    "category": "Error", 
-                                    "summary": msg,
-                                    "spinner": "❌"
-                                });
-                                let _ = app_handle.emit("extraction-progress", &payload);
-                                crate::scheduler::log_task_progress(app_handle, &task.id, &payload);
-                                let _ = std::fs::remove_dir_all(&stanza_lang_dir);
-                            }
-                        }
-
-                        if stanza_lang_dir.exists() {
-                            emit_term(&format!("[STANZA] Loading Stanza ONNX models for '{}'...", stanza_lang_code));
-                            
-                            let base_dir_clone = stanza_base_dir.clone();
-                            let lang_code_clone = stanza_lang_code.to_string();
-                            
-                            // 🌟 [UNSAFE BYPASS] 구버전 onnxruntime(0.0.14)은 내부 C++ 포인터(*mut)에 대해 
-                            // Rust의 스레드 간 전송(Send) 트레이트 구현을 누락하는 설계 결함이 있습니다.
-                            // 컴파일러의 락을 강제로 해제하기 위해 Unsafe 래퍼 구조체를 선언하여 전송 자격을 억지로 부여합니다.
-                            struct UnsafePipelineWrapper(crate::scheduler::StanzaPipeline);
-                            unsafe impl Send for UnsafePipelineWrapper {}
-                            
-                            // StanzaPipeline::new는 async 함수이므로 await를 호출하여 결과를 기다려야 합니다.
-                            // 불필요한 OS 스레드 생성(std::thread::spawn) 및 채널을 제거하고, 현재의 비동기 런타임에서 직접 처리합니다.
-                            let pipeline_res = crate::scheduler::StanzaPipeline::new(base_dir_clone, &lang_code_clone)
-                                .await
-                                .map(UnsafePipelineWrapper);
-
-                            match pipeline_res {
-                                Ok(wrapper) => {
-                                    stanza_pipelines.insert(current_lang.clone(), wrapper.0);
-                                    emit_term(&format!("[STANZA] ✅ Stanza Pipeline for '{}' loaded successfully.", current_lang));
-                                },
-                                Err(e) => emit_term(&format!("[STANZA] ⚠️ Failed to load Stanza models for '{}' (상세 원인): {:?}", current_lang, e)),
-                            }
-                        } else {
-                            emit_term(&format!("[STANZA] ⚠️ Stanza models for '{}' not found. Skipping POS/Depparse filtering.", stanza_lang_code));
-                        }
-                    }
+                    ensure_stanza_models_loaded(
+                        &detected_languages_vec,
+                        &mut stanza_pipelines,
+                        &stanza_base_dir,
+                        &task.id,
+                        app_handle,
+                        &emit_term
+                    ).await;
 
                     // 🌟 [추가] 언어 기반 동적 타겟 확장 로직
                     // bias.json에서는 기존 키를 사용하여 설정값을 가져오고, 컨텍스트(LLM)에만 언어 접두사를 붙여 전달합니다.
                     let mut dynamic_target_items: Vec<(String, String, String)> = Vec::new();
                     for (base_target, base_desc) in target_items {
-                        // 🌟 언어 맥락이 결과 품질에 큰 영향을 미치는 고유명사 형태의 타겟들을 지정합니다.
                         if base_target == "name" || base_target == "company" || base_target == "address" || base_target == "username" || base_target == "contact_number" {
                             for lang in &detected_languages_vec {
                                 let context_name = format!("{}_{}", lang, base_target);
@@ -1523,14 +1594,6 @@ async fn process_task(
                         } else {
                             dynamic_target_items.push((base_target.to_string(), base_target.to_string(), base_desc.to_string()));
                         }
-                    }
-
-                    // 🌟 [추가] 코사인 유사도 산출 헬퍼 함수
-                    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-                        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-                        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-                        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-                        if norm_a == 0.0 || norm_b == 0.0 { 0.0 } else { dot_product / (norm_a * norm_b) }
                     }
 
                     emit_term("[EXTRACTION] [포그라운드] Embedding 모델 로드 및 벡터 유사도 사전 검증 시작...");
@@ -1543,16 +1606,14 @@ async fn process_task(
                     let mut skip_map = std::collections::HashMap::new(); 
                     let mut replacement_history: Vec<(String, String)> = Vec::new(); 
                     let mut domain_history: Vec<(String, String)> = Vec::new(); 
-                    let task_marker_hash = crate::utils::hash::crc32(&task.id); // 🌟 [CRITICAL FIX] CRC32 해싱 기반 고유 마커 뼈대 생성
+                    let task_marker_hash = crate::utils::hash::crc32(&task.id); 
 
-                    // 🌟 [CRITICAL FIX] 일반 텍스트 교체 시 [___REDACTED_x___] 마커 내부의 숫자가 오염되는 현상을 방지하는 안전한 교체 함수
-                    // (정규식을 완전히 제거하고, 단어 중간에 낀 파편 오작동을 방어하는 순수 Rust 탐색 로직으로 개선)
+                    // 🌟 [CRITICAL FIX] 일반 텍스트 교체 시 마커 내부의 숫자가 오염되는 현상을 방지하는 안전한 교체 함수
                     let safe_replace = |text: &str, target: &str, replacement: &str| -> String {
                         if target.is_empty() { return text.to_string(); }
                         
                         let mut result = String::with_capacity(text.len());
                         let mut current_idx = 0;
-                        let target_char_count = target.chars().count();
 
                         while current_idx < text.len() {
                             let text_slice = &text[current_idx..];
@@ -1574,18 +1635,15 @@ async fn process_task(
                                 (Some(_), Some(t_idx)) | (None, Some(t_idx)) => {
                                     let absolute_t_idx = current_idx + t_idx;
                                     
-                                    // 🌟 [Infix 방어 로직] 외래어나 다른 단어의 중간에 낀 파편(예: 에'이전'트) 치환 방지 및 영문 띄어쓰기(부분 일치) 방어
                                     let mut is_infix = false;
                                     let char_before = text[..absolute_t_idx].chars().next_back();
                                     let char_after = text[absolute_t_idx + target.len()..].chars().next();
                                     
-                                    // 🌟 [CRITICAL FIX] 특수문자(괄호, 쉼표 등)는 공백과 동일하게 단어의 경계로 취급합니다.
-                                    // 알파벳이나 숫자(Letter/Number)가 붙어있을 때만 파편(Infix)으로 간주하여 마스킹을 우회합니다.
                                     let prev_is_alnum = char_before.map_or(false, |c| c.is_alphanumeric());
                                     let next_is_alnum = char_after.map_or(false, |c| c.is_alphanumeric());
                                     
                                     if prev_is_alnum || next_is_alnum {
-                                        is_infix = true; // 한쪽이라도 문자로 막혀있으면 독립 단어가 아닌 파편으로 간주하여 보호
+                                        is_infix = true; 
                                     }
                                     
                                     if is_infix {
@@ -1637,545 +1695,42 @@ async fn process_task(
                         }
                     }
 
-                    // 🌟 [CRITICAL FIX] 특수문자 제거 및 언어(단어) 추출 범용 로직
-                    // 기존에 특수문자를 공백으로 덮어씌워 "FDE(Forward"가 "FDE Forward"로 쪼개지는 현상을 방지합니다.
-                    // 원본 텍스트 구조를 그대로 유지하여 NMS 추출 시 괄호 등 특수문자가 훼손되지 않도록 개선합니다.
-                    let mut noise_map: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // 🌟 하단 복원 로직 컴파일 에러 방지용 빈 장부 유지
-
-                    // 🌟 1차 패스용 라인 분할 (원본 텍스트 기반 유지)
                     let structural_tags = ["html", "body", "div", "p", "span", "thead", "tbody", "tr", "td", "th", "table", "ul", "li", "a", "img", "br", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "em", "b", "i", "u", "s", "nav", "header", "footer", "main", "section", "article", "aside", "figure", "figcaption", "button", "input", "form", "label", "select", "textarea", "option", "iframe", "script", "style", "meta", "link", "head", "title", "svg", "path", "dl", "ol", "dd", "dt"];
-                    let mut lines: Vec<String> = masked_text.lines()
-                        .map(|s| s.trim().trim_start_matches('|').trim().to_string())
-                        .filter(|s| {
-                            let s_lower = s.to_lowercase();
-                            s.len() > 2 && !structural_tags.contains(&s_lower.as_str())
-                        })
-                        .collect();
-                        
-                    // 🌟 [추가] 제목과 요약 텍스트도 마스킹 탐색 라인업에 추가합니다.
-                    if !doc_title.trim().is_empty() { lines.push(doc_title.trim().to_string()); }
-                    if !doc_desc.trim().is_empty() { lines.push(doc_desc.trim().to_string()); }
 
                     // =====================================================================
-                    // 🌟 [PASS 2: 기반 전체 추출] 동적 접두사 기반 벡터 검색 및 타이브레이커 적용
+                    // 🌟 [PASS 2: 기반 전체 추출] 모듈화된 NMS 함수 단일 호출
                     // =====================================================================
-                    emit_term("[EXTRACTION] [PASS 2] 텍스트 단위 중복 제거 및 전체 항목 추출 시작...");
+                    let (rebuilt_lines, final_spans) = execute_sliding_window_nms(
+                        &masked_text,
+                        &doc_title,
+                        &doc_desc,
+                        &structural_tags,
+                        &dynamic_target_items,
+                        &detected_languages_vec,
+                        &bias_json,
+                        &model,
+                        cancellation_token,
+                        &json_data,
+                        &emit_term
+                    ).await?;
                     
-                    lines = masked_text.lines()
-                        .map(|s| s.trim().trim_start_matches('|').trim().to_string())
-                        .filter(|s| {
-                            let s_lower = s.to_lowercase();
-                            s.len() > 2 && !structural_tags.contains(&s_lower.as_str())
-                        })
-                        .collect();
-                        
-                    // 🌟 [추가] 2차 패스 초기화 직후에도 제목과 요약 텍스트를 재장전합니다.
-                    if !doc_title.trim().is_empty() { lines.push(doc_title.trim().to_string()); }
-                    if !doc_desc.trim().is_empty() { lines.push(doc_desc.trim().to_string()); }
-                        
-                    emit_term(&format!("[EXTRACTION] 문서 제목, 요약, 본문을 총 {}개의 라인으로 분할하여 순차 임베딩 및 분석 진행 중...", lines.len()));
+                    let lines = rebuilt_lines;
 
-                    // 🌟 1. 다국어 접두사가 결합된 타겟(도메인) 및 서술어(verb_expression) 임베딩 장전
-                    let mut target_biases_embs = Vec::new();
-                    let mut target_prejs_embs = Vec::new();
-
-                    for (c_name, base_target, _) in &dynamic_target_items {
-                        let mut b_val = "".to_string();
-                        let mut p_val = "".to_string();
-                        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
-                            b_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            p_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        }
-                        if p_val.trim().is_empty() { p_val = "random unrelated noise".to_string(); }
-
-                        // 언어 꼬리표 추출
-                        let lang_prefix = c_name.split('_').next().unwrap_or("english");
-                        
-                        // 🌟 다국어 동적 합성 (Dynamic Prefixing)
-                        let prefixed_b_val = b_val.split(',')
-                            .map(|s| format!("{} {}", lang_prefix, s.trim()))
-                            .collect::<Vec<_>>().join(", ");
-                        let prefixed_p_val = p_val.split(',')
-                            .map(|s| format!("{} {}", lang_prefix, s.trim()))
-                            .collect::<Vec<_>>().join(", ");
-
-                        let b_emb = model.get_embedding(prefixed_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
-                        let p_emb = model.get_embedding(prefixed_p_val).await.unwrap_or_else(|_| vec![0.0; 384]);
-                        target_biases_embs.push(b_emb);
-                        target_prejs_embs.push(p_emb);
-                    }
-
-                    // 🌟 1-1. 서술어구(verb_expression) 타이브레이커 가이드 벡터 생성 (감지된 모든 다국어 반영)
+                    // 🌟 [CRITICAL FIX] execute_sliding_window_nms 내부에서만 사용되던 변수를 외부 루프(Phase 2)에서도 참조할 수 있도록 재생성합니다.
                     let mut prefixed_verb_b_vals = Vec::new();
-                    
                     for lang in &detected_languages_vec {
-                        let verb_val = bias_json.get("verb")
-                            .and_then(|v| v.get("bias"))
-                            .and_then(|v| v.get(lang))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("verb, predicate");
-                            
-                        let expr_val = bias_json.get("expression")
-                            .and_then(|v| v.get("bias"))
-                            .and_then(|v| v.get(lang))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("idiom, phrase");
-                            
+                        let verb_val = bias_json.get("verb").and_then(|v| v.get("bias")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("verb, predicate");
+                        let expr_val = bias_json.get("expression").and_then(|v| v.get("bias")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("idiom, phrase");
                         let combined_verb_expr = format!("{}, {}", verb_val, expr_val);
-                            
-                        let prefixed = combined_verb_expr.split(',')
-                            .map(|s| format!("{} {}", lang, s.trim()))
-                            .collect::<Vec<_>>().join(", ");
-                            
+                        let prefixed = combined_verb_expr.split(',').map(|s| format!("{} {}", lang, s.trim())).collect::<Vec<_>>().join(", ");
                         prefixed_verb_b_vals.push(prefixed);
                     }
-                    
                     let combined_verb_b_val = prefixed_verb_b_vals.join(", ");
                     let verb_emb = model.get_embedding(combined_verb_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
-
-                    // 🌟 [추가] 문서 제목(Title) 임베딩 생성 (NMS 경쟁 시 고유명사 타이브레이커 가중치용)
-                    let title_emb = model.get_embedding(doc_title.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
-
-                    // 🌟 2. Sliding Window를 통한 단어 단위 청크(Chunk) 생성 및 기초 점수 산출
-                    #[derive(Clone)]
-                    struct ChunkSpan {
-                        line_idx: usize,
-                        start: usize,
-                        end: usize,
-                        text: String,
-                        target_indices: Vec<usize>, // 🌟 [수정] 0.05점 편차 이내의 공동 우승자들을 모두 저장
-                        score: f32,
-                    }
-                    let mut raw_spans = Vec::new();
-
-                    let redacted_marker_prefix = "[___REDACTED_".to_string();
-
-                    for (line_idx, line) in lines.iter().enumerate() {
-                        if cancellation_token.load(Ordering::Relaxed) { break; }
-                        
-                        let words: Vec<&str> = line.split_whitespace().collect();
-                        
-                        for start in 0..words.len() {
-                            let max_end = words.len().min(start + 2); // 1~2 단어 조합
-                            for end in (start + 1)..=max_end {
-                                // 🌟 [CRITICAL FIX] 사전 마스킹된 마커(이메일 등), 노이즈, 링크 해시 마커를 벡터 청크에서 모두 제외하여 순수 텍스트만 임베딩합니다.
-                                let clean_words: Vec<&str> = words[start..end].iter()
-                                    .filter(|&&w| !w.starts_with(&redacted_marker_prefix))
-                                    .copied()
-                                    .collect();
-                                
-                                if clean_words.is_empty() { continue; }
-                                
-                                // 🌟 [CRITICAL FIX] 단순 공백 결합이 아닌 원본 텍스트 기반 정규식 발췌 로직 적용 (PASS 2)
-                                // 다중 공백(특수기호 치환 흔적 등)을 완벽히 보존하여 이후 contains 검사에서 누락되지 않도록 합니다.
-                                let mut regex_pattern = String::new();
-                                for (i, word) in clean_words.iter().enumerate() {
-                                    let escaped_word = regex::escape(word);
-                                    if i > 0 { regex_pattern.push_str(r"\s+"); }
-                                    regex_pattern.push_str(&escaped_word);
-                                }
-                                
-                                let line_text = &lines[line_idx];
-                                let chunk_text = if let Ok(re) = regex::Regex::new(&regex_pattern) {
-                                    if let Some(mat) = re.find(line_text) {
-                                        mat.as_str().to_string()
-                                    } else {
-                                        clean_words.join(" ")
-                                    }
-                                } else {
-                                    clean_words.join(" ")
-                                };
-
-                                // 특수기호만 존재하는 무의미한 텍스트 스킵
-                                if chunk_text.trim().chars().all(|c| !c.is_alphanumeric()) { continue; }
-
-                                // 🌟 [CRITICAL FIX] 1음절(글자 수 1개) 쓰레기 단어('와', '가', '의' 등)의 NMS 우승 원천 차단
-                                let char_count = chunk_text.chars().filter(|c| !c.is_whitespace()).count();
-                                if char_count <= 1 { continue; }
-
-                                // 🌟 [수정] 벡터 품질 보존을 위해 임베딩 모델에 들어가는 텍스트만 특수문자를 공백으로 치환합니다.
-                                let mut clean_for_emb = String::new();
-                                for c in chunk_text.chars() {
-                                    if c.is_alphanumeric() || c == '-' {
-                                        clean_for_emb.push(c);
-                                    } else {
-                                        clean_for_emb.push(' ');
-                                    }
-                                }
-                                let chunk_emb = model.get_embedding(clean_for_emb).await.unwrap_or_else(|_| vec![0.0; 384]);
-                                let word_count = end - start;
-                                let length_weight = 1.0; // 단어 개수 가중치 제거 (길이 무관 동등 점수)
-
-                                // 🌟 서술어(verb_expression) 타이브레이커 계산 (단어 1개 이상 모두 적용)
-                                let v_sim = cosine_similarity(&chunk_emb, &verb_emb);
-                                // 1~2단어 0.05, 3단어 이상 0.10 차등 감점
-                                let beta = if word_count <= 2 { 0.05 } else { 0.10 };
-                                let verb_penalty = v_sim * beta;
-
-                                let mut top_targets: Vec<(usize, f32)> = Vec::new();
-
-                                // 모든 타겟 도메인과 벡터 유사도를 대결시켜 현재 청크에 적합한 도메인들을 찾음
-                                for i in 0..dynamic_target_items.len() {
-                                    let b_score = cosine_similarity(&chunk_emb, &target_biases_embs[i]);
-                                    let p_score = cosine_similarity(&chunk_emb, &target_prejs_embs[i]);
-                                    
-                                    let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
-                                    
-                                    // 🌟 [추가] 문맥 의존도가 높은 고유명사 타겟(이름, 회사, 계정)에 한하여 제목 벡터 유사도 보너스를 동적으로 부여합니다.
-                                    let (_, base_target, _) = &dynamic_target_items[i];
-                                    let mut title_bonus = 0.0;
-                                    let t_sim = cosine_similarity(&chunk_emb, &title_emb);
-                                    if t_sim > 0.0 {
-                                        title_bonus = t_sim * 0.35; // 순수 숫자의 구출을 위해 연관성 가중치를 35%로 대폭 상향
-                                    }
-                                    
-                                    // 🌟 타이브레이커 감점 및 제목 보너스를 최종 스코어에 반영
-                                    let score = b_score - (p_score * penalty_weight) - verb_penalty + title_bonus;
-
-                                    top_targets.push((i, score));
-                                }
-
-                                // 점수 순으로 내림차순 정렬
-                                top_targets.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                                let best_score = top_targets[0].1;
-
-                                // 🌟 2차 패스 커트라인 조정 및 0.05 편차(Margin) 공동 우승 허용 로직 적용
-                                if best_score > 0.3 {
-                                    let final_score = best_score * length_weight;
-
-                                    if verb_penalty > 0.05 {
-                                        emit_term(&format!("    📉 [VERB PENALTY] '{}' -> 감점: {:.4} (최종 반영 스코어: {:.4})", chunk_text, verb_penalty, final_score));
-                                    }
-
-                                    let mut selected_indices = Vec::new();
-                                    
-                                    for (idx, score) in top_targets {
-                                        if best_score - score <= 0.05 && score > 0.3 {
-                                            selected_indices.push(idx);
-                                        } else {
-                                            break;
-                                        }
-                                    }
-
-                                    raw_spans.push(ChunkSpan {
-                                        line_idx, start, end, text: chunk_text, target_indices: selected_indices, score: final_score
-                                    });
-                                }
-                            }
-                        }
-                    }
-
-                    // 🌟 3. 앞뒤 교차 문장(Context) 점수 합산 (Pass 2)
-                    emit_term("  🔄 [PASS 2: CONTEXT ADJUSTMENT] Merging adjacent scores...");
-                    let mut eval_spans = Vec::new();
-                    for i in 0..raw_spans.len() {
-                        let target = &raw_spans[i];
-                        let mut prev_bonus = 0.0;
-                        let mut next_bonus = 0.0;
-
-                        for j in 0..raw_spans.len() {
-                            if i == j { continue; }
-                            let other = &raw_spans[j];
-                            // 동일 라인 내에서 타겟 도메인 교집합이 있을 때만 보너스 교환
-                            let has_common_target = other.target_indices.iter().any(|idx| target.target_indices.contains(idx));
-                            if other.line_idx == target.line_idx && has_common_target {
-                                if other.start < target.start && other.end > target.start && other.score > prev_bonus { prev_bonus = other.score; }
-                                if other.end > target.end && other.start < target.end && other.score > next_bonus { next_bonus = other.score; }
-                            }
-                        }
-                        
-                        let final_context_score = target.score + (prev_bonus * 0.5) + (next_bonus * 0.5);
-                        eval_spans.push(ChunkSpan { score: final_context_score, ..target.clone() });
-                    }
-
-                    // 🌟 4. 항목 중복 제거 및 확정 (Pass 3) - 오버랩 충돌 해결
-                    emit_term("  [PASS 3: RESOLUTION] 중복 추출 항목 병합 및 최적화 진행 중...");
-                    eval_spans.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-                    
-                    let mut final_spans: Vec<ChunkSpan> = Vec::new();
-                    let mut remaining_spans = eval_spans.clone();
-                    let nms_total_items = remaining_spans.len();
-                    let mut last_nms_percent = 0;
-
-                    while !remaining_spans.is_empty() {
-                        let processed = nms_total_items - remaining_spans.len();
-                        let current_percent = if nms_total_items > 0 { (processed as f32 / nms_total_items as f32 * 100.0) as usize } else { 100 };
-                        if current_percent >= last_nms_percent + 10 {
-                            emit_term(&format!("    ⏳ 항목 중복 제거 진행 중... {}% 완료 ({} / {})", current_percent, processed, nms_total_items));
-                            last_nms_percent = current_percent;
-                        }
-
-                        let current = remaining_spans.remove(0); // 가장 점수 높은 조각
-                        let mut overlaps = Vec::new();
-                        let mut next_remaining = Vec::new();
-
-                        for span in remaining_spans {
-                            if current.line_idx == span.line_idx && current.start < span.end && current.end > span.start {
-                                overlaps.push(span);
-                            } else {
-                                next_remaining.push(span);
-                            }
-                        }
-
-                        if overlaps.is_empty() {
-                            for &t_idx in &current.target_indices {
-                                let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                println!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", current.text, context_name.replace("_", " "), current.score);
-                            }
-                            final_spans.push(current);
-                        } else {
-                            let mut candidates = vec![current.clone()];
-                            candidates.extend(overlaps.clone());
-                            
-                            let mut unique_texts = Vec::new();
-                            let mut unique_cands = Vec::new();
-                            for cand in &candidates {
-                                if !unique_texts.contains(&cand.text) {
-                                    unique_texts.push(cand.text.clone());
-                                    unique_cands.push(cand.clone());
-                                } else {
-                                    if let Some(pos) = unique_texts.iter().position(|x| x == &cand.text) {
-                                        for &idx in &cand.target_indices {
-                                            if !unique_cands[pos].target_indices.contains(&idx) {
-                                                unique_cands[pos].target_indices.push(idx);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if unique_cands.len() == 1 {
-                                let winner = unique_cands[0].clone();
-                                for &t_idx in &winner.target_indices {
-                                    let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                    println!("    👑 [WINNER] '{}' -> {} (Score: {:.4})", winner.text, context_name.replace("_", " "), winner.score);
-                                }
-                                final_spans.push(winner);
-                            } else {
-                                println!("    ⚖️ [SCORE RESOLUTION] 중첩 충돌 발생! 벡터 점수 기반 판별: {:?}", unique_texts);
-                                
-                                // 점수가 가장 높은 후보를 승자로 선택 (동점일 경우 텍스트 길이가 긴 것을 선호)
-                                let mut sorted_cands = unique_cands.clone();
-                                sorted_cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(b.text.len().cmp(&a.text.len())));
-                                
-                                let winner = sorted_cands[0].clone();
-                                // winner가 원래 unique_cands에서 몇 번째인지 찾기 (로그 출력을 위해)
-                                let winner_idx = unique_cands.iter().position(|x| x.text == winner.text).unwrap_or(0);
-                                
-                                for &t_idx in &winner.target_indices {
-                                    let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                    println!("    👑 [WINNER-SCORE] '{}' -> {} (Score: {:.4})", winner.text, context_name.replace("_", " "), winner.score);
-                                }
-                                
-                                for (i, cand) in unique_cands.iter().enumerate() {
-                                    if i != winner_idx {
-                                        for &t_idx in &cand.target_indices {
-                                            let (context_name, _, _) = &dynamic_target_items[t_idx];
-                                            println!("    💀 [DEFEAT-SCORE] '{}' -> {} (Rejected, Score: {:.4})", cand.text, context_name.replace("_", " "), cand.score);
-                                        }
-                                    }
-                                }
-                                
-                                final_spans.push(winner);
-                            }
-                        }
-
-                        remaining_spans = next_remaining;
-                    }
-                    emit_term(&format!("    ✅ 중복 항목 제거 완료 (총 {}개 처리)", nms_total_items));
-
-                    // 🌟 [추가] 4.5 인접 청크 동적 스팬 확장 (Dynamic Span Expansion)
-                    // 물리적으로 인접한 청크들이 만들어낼 수 있는 모든 결합 경우의 수를 파생시켜 후보군에 추가합니다.
-                    
-                    let link_val = json_data.get("link").and_then(|v| v.as_str()).unwrap_or("");
-                    let ext_for_tabular = std::path::Path::new(link_val).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                    let is_tabular = ext_for_tabular == "csv" || ext_for_tabular == "xlsx" || ext_for_tabular == "xls";
-
-                    let mut expanded_only_spans: Vec<ChunkSpan> = Vec::new(); 
-
-                    if is_tabular {
-                        emit_term("  🔗 [PASS 3.5: GAP BRIDGING] CSV/Excel 표 데이터이므로 인접 단어 결합(Span Expansion) 절차를 패스합니다.");
-                    } else {
-                        emit_term("  🔗 [PASS 3.5: GAP BRIDGING] Dynamic Span Expansion for adjacent winner chunks...");
-                        final_spans.sort_by(|a, b| a.line_idx.cmp(&b.line_idx).then(a.start.cmp(&b.start)));
-                        
-                        // 연속된 청크들을 그룹화
-                        let mut contiguous_groups: Vec<Vec<ChunkSpan>> = Vec::new();
-                        let mut current_group: Vec<ChunkSpan> = Vec::new();
-                        
-                        for span in &final_spans {
-                            if let Some(last) = current_group.last() {
-                                // 🌟 [CRITICAL FIX] 무분별한 이종 카테고리(예: 이름+주민번호) 결합을 막기 위해,
-                                // 타겟 도메인(target_indices)에 최소 1개 이상의 교집합이 존재할 때만 결합을 허용합니다.
-                                let has_common_target = last.target_indices.iter().any(|idx| span.target_indices.contains(idx));
-                                
-                                if last.line_idx == span.line_idx && last.end == span.start && has_common_target {
-                                    // 🌟 두 청크 중 최소 하나는 '단어 1개'로 구성된 경우에만 연속성을 인정하여 과잉 그룹화 방지
-                                    let last_word_count = last.end - last.start;
-                                    let span_word_count = span.end - span.start;
-                                    
-                                    if last_word_count == 1 || span_word_count == 1 {
-                                        current_group.push(span.clone());
-                                        continue;
-                                    }
-                                }
-                            }
-                            if !current_group.is_empty() {
-                                contiguous_groups.push(current_group.clone());
-                            }
-                            current_group = vec![span.clone()];
-                        }
-                        if !current_group.is_empty() {
-                            contiguous_groups.push(current_group);
-                        }
-                        
-                        let total_groups = contiguous_groups.len();
-                        let mut last_expand_percent = 0;
-
-                        // 🌟 [CRITICAL FIX] 2조각뿐만 아니라 최대 3조각(단어)까지 확장하여 고유명사가 파편화되는 것을 방지합니다.
-                        for (g_idx, group) in contiguous_groups.into_iter().enumerate() {
-                            let current_percent = if total_groups > 0 { (g_idx as f32 / total_groups as f32 * 100.0) as usize } else { 100 };
-                            if current_percent >= last_expand_percent + 10 {
-                                emit_term(&format!("    ⏳ 인접 단어 결합(Span Expansion) 분석 중... {}% 완료 ({} / {})", current_percent, g_idx, total_groups));
-                                last_expand_percent = current_percent;
-                            }
-
-                            let n = group.len();
-                            if n >= 2 {
-                                let max_len = n.min(3); // 최대 3조각 조합 허용
-                                for len in 2..=max_len {
-                                    for start_idx in 0..=(n - len) {
-                                        let sub_group = &group[start_idx..(start_idx + len)];
-                                        
-                                        // 🌟 [CRITICAL FIX] 단순 공백 결합이 아닌 원본 텍스트 기반 정규식 발췌 로직 적용 (PASS 3.5)
-                                        // 결합되는 조각들 사이의 원래 띄어쓰기(다중 공백 등) 간격을 그대로 가져옵니다.
-                                        let combined_words: Vec<&str> = sub_group.iter().map(|s| s.text.as_str()).collect();
-                                        let mut regex_pattern = String::new();
-                                        for (i, word) in combined_words.iter().enumerate() {
-                                            let escaped_word = regex::escape(word).replace("\\ ", r"\s+");
-                                            if i > 0 { regex_pattern.push_str(r"\s+"); }
-                                            regex_pattern.push_str(&escaped_word);
-                                        }
-                                        
-                                        let line_text = &lines[sub_group[0].line_idx];
-                                        let combined_text = if let Ok(re) = regex::Regex::new(&regex_pattern) {
-                                            if let Some(mat) = re.find(line_text) {
-                                                mat.as_str().to_string()
-                                            } else {
-                                                combined_words.join(" ")
-                                            }
-                                        } else {
-                                            combined_words.join(" ")
-                                        };
-                                        
-                                        // 🌟 파생된 거대 조각은 결합된 모든 조각들의 타겟(카테고리)을 합집합으로 가집니다.
-                                        let mut combined_targets = Vec::new();
-                                        for s in sub_group {
-                                            combined_targets.extend(s.target_indices.clone());
-                                        }
-                                        combined_targets.sort();
-                                        combined_targets.dedup();
-
-                                        // 🌟 [수정] Granite 임베딩을 호출하여 결합된 텍스트의 진짜 문맥 점수를 재계산합니다.
-                                        let combined_emb = model.get_embedding(combined_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
-                                        let mut real_max_score = 0.0_f32;
-                                        
-                                        for &t_idx in &combined_targets {
-                                            let b_score = cosine_similarity(&combined_emb, &target_biases_embs[t_idx]);
-                                            let p_score = cosine_similarity(&combined_emb, &target_prejs_embs[t_idx]);
-                                            
-                                            // 🌟 [CRITICAL FIX] "연임에 성공한", "바르셀로나에 맞서" 등 서술어/동사가 섞인 무의미한 확장을 원천 차단하기 위해 
-                                            // 결합된 텍스트에 대한 verb_penalty 가중치를 대폭 상향(0.10 -> 0.25)하여 NMS 경쟁에서 패배하도록 유도합니다.
-                                            let v_sim = cosine_similarity(&combined_emb, &verb_emb);
-                                            let verb_penalty = v_sim * 0.25; 
-                                            
-                                            let mut title_bonus = 0.0;
-                                            let t_sim = cosine_similarity(&combined_emb, &title_emb);
-                                            if t_sim > 0.0 { title_bonus = t_sim * 0.35; }
-                                            
-                                            let target_score = b_score - (p_score * 0.7) - verb_penalty + title_bonus;
-                                            if target_score > real_max_score {
-                                                real_max_score = target_score;
-                                            }
-                                        }
-
-                                        // 🌟 [CRITICAL FIX] 동사 패널티로 인해 점수가 폭락한 경우(예: '연임에 성공한'), 
-                                        // 기존 조각의 점수를 무조건 상속(90%)받지 못하도록 방어 코드를 추가합니다.
-                                        // 서술어 유사도(v_sim)가 특정 수치를 초과하면 상속을 완전히 끊어버려 탈락(Drop)을 유도합니다.
-                                        let v_sim_for_drop = cosine_similarity(&combined_emb, &verb_emb);
-                                        let final_score = if v_sim_for_drop > 0.40 {
-                                            real_max_score // 동사성이 강하면 상속 없이 순수 계산 점수만 반영 (NMS 탈락 유도)
-                                        } else {
-                                            let inherited_max = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
-                                            real_max_score.max(inherited_max * 0.9)
-                                        };
-                                        
-                                        // 0.3 커트라인을 넘지 못하면 아예 후보군에 넣지 않음
-                                        if final_score > 0.3 {
-                                            let new_span = ChunkSpan {
-                                                line_idx: sub_group[0].line_idx,
-                                                start: sub_group[0].start,
-                                                end: sub_group.last().unwrap().end,
-                                                text: combined_text.clone(),
-                                                target_indices: combined_targets,
-                                                score: final_score,
-                                            };
-                                            
-                                            println!("    🤝 [EXPANDED] {}조각 결합 파생: '{}' (재평가 스코어: {:.4})", len, combined_text, final_score);
-                                            expanded_only_spans.push(new_span);
-                                        } else {
-                                            println!("    🚫 [EXPANDED DROP] 동사/서술어 패널티로 결합 기각: '{}'", combined_text);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        emit_term(&format!("    ✅ 인접 단어 결합 분석 완료 (총 {} 그룹 처리)", total_groups));
-
-                        // 🌟 [추가] 4.6 EXPANDED 결합 조각과 기존 조각 간의 중복(Overlap) 제거 (2차 중복 제거)
-                        emit_term("  🧹 [PASS 3.6: EXPANDED CLEANUP] 결합된 조각과 원본 조각 간의 최종 중복 항목을 정리합니다...");
-                        
-                        let mut all_pool = final_spans.clone();
-                        all_pool.extend(expanded_only_spans);
-
-                        // 점수 기준 내림차순 정렬 (동점이면 텍스트 길이가 긴 것 우선)
-                        all_pool.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(b.text.len().cmp(&a.text.len())));
-
-                        let mut cleaned_spans: Vec<ChunkSpan> = Vec::new();
-                        let total_cleanup = all_pool.len();
-                        let mut last_cleanup_percent = 0;
-
-                        for (c_idx, cand) in all_pool.into_iter().enumerate() {
-                            let current_percent = if total_cleanup > 0 { (c_idx as f32 / total_cleanup as f32 * 100.0) as usize } else { 100 };
-                            if current_percent >= last_cleanup_percent + 10 {
-                                emit_term(&format!("    ⏳ 최종 정리 진행 중... {}% 완료 ({} / {})", current_percent, c_idx, total_cleanup));
-                                last_cleanup_percent = current_percent;
-                            }
-
-                            let mut is_overlapped = false;
-                            for selected in &cleaned_spans {
-                                if cand.line_idx == selected.line_idx {
-                                    if cand.start < selected.end && cand.end > selected.start {
-                                        is_overlapped = true;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if !is_overlapped {
-                                cleaned_spans.push(cand);
-                            } else {
-                                if let Some(overlap_target) = cleaned_spans.iter().find(|s| s.line_idx == cand.line_idx && cand.start < s.end && cand.end > s.start) {
-                                    println!("    🗑️ [CLEANUP] 조각 기각됨 (중첩 흡수): '{}' (Score: {:.4}) -> 승자: '{}' (Score: {:.4})", cand.text, cand.score, overlap_target.text, overlap_target.score);
-                                }
-                            }
-                        }
-                        emit_term(&format!("    ✅ 최종 항목 정리 완료 (총 {}개 검증)", total_cleanup));
-                        final_spans = cleaned_spans;
-                    }
+                    let title_emb = model.get_embedding(doc_title.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
+                    let noise_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
                     // 🌟 5. NMS 승자들을 바탕으로 매칭된 라인 및 valid_targets 재조립
-                    // 구조: (target_name, base_target, target_desc, bias_keyword, prejudice, is_phase2, specific_line_text, specific_candidate_text)
                     let mut valid_targets: Vec<(String, String, String, String, String, bool, String, String)> = Vec::new(); // 🌟 PUG 한 줄, 단일 키워드 1:1 맵핑
 
                     for span in &final_spans {
