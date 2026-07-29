@@ -2530,21 +2530,21 @@ pub fn extract_document_text(file_path: &str) -> anyhow::Result<String> {
             Ok(result)
         },
         "xlsx" | "xls" => {
-            use calamine::{Reader, open_workbook_auto, DataType};
+            use calamine::{Reader, open_workbook_auto, Data};
             let mut excel = open_workbook_auto(path).map_err(|e| anyhow::anyhow!("Excel error: {:?}", e))?;
             let mut result = String::new();
 
             let sheets = excel.sheet_names().to_owned();
             for sheet in sheets {
-                if let Some(Ok(range)) = excel.worksheet_range(&sheet) {
+                if let Ok(range) = excel.worksheet_range(&sheet) {
                     let mut grid: Vec<Vec<String>> = Vec::new();
                     for row in range.rows() {
                         let row_str: Vec<String> = row.iter().map(|cell| {
                             match cell {
-                                DataType::String(s) => s.to_string(),
-                                DataType::Float(f) => f.to_string(),
-                                DataType::Int(i) => i.to_string(),
-                                DataType::Bool(b) => b.to_string(),
+                                Data::String(s) => s.to_string(),
+                                Data::Float(f) => f.to_string(),
+                                Data::Int(i) => i.to_string(),
+                                Data::Bool(b) => b.to_string(),
                                 _ => "".to_string(),
                             }
                         }).collect();
@@ -2580,12 +2580,11 @@ pub fn extract_document_text(file_path: &str) -> anyhow::Result<String> {
                         loop {
                             match reader.read_event() {
                                 Ok(quick_xml::events::Event::Text(e)) => {
-                                    if let Ok(text) = e.unescape() {
-                                        let trimmed = text.trim();
-                                        if !trimmed.is_empty() {
-                                            result.push_str(trimmed);
-                                            result.push(' ');
-                                        }
+                                    let text_str = String::from_utf8_lossy(e.as_ref());
+                                    let trimmed = text_str.trim();
+                                    if !trimmed.is_empty() {
+                                        result.push_str(trimmed);
+                                        result.push(' ');
                                     }
                                 },
                                 Ok(quick_xml::events::Event::Eof) => break,

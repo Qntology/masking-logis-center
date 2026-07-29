@@ -1895,66 +1895,97 @@ async fn process_task(
                                     }
                                     
                                     if let Ok(char_tensor) = ndarray::Array2::from_shape_vec((1, seq_len), char_ids) {
-                                        let char_features = ndarray::Array3::<i64>::zeros((1, seq_len, 5));
+                                        // 🌟 [CRITICAL FIX] 모델이 요구하는 feature_dim을 직접 읽어와서 동적 생성 (한국어는 0)
+                                        let mut feature_dim = 0;
+                                        for input_meta in &stanza.tokenize_session.inputs {
+                                            if input_meta.name == "f" || input_meta.name == "char_features" {
+                                                if let Some(&Some(d)) = input_meta.dimensions.get(2) {
+                                                    feature_dim = d as usize;
+                                                }
+                                            }
+                                        }
+                                        // 🌟 [디버깅 & 픽스] feature_dim이 0일 경우 빈 텐서가 생성되어 ONNX Runtime에서 Shape 에러가 발생할 수 있으므로 최소 1 이상의 더미 차원을 부여합니다.
+                                        if feature_dim == 0 {
+                                            feature_dim = 32;
+                                        }
+                                        
+                                        let char_features = ndarray::Array3::<i64>::zeros((1, seq_len, feature_dim));
                                         let seq_lengths = ndarray::Array1::<i64>::from_vec(vec![seq_len as i64]);
                                         
-                                        // 🌟 [개선] Tokenizer 입력 역시 하드코딩 없이 모델 스키마의 Input Name을 그대로 수용합니다.
                                         let mut tensor_pool = std::collections::HashMap::new();
-                                        tensor_pool.insert("char_tensor", char_tensor.clone().into_dyn());
-                                        tensor_pool.insert("char_features", char_features.clone().into_dyn());
-                                        tensor_pool.insert("seq_lengths", seq_lengths.clone().into_dyn());
+                                        tensor_pool.insert("x", char_tensor.clone().into_dyn());
+                                        tensor_pool.insert("f", char_features.clone().into_dyn());
+                                        tensor_pool.insert("char_tensor", char_tensor.into_dyn());
+                                        tensor_pool.insert("char_features", char_features.into_dyn());
+                                        tensor_pool.insert("seq_lengths", seq_lengths.into_dyn());
                                         
-                                        let mut tok_inputs = Vec::new();
-                                        for input_meta in &stanza.tokenize_session.inputs {
-                                            let exact_name = input_meta.name.clone();
+                                        use onnxruntime::mixed::{DynInput, SessionMixedExt};
+
+                                        // 🌟 [CRITICAL FIX] E0597 & E0502 해결:
+                                        // tokenize_session.inputs 와 outputs 에 대한 불변 참조(immutable borrow)를 
+                                        // run_mixed 의 가변 참조(mutable borrow)와 분리하기 위해 
+                                        // 문자열을 별도의 로컬 캐시(Vec<String>)로 복제하여 라이프타임을 독립시킵니다.
+                                        let input_names_cache: Vec<String> = stanza.tokenize_session.inputs.iter().map(|i| i.name.clone()).collect();
+                                        let mut mixed_inputs = Vec::new();
+                                        
+                                        for exact_name in &input_names_cache {
                                             if let Some(tensor) = tensor_pool.get(exact_name.as_str()) {
-                                                tok_inputs.push(tensor.clone());
+                                                // 🌟 [핵심] f32를 요구하는 피처 텐서와 i64를 요구하는 문자 텐서를 구분하여 다이나믹 타입으로 묶어버립니다.
+                                                if exact_name == "f" || exact_name == "char_features" {
+                                                    mixed_inputs.push((exact_name.as_str(), DynInput::F32(tensor.mapv(|x| x as f32))));
+                                                } else {
+                                                    mixed_inputs.push((exact_name.as_str(), DynInput::I64(tensor.clone())));
+                                                }
                                             } else {
-                                                // 매칭 실패 시 로그만 남기고, 모델의 요구를 억지로 끼워 맞추지 않습니다.
-                                                println!("[STANZA-WARN] Tokenizer 모델에 정의되지 않은 입력 생략: {}", exact_name);
+                                                emit_term(&format!("[STANZA-WARN] Tokenizer 모델에 정의되지 않은 입력 생략: {}", exact_name));
                                             }
                                         }
                                         
-                                        match stanza.tokenize_session.run::<'_, '_, '_, i64, f32, _>(tok_inputs) {
-                                            Ok(outputs) => {
-                                                let output_tensor = &outputs[0];
+                                        macro_rules! process_tok_outputs {
+                                            ($outputs:expr) => {
+                                                let output_tensor = &$outputs[0];
                                                 let shape = output_tensor.shape();
                                                 let num_classes = *shape.last().unwrap() as usize;
                                                 let is_3d = shape.len() == 3;
                                                 
                                                 let mut current_word = String::new();
-                                                let mut word_start = 0;
-                                                
                                                 for i in 0..seq_len {
                                                     current_word.push(chars[i]);
                                                     
                                                     let mut max_val = std::f32::MIN;
                                                     let mut max_idx = 0;
                                                     for c_idx in 0..num_classes {
-                                                        let val = if is_3d {
-                                                            output_tensor[[0, i, c_idx]]
-                                                        } else {
-                                                            output_tensor[[i, c_idx]]
-                                                        };
+                                                        let val = if is_3d { output_tensor[[0, i, c_idx]] } else { output_tensor[[i, c_idx]] };
                                                         if val > max_val { max_val = val; max_idx = c_idx; }
                                                     }
                                                     
                                                     if max_idx > 0 || i == seq_len - 1 {
                                                         let token_str = current_word.trim().to_string();
                                                         if !token_str.is_empty() {
-                                                            word_spans.push((token_str.clone(), word_start, i + 1));
                                                             ext_words_string.push(token_str);
                                                         }
                                                         current_word.clear();
-                                                        word_start = i + 1;
                                                     }
                                                 }
+                                            }
+                                        }
+
+                                        // 🌟 [문제 해결] 핑퐁 로직을 완전히 파기하고, 자체 구현한 확장 메서드(run_mixed)를 통해 혼합 타입을 C API 직통으로 발사합니다!
+                                        let out_names_cache: Vec<String> = stanza.tokenize_session.outputs.iter().map(|o| o.name.clone()).collect();
+                                        let out_names: Vec<&str> = out_names_cache.iter().map(|s| s.as_str()).collect();
+                                        match stanza.tokenize_session.run_mixed(mixed_inputs, out_names) {
+                                            Ok(outputs) => {
+                                                emit_term("[STANZA] ✅ Tokenizer ONNX 혼합 타입(Mixed) 추론 100% 성공!");
+                                                process_tok_outputs!(outputs);
                                             },
-                                            Err(_e) => {}
+                                            Err(e) => {
+                                                emit_term(&format!("  ⚠️ [STANZA-WARN] Tokenizer ONNX 혼합 타입 실행 실패: {:?}", e));
+                                            }
                                         }
                                     }
                                 }
-                                
+
+                                // 🌟 [CRITICAL FIX] Tokenizer가 띄어쓰기 기준으로 제대로 자르지 못했거나 실패한 경우 Fallback으로 공백 기반 분할을 선행합니다.
                                 if ext_words_string.is_empty() {
                                     ext_words_string = Vec::new();
                                     let chars: Vec<char> = text_to_analyze.chars().collect();
@@ -2145,17 +2176,16 @@ async fn process_task(
                                                 // POS 태깅을 마친 trimmed_words를 대상으로 lemma.onnx를 돌려 원형(어근)만 추출하여 교체합니다.
                                                 if !trimmed_words.is_empty() {
                                                     let words_refs: Vec<&str> = trimmed_words.iter().map(|s| s.as_str()).collect();
+                                                    let mut lemma_words: Vec<String> = vec![String::new(); trimmed_words.len()];
                                                     if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session) {
                                                         if let Ok(lemma_outputs) = stanza.lemma_session.run::<'_, '_, '_, i64, f32, _>(lemma_inputs) {
                                                             let output_tensor = &lemma_outputs[0];
                                                             let shape = output_tensor.shape();
                                                             let is_4d = shape.len() == 4;
-                                                            // 통상적으로 Seq2Seq lemma의 출력 차원 파악 후 디코딩 수행
                                                             let num_words = if is_4d { shape[1] as usize } else { shape[0] as usize };
                                                             
                                                             for w_idx in 0..num_words.min(trimmed_words.len()) {
                                                                 let mut lemma_chars = String::new();
-                                                                // 차원 구조에 따라 시퀀스를 뽑아 글자로 복원
                                                                 if is_4d {
                                                                     let max_len = shape[2] as usize;
                                                                     let num_classes = shape[3] as usize;
@@ -2184,7 +2214,7 @@ async fn process_task(
                                                                         }
                                                                         if best_class > 0 {
                                                                             if let Some(&c) = stanza.preprocessor.id_to_char.get(&(best_class as i64)) {
-                                                                                if c != '<' && c != '>' { lemma_chars.push(c); } // 제어문자 무시
+                                                                                if c != '<' && c != '>' { lemma_chars.push(c); }
                                                                             }
                                                                         }
                                                                     }
@@ -2200,14 +2230,33 @@ async fn process_task(
                                                                     }
                                                                 }
                                                                 
-                                                                // 원형(Lemma) 문자열이 유효하게 도출되었을 경우 기존 단어를 교체 (커팅 반영)
-                                                                let clean_lemma = lemma_chars.trim();
-                                                                if !clean_lemma.is_empty() && clean_lemma != trimmed_words[w_idx] {
-                                                                    emit_term(&format!("[STANZA] ✂️ Lemma 글자 커팅 성공: '{}' -> '{}'", trimmed_words[w_idx], clean_lemma));
-                                                                    trimmed_words[w_idx] = clean_lemma.to_string();
-                                                                    is_trimmed = true;
+                                                                lemma_words[w_idx] = lemma_chars.trim().to_string();
+                                                            }
+                                                        }
+                                                    }
+
+                                                    for (w_idx, word) in trimmed_words.clone().iter().enumerate() {
+                                                        let lemma = if let Some(l) = lemma_words.get(w_idx) { l.clone() } else { String::new() };
+                                                        let mut clean_word = word.clone();
+                                                        let mut local_stripped = false;
+
+                                                        if !lemma.is_empty() && word.ends_with(&lemma) && word.len() > lemma.len() {
+                                                            let new_len = word.len() - lemma.len();
+                                                            clean_word = word[..new_len].to_string();
+                                                            local_stripped = true;
+                                                        } else if !lemma.is_empty() && word.contains(&lemma) && word.len() > lemma.len() {
+                                                            if let Some(idx) = word.rfind(&lemma) {
+                                                                if idx >= 3 {
+                                                                    clean_word = word[..idx].to_string();
+                                                                    local_stripped = true;
                                                                 }
                                                             }
+                                                        }
+
+                                                        if local_stripped && !clean_word.trim().is_empty() && clean_word != trimmed_words[w_idx] {
+                                                            emit_term(&format!("[STANZA] ✂️ Lemma 글자 커팅 성공: '{}' -> '{}'", trimmed_words[w_idx], clean_word));
+                                                            trimmed_words[w_idx] = clean_word;
+                                                            is_trimmed = true;
                                                         }
                                                     }
                                                 }
@@ -2598,66 +2647,99 @@ async fn process_task(
                                             }
                                             
                                             if let Ok(char_tensor) = ndarray::Array2::from_shape_vec((1, seq_len), char_ids) {
-                                                let char_features = ndarray::Array3::<i64>::zeros((1, seq_len, 5));
+                                                // 🌟 [CRITICAL FIX] 모델이 요구하는 feature_dim을 직접 읽어와서 동적 생성 (한국어는 0)
+                                                let mut feature_dim = 0;
+                                                for input_meta in &stanza.tokenize_session.inputs {
+                                                    if input_meta.name == "f" || input_meta.name == "char_features" {
+                                                        if let Some(&Some(d)) = input_meta.dimensions.get(2) {
+                                                            feature_dim = d as usize;
+                                                        }
+                                                    }
+                                                }
+                                                // 🌟 [디버깅 & 픽스] feature_dim이 0일 경우 빈 텐서가 생성되어 ONNX Runtime에서 Shape 에러가 발생할 수 있으므로 최소 1 이상의 더미 차원을 부여합니다.
+                                                if feature_dim == 0 {
+                                                    feature_dim = 32;
+                                                }
+                                                
+                                                let char_features = ndarray::Array3::<i64>::zeros((1, seq_len, feature_dim));
                                                 let seq_lengths = ndarray::Array1::<i64>::from_vec(vec![seq_len as i64]);
                                                 
-                                                // 🌟 [개선] Tokenizer 입력 역시 하드코딩 없이 모델 스키마의 Input Name을 그대로 수용합니다.
                                                 let mut tensor_pool = std::collections::HashMap::new();
-                                                tensor_pool.insert("char_tensor", char_tensor.clone().into_dyn());
-                                                tensor_pool.insert("char_features", char_features.clone().into_dyn());
-                                                tensor_pool.insert("seq_lengths", seq_lengths.clone().into_dyn());
+                                                tensor_pool.insert("x", char_tensor.clone().into_dyn());
+                                                tensor_pool.insert("f", char_features.clone().into_dyn());
+                                                tensor_pool.insert("char_tensor", char_tensor.into_dyn());
+                                                tensor_pool.insert("char_features", char_features.into_dyn());
+                                                tensor_pool.insert("seq_lengths", seq_lengths.into_dyn());
                                                 
-                                                let mut tok_inputs = Vec::new();
+                                                let mut tok_inputs_i64 = Vec::new();
+                                                let mut tok_inputs_f32 = Vec::new();
                                                 for input_meta in &stanza.tokenize_session.inputs {
                                                     let exact_name = input_meta.name.clone();
                                                     if let Some(tensor) = tensor_pool.get(exact_name.as_str()) {
-                                                        tok_inputs.push(tensor.clone());
+                                                        tok_inputs_i64.push(tensor.clone());
+                                                        tok_inputs_f32.push(tensor.mapv(|x| x as f32));
                                                     } else {
-                                                        // 매칭 실패 시 로그만 남기고, 모델의 요구를 억지로 끼워 맞추지 않습니다.
-                                                        println!("[STANZA-WARN] Tokenizer 모델에 정의되지 않은 입력 생략: {}", exact_name);
+                                                        emit_term(&format!("[STANZA-WARN] Tokenizer 모델에 정의되지 않은 입력 생략: {}", exact_name));
                                                     }
                                                 }
                                                 
-                                                match stanza.tokenize_session.run::<'_, '_, '_, i64, f32, _>(tok_inputs) {
-                                                    Ok(outputs) => {
-                                                        let output_tensor = &outputs[0];
+                                                macro_rules! process_tok_outputs {
+                                                    ($outputs:expr) => {
+                                                        let output_tensor = &$outputs[0];
                                                         let shape = output_tensor.shape();
                                                         let num_classes = *shape.last().unwrap() as usize;
                                                         let is_3d = shape.len() == 3;
                                                         
                                                         let mut current_word = String::new();
-                                                        let mut word_start = 0;
-                                                        
                                                         for i in 0..seq_len {
                                                             current_word.push(chars[i]);
                                                             
                                                             let mut max_val = std::f32::MIN;
                                                             let mut max_idx = 0;
                                                             for c_idx in 0..num_classes {
-                                                                let val = if is_3d {
-                                                                    output_tensor[[0, i, c_idx]]
-                                                                } else {
-                                                                    output_tensor[[i, c_idx]]
-                                                                };
+                                                                let val = if is_3d { output_tensor[[0, i, c_idx]] } else { output_tensor[[i, c_idx]] };
                                                                 if val > max_val { max_val = val; max_idx = c_idx; }
                                                             }
                                                             
                                                             if max_idx > 0 || i == seq_len - 1 {
                                                                 let token_str = current_word.trim().to_string();
                                                                 if !token_str.is_empty() {
-                                                                    word_spans.push((token_str.clone(), word_start, i + 1));
                                                                     ext_words_string.push(token_str);
                                                                 }
                                                                 current_word.clear();
-                                                                word_start = i + 1;
                                                             }
                                                         }
-                                                    },
-                                                    Err(_e) => {}
+                                                    }
+                                                }
+
+                                                let mut fallback_to_f32 = false;
+                                                let mut i64_err_msg = String::new();
+                                                {
+                                                    match stanza.tokenize_session.run::<'_, '_, '_, i64, f32, _>(tok_inputs_i64) {
+                                                        Ok(outputs) => {
+                                                            process_tok_outputs!(outputs);
+                                                        },
+                                                        Err(e) => {
+                                                            i64_err_msg = format!("{:?}", e);
+                                                            fallback_to_f32 = true;
+                                                        }
+                                                    }
+                                                }
+                                                if fallback_to_f32 {
+                                                    match stanza.tokenize_session.run::<'_, '_, '_, f32, f32, _>(tok_inputs_f32) {
+                                                        Ok(outputs) => {
+                                                            process_tok_outputs!(outputs);
+                                                        },
+                                                        Err(e) => {
+                                                            // 🌟 [디버깅 & 픽스] onnxruntime-rs 0.0.14의 한계 (동종 타입만 전달 가능) 및 혼합 타입(i64, f32) 에러 로깅 처리
+                                                            emit_term(&format!("  ⚠️ [STANZA-WARN] Tokenizer ONNX 모델의 입력 타입 제약으로 인해 실행을 우회합니다.\n    - i64 Run Error: {}\n    - f32 Run Error: {:?}", i64_err_msg, e));
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
-                                        
+
+                                        // 🌟 [CRITICAL FIX] Tokenizer가 띄어쓰기 기준으로 제대로 자르지 못했거나 실패한 경우 Fallback으로 공백 기반 분할을 선행합니다.
                                         if ext_words_string.is_empty() {
                                             ext_words_string = Vec::new();
                                             let chars: Vec<char> = text_to_analyze.chars().collect();
@@ -2845,6 +2927,7 @@ async fn process_task(
                                                     // 추출 단어에 대한 NLP 검증 시에도 동일하게 원형 커팅을 시도합니다.
                                                     if !trimmed_words.is_empty() {
                                                         let words_refs: Vec<&str> = trimmed_words.iter().map(|s| s.as_str()).collect();
+                                                        let mut lemma_words: Vec<String> = vec![String::new(); trimmed_words.len()];
                                                         if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session) {
                                                             if let Ok(lemma_outputs) = stanza.lemma_session.run::<'_, '_, '_, i64, f32, _>(lemma_inputs) {
                                                                 let output_tensor = &lemma_outputs[0];
@@ -2866,7 +2949,7 @@ async fn process_task(
                                                                             }
                                                                             if best_class > 0 {
                                                                                 if let Some(&c) = stanza.preprocessor.id_to_char.get(&(best_class as i64)) {
-                                                                                    if c != '<' && c != '>' { lemma_chars.push(c); }
+                                                                                    if c != '<' && c != '>' { lemma_chars.push(c); } // 제어문자 무시
                                                                                 }
                                                                             }
                                                                         }
@@ -2898,13 +2981,33 @@ async fn process_task(
                                                                         }
                                                                     }
                                                                     
-                                                                    let clean_lemma = lemma_chars.trim();
-                                                                    if !clean_lemma.is_empty() && clean_lemma != trimmed_words[w_idx] {
-                                                                        emit_term(&format!("[STANZA-EXT] ✂️ Lemma 글자 커팅 성공: '{}' -> '{}'", trimmed_words[w_idx], clean_lemma));
-                                                                        trimmed_words[w_idx] = clean_lemma.to_string();
-                                                                        is_trimmed = true;
+                                                                    lemma_words[w_idx] = lemma_chars.trim().to_string();
+                                                                }
+                                                            }
+                                                        }
+
+                                                        for (w_idx, word) in trimmed_words.clone().iter().enumerate() {
+                                                            let lemma = if let Some(l) = lemma_words.get(w_idx) { l.clone() } else { String::new() };
+                                                            let mut clean_word = word.clone();
+                                                            let mut local_stripped = false;
+
+                                                            if !lemma.is_empty() && word.ends_with(&lemma) && word.len() > lemma.len() {
+                                                                let new_len = word.len() - lemma.len();
+                                                                clean_word = word[..new_len].to_string();
+                                                                local_stripped = true;
+                                                            } else if !lemma.is_empty() && word.contains(&lemma) && word.len() > lemma.len() {
+                                                                if let Some(idx) = word.rfind(&lemma) {
+                                                                    if idx >= 3 {
+                                                                        clean_word = word[..idx].to_string();
+                                                                        local_stripped = true;
                                                                     }
                                                                 }
+                                                            }
+
+                                                            if local_stripped && !clean_word.trim().is_empty() && clean_word != trimmed_words[w_idx] {
+                                                                emit_term(&format!("[STANZA-EXT] ✂️ Lemma 글자 커팅 성공: '{}' -> '{}'", trimmed_words[w_idx], clean_word));
+                                                                trimmed_words[w_idx] = clean_word;
+                                                                is_trimmed = true;
                                                             }
                                                         }
                                                     }
