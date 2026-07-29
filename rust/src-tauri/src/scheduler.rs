@@ -1975,7 +1975,7 @@ async fn process_task(
                                         let out_names: Vec<&str> = out_names_cache.iter().map(|s| s.as_str()).collect();
                                         match stanza.tokenize_session.run_mixed(mixed_inputs, out_names) {
                                             Ok(outputs) => {
-                                                emit_term("[STANZA] ✅ Tokenizer ONNX 혼합 타입(Mixed) 추론 100% 성공!");
+                                                // emit_term("[STANZA] ✅ Tokenizer ONNX 혼합 타입(Mixed) 추론 100% 성공!");
                                                 process_tok_outputs!(outputs);
                                             },
                                             Err(e) => {
@@ -2609,10 +2609,10 @@ async fn process_task(
                                     
                                     // 1차 절단: 알파벳/한글/숫자 등 일반 문자가 아닌 모든 특수기호를 범용적으로 찾아 공백으로 치환하여 단어 결합 방지
                                     for c in extracted_val.chars() {
-                                        if c.is_alphanumeric() || c.is_whitespace() || c == '-' {
-                                            eval_ext.push(c);
+                                        if c.is_alphanumeric() || c.is_whitespace() || c == '-' || c == '.' || c == ',' || c == '%' || c == '(' || c == ')' {
+                                            eval_target.push(c);
                                         } else {
-                                            eval_ext.push(' ');
+                                            eval_target.push(' ');
                                         }
                                     }
                                     eval_ext = eval_ext.split_whitespace().collect::<Vec<_>>().join(" ");

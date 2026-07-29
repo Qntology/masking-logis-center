@@ -634,9 +634,23 @@ pub mod mixed {
             let mut output_tensor_ptrs: Vec<*mut onnxruntime_sys::OrtValue> = vec![ptr::null_mut(); output_names.len()];
             let run_options_ptr: *mut onnxruntime_sys::OrtRunOptions = ptr::null_mut();
 
-            // 🌟 2. Private Field 우회 제거: onnxruntime-rs 내부 모듈이므로 pub(crate)인 session_ptr에 직접 접근 가능합니다. 
-            // 메모리 레이아웃 우회(포인터 캐스팅)는 구조체 정렬(Alignment) 최적화에 의해 쓰레기 값을 참조하여 STATUS_ACCESS_VIOLATION을 유발합니다.
-            let session_ptr: *mut onnxruntime_sys::OrtSession = self.session_ptr;
+            // 🌟 2. Private Field 및 메모리 레이아웃 우회 (Safe Mirroring): 
+            // onnxruntime 0.0.14 버전의 Session 구조체는 session_ptr이 완전 private입니다.
+            // Rust 컴파일러의 필드 재배치(Field Reordering)로 인한 STATUS_ACCESS_VIOLATION 크래시를 완벽히 막기 위해,
+            // 대상 구조체와 100% 동일한 타입 구성을 가진 거울(Mirror) 구조체를 선언하여 안전하게 포인터 레이아웃을 매핑합니다.
+            #[allow(dead_code)]
+            struct SessionMirror<'a> {
+                session_ptr: *mut onnxruntime_sys::OrtSession,
+                allocator_ptr: *mut onnxruntime_sys::OrtAllocator,
+                memory_info: &'a crate::memory::MemoryInfo,
+                inputs: Vec<crate::session::Input>,
+                outputs: Vec<crate::session::Output>,
+            }
+            
+            let session_ptr: *mut onnxruntime_sys::OrtSession = unsafe {
+                let mirror = &*(self as *const _ as *const SessionMirror);
+                mirror.session_ptr
+            };
 
             let status = unsafe {
                 crate::g_ort().Run.unwrap()(
