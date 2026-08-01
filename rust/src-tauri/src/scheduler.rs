@@ -1528,10 +1528,6 @@ async fn process_task(
                     let bias_str = include_str!("bias.json");
                     let bias_json: Value = serde_json::from_str(bias_str).unwrap_or(json!({}));
 
-                    // 🌟 [추가] bias.json 파일을 로드하여 privacy 객체 파싱 (선행 필터링용)
-                    let bias_str = include_str!("bias.json");
-                    let bias_json: Value = serde_json::from_str(bias_str).unwrap_or(json!({}));
-
                     // 🌟 [개선] 유니코드 확실한 언어 + whatlang(라틴계 다국어) 하이브리드 감지 로직
                     let mut is_korean = false;
                     let mut is_japanese = false;
@@ -1791,39 +1787,36 @@ async fn process_task(
                         if span.score >= 0.10 {
                             let specific_candidate = span.text.clone(); // 🌟 이게 바로 NMS WINNER / EXPANDED 값입니다!
 
-                            // 🌟 [전체 PUG 각 줄 내용 루프 뎁스 추가]
-                            for (line_idx, line_content) in lines.iter().enumerate() {
-                                if line_content.contains(&specific_candidate) {
-                                    let specific_line = line_content.clone();
-
-                                    for &t_idx in &span.target_indices {
-                                        let (context_name, base_target, context_desc) = &dynamic_target_items[t_idx];
+                            // 🌟 [O(N^2) 폭발 버그 수정] 전체 라인 루프를 돌지 않고, 스팬이 발견된 해당 라인(span.line_idx)만 정확하게 가져옵니다.
+                            let specific_line = lines.get(span.line_idx).cloned().unwrap_or_default();
+                            if !specific_line.is_empty() {
+                                for &t_idx in &span.target_indices {
+                                    let (context_name, base_target, context_desc) = &dynamic_target_items[t_idx];
+                                    
+                                    if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
+                                        let bias_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("");
+                                        let prej_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("");
                                         
-                                        if let Some(privacy_node) = bias_json.get("privacy").and_then(|v| v.get(base_target)) {
-                                            let bias_val = privacy_node.get("bias").and_then(|v| v.as_str()).unwrap_or("");
-                                            let prej_val = privacy_node.get("prejudice").and_then(|v| v.as_str()).unwrap_or("");
-                                            
-                                            let bias_keywords: Vec<&str> = bias_val.split(',')
-                                                .map(|s| s.trim())
-                                                .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
-                                                .collect();
-                                            
-                                            for keyword in bias_keywords {
-                                                let lang_prefix = context_name.split('_').next().unwrap_or("english");
-                                                let split_target_name = format!("{}_{}", lang_prefix, keyword);
-                                                let split_target_desc = format!("{} associated with '{}'", context_desc, keyword);
+                                        let bias_keywords: Vec<&str> = bias_val.split(',')
+                                            .map(|s| s.trim())
+                                            .filter(|s| !s.is_empty() && s.chars().any(|c| c.is_alphabetic()))
+                                            .collect();
+                                        
+                                        for keyword in bias_keywords {
+                                            let lang_prefix = context_name.split('_').next().unwrap_or("english");
+                                            let split_target_name = format!("{}_{}", lang_prefix, keyword);
+                                            let split_target_desc = format!("{} associated with '{}'", context_desc, keyword);
 
-                                                valid_targets.push((
-                                                    split_target_name,
-                                                    base_target.to_string(),
-                                                    split_target_desc,
-                                                    keyword.to_string(),
-                                                    prej_val.to_string(),
-                                                    false,
-                                                    specific_line.clone(),
-                                                    specific_candidate.clone() // 🌟 단일 NMS 우승 단어 1:1 매핑
-                                                ));
-                                            }
+                                            valid_targets.push((
+                                                split_target_name,
+                                                base_target.to_string(),
+                                                split_target_desc,
+                                                keyword.to_string(),
+                                                prej_val.to_string(),
+                                                false,
+                                                specific_line.clone(),
+                                                specific_candidate.clone() // 🌟 단일 NMS 우승 단어 1:1 매핑
+                                            ));
                                         }
                                     }
                                 }
@@ -1867,6 +1860,7 @@ async fn process_task(
                         }
 
                         // 🌟 [STAGE 2.5] Stanza 정제 및 전처리 (Post-NMS Trimming - 미시적 정밀 타격)
+                        let original_raw_candidate = specific_candidate.clone(); // 🌟 [추가] Stanza 변형 전 원본 단어 보존
                         let mut word_lang = local_language.clone();
                         if let Some(info) = whatlang::detect(&specific_candidate) {
                             let detected = match info.lang() {
@@ -2491,12 +2485,14 @@ async fn process_task(
                         // 🌟 [추가] 이미 다른 동의어 트랙에서 마스킹을 마친 후보(specific_candidate)인지 확인하고 건너뜁니다 (접근법 A)
                         if !specific_candidate.is_empty() && fully_masked_candidates.contains(&specific_candidate) {
                             emit_term(&format!("[DEBUG] 이미 다른 동의어 트랙에서 마스킹 완료된 타겟입니다. 스킵합니다: '{}'", specific_candidate));
+                            fully_masked_candidates.insert(original_raw_candidate.clone()); // 🌟 [추가] 원본 형태도 마스킹 명부에 등록하여 Stanza 연산 생략 유도
                             continue;
                         }
 
                         // 🌟 [연쇄 파기(Cascade Cancellation)] 할루시네이션(본문 없음, 동사/서술어 등)으로 등재된 독성 단어라면 파생 트랙 전체를 시작도 안 하고 즉시 폐기합니다.
                         if !specific_candidate.is_empty() && hallucinated_candidates.contains(&specific_candidate) {
                             emit_term(&format!("[DEBUG] 독성 단어 명부에 등재된 타겟입니다. 연쇄 파기(Cascade Cancellation)를 적용하여 해당 트랙을 즉시 스킵합니다: '{}'", specific_candidate));
+                            hallucinated_candidates.insert(original_raw_candidate.clone()); // 🌟 [추가] 원본 형태도 환각 명부에 등록
                             continue;
                         }
                         
@@ -3381,6 +3377,7 @@ async fn process_task(
                                 if !specific_candidate.is_empty() && specific_candidate == extracted_val {
                                     hallucinated_candidates.insert(specific_candidate.clone());
                                 }
+                                hallucinated_candidates.insert(original_raw_candidate.clone()); // 🌟 [추가] 원본 형태도 환각 명부에 등록
                                 emit_term(&format!("[EXTRACTION] 🛑 NLP 검증 탈락. 재시도 없이 트랙을 종료합니다."));
                                 break;
                             }
@@ -3477,6 +3474,7 @@ async fn process_task(
                                     if !specific_candidate.is_empty() && specific_candidate == extracted_val {
                                         hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 연쇄 파기 명부 등재
                                     }
+                                    hallucinated_candidates.insert(original_raw_candidate.clone()); // 🌟 [추가] 원본 형태도 명부에 등록
                                 } else if is_spoiler {
                                     emit_term(&format!("[DEBUG] 🎬 스포일러 단어(대기 중인 미래 정답) 추출 감지. 재시도 없이 트랙 종료: '{}'", extracted_val));
                                 } else {
@@ -3513,6 +3511,7 @@ async fn process_task(
                                 if !specific_candidate.is_empty() && specific_candidate == extracted_val {
                                     hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 연쇄 파기 명부 등재
                                 }
+                                hallucinated_candidates.insert(original_raw_candidate.clone()); // 🌟 [추가] 원본 형태도 명부에 등록
                                 
                                 break;
                             }
@@ -3574,6 +3573,7 @@ async fn process_task(
                                 if !specific_candidate.is_empty() && specific_candidate == extracted_val {
                                     hallucinated_candidates.insert(specific_candidate.clone()); // 🌟 동사/오답 판정 시 남은 파생 트랙 일괄 취소(연쇄 파기)를 위해 등록
                                 }
+                                hallucinated_candidates.insert(original_raw_candidate.clone()); // 🌟 [추가] 원본 형태도 명부에 등록
                                 
                                 emit_term(&format!("[DEBUG] 검증 탈락 감지됨. 재시도 없이 강제 기각: '{}'", extracted_val));
                                 break;
@@ -3936,6 +3936,7 @@ async fn process_task(
                                     if specific_candidate == extracted_val {
                                         fully_masked_candidates.insert(specific_candidate.clone()); // 🌟 두 단어가 일치할 때만 힌트 단어 장부 등록
                                     }
+                                    fully_masked_candidates.insert(original_raw_candidate.clone()); // 🌟 [추가] Stanza 변형 전 원본 형태도 마스킹 완료 처리
 
                                     // 🌟 [Part 2 개선] 트랙 조기 종료(break) 조건 세분화
                                     if !specific_candidate.is_empty() && !fully_masked_candidates.contains(&specific_candidate) && masked_text.contains(&specific_candidate) {
