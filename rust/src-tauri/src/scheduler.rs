@@ -2095,7 +2095,7 @@ async fn process_task(
                                             padded_chunk.push("<pad>");
                                         }
 
-                                        match stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session, None) {
+                                        match stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session, None, None) {
                                             Ok(inputs) => {
                                                 match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
                                                     Ok(outputs) => {
@@ -2233,7 +2233,7 @@ async fn process_task(
                                                 if !trimmed_words.is_empty() {
                                                     let words_refs: Vec<&str> = trimmed_words.iter().map(|s| s.as_str()).collect();
                                                     let mut lemma_words: Vec<String> = vec![String::new(); trimmed_words.len()];
-                                                    if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session, None) {
+                                                    if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session, None, None) {
                                                         if let Ok(lemma_outputs) = stanza.lemma_session.run::<'_, '_, '_, i64, f32, _>(lemma_inputs) {
                                                             let output_tensor = &lemma_outputs[0];
                                                             let shape = output_tensor.shape();
@@ -2859,7 +2859,7 @@ async fn process_task(
                                                     padded_chunk.push("<pad>");
                                                 }
 
-                                                match stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session, None) {
+                                                match stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session, None, None) {
                                                     Ok(inputs) => {
                                                         match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
                                                             Ok(outputs) => {
@@ -2994,7 +2994,7 @@ async fn process_task(
                                                     if !trimmed_words.is_empty() {
                                                         let words_refs: Vec<&str> = trimmed_words.iter().map(|s| s.as_str()).collect();
                                                         let mut lemma_words: Vec<String> = vec![String::new(); trimmed_words.len()];
-                                                        if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session, None) {
+                                                        if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session, None, None) {
                                                             if let Ok(lemma_outputs) = stanza.lemma_session.run::<'_, '_, '_, i64, f32, _>(lemma_inputs) {
                                                                 let output_tensor = &lemma_outputs[0];
                                                                 let shape = output_tensor.shape();
@@ -3181,7 +3181,7 @@ async fn process_task(
                                                                     padded_chunk.push("<pad>");
                                                                 }
                                                                 
-                                                                if let Ok(char_inputs) = stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session, None) {
+                                                                if let Ok(char_inputs) = stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session, None, None) {
                                                                     if let Ok(char_outputs) = stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(char_inputs) {
                                                                         let output_tensor = &char_outputs[0];
                                                                         let shape = output_tensor.shape();
