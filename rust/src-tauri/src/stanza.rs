@@ -225,6 +225,7 @@ impl StanzaPreprocessor {
         tensor_pool.insert("seq_lengths", slen_tensor.clone());
         tensor_pool.insert("seq", slen_tensor.clone());
         tensor_pool.insert("slen", slen_tensor.clone());
+        tensor_pool.insert("l", slen_tensor.clone()); // 🌟 Tokenizer 입력 'l' 추가
 
         let mut final_inputs = Vec::new();
 

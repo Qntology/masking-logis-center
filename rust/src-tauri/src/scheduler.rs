@@ -1917,7 +1917,8 @@ async fn process_task(
                                         tensor_pool.insert("f", char_features.clone().into_dyn());
                                         tensor_pool.insert("char_tensor", char_tensor.into_dyn());
                                         tensor_pool.insert("char_features", char_features.into_dyn());
-                                        tensor_pool.insert("seq_lengths", seq_lengths.into_dyn());
+                                        tensor_pool.insert("seq_lengths", seq_lengths.clone().into_dyn());
+                                        tensor_pool.insert("l", seq_lengths.into_dyn()); // 🌟 Tokenizer 입력 'l' 추가
                                         
                                         use onnxruntime::mixed::{DynInput, SessionMixedExt};
 
@@ -1949,6 +1950,7 @@ async fn process_task(
                                                 let is_3d = shape.len() == 3;
                                                 
                                                 let mut current_word = String::new();
+                                                let mut word_start = 0;
                                                 for i in 0..seq_len {
                                                     current_word.push(chars[i]);
                                                     
@@ -1962,9 +1964,11 @@ async fn process_task(
                                                     if max_idx > 0 || i == seq_len - 1 {
                                                         let token_str = current_word.trim().to_string();
                                                         if !token_str.is_empty() {
-                                                            ext_words_string.push(token_str);
+                                                            ext_words_string.push(token_str.clone());
+                                                            word_spans.push((token_str, word_start, i + 1));
                                                         }
                                                         current_word.clear();
+                                                        word_start = i + 1;
                                                     }
                                                 }
                                             }
@@ -2610,9 +2614,9 @@ async fn process_task(
                                     // 1차 절단: 알파벳/한글/숫자 등 일반 문자가 아닌 모든 특수기호를 범용적으로 찾아 공백으로 치환하여 단어 결합 방지
                                     for c in extracted_val.chars() {
                                         if c.is_alphanumeric() || c.is_whitespace() || c == '-' || c == '.' || c == ',' || c == '%' || c == '(' || c == ')' {
-                                            eval_target.push(c);
+                                            eval_ext.push(c);
                                         } else {
-                                            eval_target.push(' ');
+                                            eval_ext.push(' ');
                                         }
                                     }
                                     eval_ext = eval_ext.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2669,7 +2673,8 @@ async fn process_task(
                                                 tensor_pool.insert("f", char_features.clone().into_dyn());
                                                 tensor_pool.insert("char_tensor", char_tensor.into_dyn());
                                                 tensor_pool.insert("char_features", char_features.into_dyn());
-                                                tensor_pool.insert("seq_lengths", seq_lengths.into_dyn());
+                                                tensor_pool.insert("seq_lengths", seq_lengths.clone().into_dyn());
+                                                tensor_pool.insert("l", seq_lengths.into_dyn()); // 🌟 Tokenizer 입력 'l' 추가
                                                 
                                                 let mut tok_inputs_i64 = Vec::new();
                                                 let mut tok_inputs_f32 = Vec::new();
@@ -2691,6 +2696,7 @@ async fn process_task(
                                                         let is_3d = shape.len() == 3;
                                                         
                                                         let mut current_word = String::new();
+                                                        let mut word_start = 0;
                                                         for i in 0..seq_len {
                                                             current_word.push(chars[i]);
                                                             
@@ -2704,9 +2710,11 @@ async fn process_task(
                                                             if max_idx > 0 || i == seq_len - 1 {
                                                                 let token_str = current_word.trim().to_string();
                                                                 if !token_str.is_empty() {
-                                                                    ext_words_string.push(token_str);
+                                                                    ext_words_string.push(token_str.clone());
+                                                                    word_spans.push((token_str, word_start, i + 1));
                                                                 }
                                                                 current_word.clear();
+                                                                word_start = i + 1;
                                                             }
                                                         }
                                                     }
