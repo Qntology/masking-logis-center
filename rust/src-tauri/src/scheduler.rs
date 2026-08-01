@@ -1528,29 +1528,83 @@ async fn process_task(
                     let bias_str = include_str!("bias.json");
                     let bias_json: Value = serde_json::from_str(bias_str).unwrap_or(json!({}));
 
-                    // 🌟 [수정] whatlang 라이브러리를 활용한 Local 언어 확정 로직
-                    let local_language = match whatlang::detect(&target_text) {
-                        Some(info) => match info.lang() {
-                            whatlang::Lang::Kor => "korean",
-                            whatlang::Lang::Jpn => "japanese",
-                            whatlang::Lang::Cmn => "chinese",
-                            whatlang::Lang::Rus => "russian",
-                            whatlang::Lang::Ara => "arabic",
-                            whatlang::Lang::Tha => "thai",
-                            whatlang::Lang::Hin => "hindi",
-                            whatlang::Lang::Ben => "bengali",
-                            whatlang::Lang::Ell => "greek",
-                            whatlang::Lang::Heb => "hebrew",
-                            whatlang::Lang::Vie => "vietnamese",
-                            whatlang::Lang::Fra => "french",
-                            whatlang::Lang::Deu => "german",
-                            whatlang::Lang::Spa => "spanish",
-                            whatlang::Lang::Ita => "italian",
-                            whatlang::Lang::Por => "portuguese",
-                            whatlang::Lang::Nld => "dutch",
-                            _ => "english",
-                        }.to_string(),
-                        None => "english".to_string(),
+                    // 🌟 [추가] bias.json 파일을 로드하여 privacy 객체 파싱 (선행 필터링용)
+                    let bias_str = include_str!("bias.json");
+                    let bias_json: Value = serde_json::from_str(bias_str).unwrap_or(json!({}));
+
+                    // 🌟 [개선] 유니코드 확실한 언어 + whatlang(라틴계 다국어) 하이브리드 감지 로직
+                    let mut is_korean = false;
+                    let mut is_japanese = false;
+                    let mut is_chinese_char = false;
+                    let mut is_russian = false;
+                    let mut is_arabic = false;
+                    let mut is_thai = false;
+                    let mut is_hindi = false;
+                    let mut is_bengali = false;
+                    let mut is_greek = false;
+                    let mut is_hebrew = false;
+                    let mut is_vietnamese = false;
+                    let mut has_latin = false;
+
+                    for c in target_text.chars() {
+                        let u = c as u32;
+                        // 1. 유니코드 블록이 명확한 언어들
+                        if (u >= 0xAC00 && u <= 0xD7A3) || (u >= 0x1100 && u <= 0x11FF) || (u >= 0x3130 && u <= 0x318F) { is_korean = true; }
+                        else if (u >= 0x3040 && u <= 0x309F) || (u >= 0x30A0 && u <= 0x30FF) { is_japanese = true; }
+                        else if u >= 0x4E00 && u <= 0x9FFF { is_chinese_char = true; }
+                        else if u >= 0x0400 && u <= 0x04FF { is_russian = true; }
+                        else if u >= 0x0600 && u <= 0x06FF { is_arabic = true; }
+                        else if u >= 0x0E00 && u <= 0x0E7F { is_thai = true; }
+                        else if u >= 0x0900 && u <= 0x097F { is_hindi = true; }
+                        else if u >= 0x0980 && u <= 0x09FF { is_bengali = true; }
+                        else if u >= 0x0370 && u <= 0x03FF { is_greek = true; }
+                        else if u >= 0x0590 && u <= 0x05FF { is_hebrew = true; }
+                        else if u >= 0x1EA0 && u <= 0x1EF9 { is_vietnamese = true; }
+                        // 2. 라틴 알파벳 영역 (whatlang 세부 판별 필요)
+                        else if (u >= 0x0041 && u <= 0x005A) || (u >= 0x0061 && u <= 0x007A) || (u >= 0x00C0 && u <= 0x024F) {
+                            has_latin = true;
+                        }
+                    }
+
+                    // 우선순위 판별: 확실한 유니코드가 있다면 whatlang 호출 없이 즉시 결정
+                    let local_language = if is_korean {
+                        "korean".to_string()
+                    } else if is_japanese {
+                        "japanese".to_string()
+                    } else if is_thai {
+                        "thai".to_string()
+                    } else if is_russian {
+                        "russian".to_string()
+                    } else if is_arabic {
+                        "arabic".to_string()
+                    } else if is_hindi {
+                        "hindi".to_string()
+                    } else if is_bengali {
+                        "bengali".to_string()
+                    } else if is_greek {
+                        "greek".to_string()
+                    } else if is_hebrew {
+                        "hebrew".to_string()
+                    } else if is_vietnamese {
+                        "vietnamese".to_string()
+                    } else if is_chinese_char {
+                        "chinese".to_string()
+                    } else if has_latin {
+                        // 유니코드로 구분이 힘든 라틴 알파벳 계열 언어만 whatlang으로 정밀 분류
+                        match whatlang::detect(&target_text) {
+                            Some(info) => match info.lang() {
+                                whatlang::Lang::Fra => "french",
+                                whatlang::Lang::Deu => "german",
+                                whatlang::Lang::Spa => "spanish",
+                                whatlang::Lang::Ita => "italian",
+                                whatlang::Lang::Por => "portuguese",
+                                whatlang::Lang::Nld => "dutch",
+                                _ => "english",
+                            }.to_string(),
+                            None => "english".to_string(),
+                        }
+                    } else {
+                        "english".to_string()
                     };
 
                     let mut detected_languages_vec = vec![local_language.clone()];
@@ -1558,7 +1612,7 @@ async fn process_task(
                         detected_languages_vec.push("english".to_string());
                     }
 
-                    // 🌟 [CRITICAL FIX] 다국어 검증(Stage 3) 시 local_language를 무조건 가장 먼저(0번 인덱스) 검증하도록 재배열하여 불필요한 타언어(English 등) LLM 추론을 최소화합니다.
+                    // 🌟 [CRITICAL FIX] 다국어 검증(Stage 3) 시 local_language를 무조건 가장 먼저(0번 인덱스) 검증하도록 재배열
                     if let Some(pos) = detected_languages_vec.iter().position(|l| l == &local_language) {
                         let local = detected_languages_vec.remove(pos);
                         detected_languages_vec.insert(0, local);
@@ -1890,7 +1944,11 @@ async fn process_task(
                                     let seq_len = chars.len();
                                     let mut char_ids = Vec::with_capacity(seq_len);
                                     for c in &chars {
-                                        let id = *stanza.preprocessor.char_vocab.get(c).unwrap_or(&stanza.preprocessor.char_unk_id);
+                                        let id = if !stanza.preprocessor.tok_char_vocab.is_empty() {
+                                            *stanza.preprocessor.tok_char_vocab.get(c).unwrap_or(&stanza.preprocessor.tok_char_unk_id)
+                                        } else {
+                                            *stanza.preprocessor.char_vocab.get(c).unwrap_or(&stanza.preprocessor.char_unk_id)
+                                        };
                                         char_ids.push(id);
                                     }
                                     
@@ -2043,7 +2101,7 @@ async fn process_task(
                                             padded_chunk.push("<pad>");
                                         }
 
-                                        match stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session) {
+                                        match stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session, None) {
                                             Ok(inputs) => {
                                                 match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
                                                     Ok(outputs) => {
@@ -2181,7 +2239,7 @@ async fn process_task(
                                                 if !trimmed_words.is_empty() {
                                                     let words_refs: Vec<&str> = trimmed_words.iter().map(|s| s.as_str()).collect();
                                                     let mut lemma_words: Vec<String> = vec![String::new(); trimmed_words.len()];
-                                                    if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session) {
+                                                    if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session, None) {
                                                         if let Ok(lemma_outputs) = stanza.lemma_session.run::<'_, '_, '_, i64, f32, _>(lemma_inputs) {
                                                             let output_tensor = &lemma_outputs[0];
                                                             let shape = output_tensor.shape();
@@ -2646,7 +2704,11 @@ async fn process_task(
                                             let seq_len = chars.len();
                                             let mut char_ids = Vec::with_capacity(seq_len);
                                             for c in &chars {
-                                                let id = *stanza.preprocessor.char_vocab.get(c).unwrap_or(&stanza.preprocessor.char_unk_id);
+                                                let id = if !stanza.preprocessor.tok_char_vocab.is_empty() {
+                                                    *stanza.preprocessor.tok_char_vocab.get(c).unwrap_or(&stanza.preprocessor.tok_char_unk_id)
+                                                } else {
+                                                    *stanza.preprocessor.char_vocab.get(c).unwrap_or(&stanza.preprocessor.char_unk_id)
+                                                };
                                                 char_ids.push(id);
                                             }
                                             
@@ -2801,7 +2863,7 @@ async fn process_task(
                                                     padded_chunk.push("<pad>");
                                                 }
 
-                                                match stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session) {
+                                                match stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session, None) {
                                                     Ok(inputs) => {
                                                         match stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(inputs) {
                                                             Ok(outputs) => {
@@ -2936,7 +2998,7 @@ async fn process_task(
                                                     if !trimmed_words.is_empty() {
                                                         let words_refs: Vec<&str> = trimmed_words.iter().map(|s| s.as_str()).collect();
                                                         let mut lemma_words: Vec<String> = vec![String::new(); trimmed_words.len()];
-                                                        if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session) {
+                                                        if let Ok(lemma_inputs) = stanza.preprocessor.encode_to_tensor(&words_refs, &stanza.lemma_session, None) {
                                                             if let Ok(lemma_outputs) = stanza.lemma_session.run::<'_, '_, '_, i64, f32, _>(lemma_inputs) {
                                                                 let output_tensor = &lemma_outputs[0];
                                                                 let shape = output_tensor.shape();
@@ -3123,7 +3185,7 @@ async fn process_task(
                                                                     padded_chunk.push("<pad>");
                                                                 }
                                                                 
-                                                                if let Ok(char_inputs) = stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session) {
+                                                                if let Ok(char_inputs) = stanza.preprocessor.encode_to_tensor(&padded_chunk, &stanza.pos_session, None) {
                                                                     if let Ok(char_outputs) = stanza.pos_session.run::<'_, '_, '_, i64, f32, _>(char_inputs) {
                                                                         let output_tensor = &char_outputs[0];
                                                                         let shape = output_tensor.shape();

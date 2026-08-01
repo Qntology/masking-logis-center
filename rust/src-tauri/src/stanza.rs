@@ -9,10 +9,12 @@ use onnxruntime::GraphOptimizationLevel;
 pub struct StanzaPreprocessor {
     pub word_vocab: HashMap<String, i64>,
     pub char_vocab: HashMap<char, i64>,
+    pub tok_char_vocab: HashMap<char, i64>, // 🌟 Tokenizer 전용 독립 Vocab 추가
     pub id_to_char: HashMap<i64, char>, // 🌟 Lemma 복원용 역방향 맵 추가
     pub upos_vocab: Vec<String>,
     pub word_unk_id: i64,
     pub char_unk_id: i64,
+    pub tok_char_unk_id: i64, // 🌟 Tokenizer 전용 UNK ID
 }
 
 impl StanzaPreprocessor {
@@ -38,6 +40,20 @@ impl StanzaPreprocessor {
         };
 
         Self::extract_vocab_from_node(word_target, &mut word_vocab);
+
+        // 🌟 1.5. Tokenizer Char Vocab 파싱 (Tokenizer 전용 독립 사전)
+        let mut tok_char_vocab: HashMap<char, i64> = HashMap::new();
+        let tok_target = json_val.get("tokenize").and_then(|t| t.get("main")).unwrap_or(&serde_json::Value::Null);
+        
+        let mut temp_tok_vocab: HashMap<String, i64> = HashMap::new();
+        Self::extract_vocab_from_node(tok_target, &mut temp_tok_vocab);
+        
+        for (k, v) in temp_tok_vocab {
+            if let Some(c) = k.chars().next() {
+                tok_char_vocab.insert(c, v);
+            }
+        }
+        let tok_char_unk_id = *tok_char_vocab.get(&'<').unwrap_or(&0); // '<unk>' 처리용
 
         // 🌟 2. Char Vocab 파싱 (Stanza OOV 극복의 핵심 + Lemma 지원)
         let char_target = if let Some(lemma) = json_val.get("lemma") {
@@ -82,7 +98,7 @@ impl StanzaPreprocessor {
             
         let char_unk_id = *char_vocab.get(&'<').unwrap_or(&0); // '<unk>' 처리용
         
-        Ok(Self { word_vocab, char_vocab, id_to_char, upos_vocab, word_unk_id, char_unk_id })
+        Ok(Self { word_vocab, char_vocab, tok_char_vocab, id_to_char, upos_vocab, word_unk_id, char_unk_id, tok_char_unk_id })
     }
 
     // 🌟 중복된 JSON 파싱 로직을 공통 헬퍼 함수로 분리
@@ -146,7 +162,7 @@ impl StanzaPreprocessor {
     }
 
     /// 품사 태깅(pos.onnx)을 위해 분할된 단어 배열을 Word 텐서와 Wordchar(길이) 텐서로 변환합니다.
-    pub fn encode_to_tensor(&self, words: &[&str], session: &Session<'static>) -> Result<Vec<ndarray::ArrayD<i64>>, anyhow::Error> {
+    pub fn encode_to_tensor(&self, words: &[&str], session: &Session<'static>, pos_ids: Option<&[i64]>) -> Result<Vec<ndarray::ArrayD<i64>>, anyhow::Error> {
         let seq_len = words.len();
         
         // 🌟 [CRITICAL FIX] 빈 배열(seq_len == 0)이 주어지면 ONNX LSTM Reshape 노드에서 치명적인 에러가 발생하므로 사전에 차단합니다.
@@ -212,8 +228,20 @@ impl StanzaPreprocessor {
         tensor_pool.insert("pre", pre_tensor.clone());
         
         let pos_tensor = ndarray::Array2::<i64>::zeros((1, seq_len)).into_dyn();
-        tensor_pool.insert("pos", pos_tensor.clone());
+        let pos_1d_tensor = if let Some(ids) = pos_ids {
+            ndarray::Array1::from_vec(ids.to_vec()).into_dyn()
+        } else {
+            ndarray::Array1::<i64>::zeros(seq_len).into_dyn()
+        }; // 🌟 실제 POS 태그 ID 수신 가능하도록 개선
+        
+        tensor_pool.insert("pos", pos_1d_tensor.clone()); // 🌟 1D로 변경
         tensor_pool.insert("upos", pos_tensor.clone());
+        tensor_pool.insert("lemma", pos_tensor.clone()); // 🌟 [CRITICAL FIX] word_tensor 사용 시 Out of Bounds 에러 발생 방지 (0으로 채워진 안전한 pos_tensor 사용)
+        
+        // 🌟 [CRITICAL FIX] Lemma 모델의 필수 입력 텐서(src, src_mask, tgt_in) 매핑 추가
+        tensor_pool.insert("src", chars_tensor.clone());
+        tensor_pool.insert("src_mask", chars_mask_tensor.clone());
+        tensor_pool.insert("tgt_in", chars_tensor.clone());
         
         tensor_pool.insert("word_len", wlen_tensor.clone());
         tensor_pool.insert("wordchar_len", wlen_tensor.clone());
@@ -260,6 +288,7 @@ pub struct StanzaPipeline {
     pub tokenize_session: Session<'static>,
     pub pos_session: Session<'static>,
     pub lemma_session: Session<'static>, // 🌟 Lemma 세션 추가
+    pub depparse_session: Session<'static>, // 🌟 Depparse 세션 추가
 }
 
 // (로cul 라이브러리 onnxruntime crate 자체에 Send/Sync를 구현하였으므로 더 이상 unsafe 래퍼가 필요 없습니다!)
@@ -279,6 +308,7 @@ impl StanzaPipeline {
             "tokenizer.onnx",
             "pos.onnx",
             "lemma.onnx",
+            "depparse.onnx", // 🌟 Depparse 파일 추가
         ];
 
         // Stanza ONNX 모델 파일 저장 원격 Base URL
@@ -320,6 +350,7 @@ impl StanzaPipeline {
         let tokenize_path = lang_dir.join("tokenizer.onnx");
         let pos_path = lang_dir.join("pos.onnx");
         let lemma_path = lang_dir.join("lemma.onnx"); // 🌟 Lemma 경로 추가
+        let depparse_path = lang_dir.join("depparse.onnx"); // 🌟 Depparse 경로 추가
 
         let preprocessor = StanzaPreprocessor::new(&vocab_path)?;
 
@@ -335,6 +366,7 @@ impl StanzaPipeline {
         let tokenize_path_static: &'static str = Box::leak(tokenize_path.to_string_lossy().into_owned().into_boxed_str());
         let pos_path_static: &'static str = Box::leak(pos_path.to_string_lossy().into_owned().into_boxed_str());
         let lemma_path_static: &'static str = Box::leak(lemma_path.to_string_lossy().into_owned().into_boxed_str()); // 🌟 Leak 생성
+        let depparse_path_static: &'static str = Box::leak(depparse_path.to_string_lossy().into_owned().into_boxed_str()); // 🌟 Depparse Leak 추가
 
         let tok_start_time = std::time::Instant::now();
         println!("[STANZA] TOKENIZER 모델 세션을 빌드합니다...");
@@ -366,6 +398,16 @@ impl StanzaPipeline {
             
         println!("[STANZA] ✅ LEMMA 모델 세션 빌드 완료! (소요 시간: {:.2}초)", lemma_start_time.elapsed().as_secs_f32());
 
+        let depparse_start_time = std::time::Instant::now();
+        println!("[STANZA] DEPPARSE 모델 세션을 빌드합니다...");
+        
+        let depparse_session = env.new_session_builder()
+            .map_err(|e| anyhow::anyhow!("Depparse Session builder error: {}", e))?
+            .with_model_from_file(depparse_path_static)
+            .map_err(|e| anyhow::anyhow!("depparse.onnx 모델 파일 로드 실패: {}", e))?;
+            
+        println!("[STANZA] ✅ DEPPARSE 모델 세션 빌드 완료! (소요 시간: {:.2}초)", depparse_start_time.elapsed().as_secs_f32());
+
         println!("[STANZA] 모든 세션 로드 완료! (총 소요 시간: {:.2}초)", total_start_time.elapsed().as_secs_f32());
         
         Ok(Self {
@@ -373,6 +415,7 @@ impl StanzaPipeline {
             tokenize_session,
             pos_session,
             lemma_session,
+            depparse_session, // 🌟 Depparse 세션 추가 반환
         })
     }
 }
