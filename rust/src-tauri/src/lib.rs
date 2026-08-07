@@ -2233,7 +2233,35 @@ async fn delete_all_models() -> Result<String, String> {
     if models_dir.exists() {
         std::fs::remove_dir_all(&models_dir).map_err(|e| e.to_string())?;
     }
+
+    // 🌟 [VISION-CACHE] 모델이 사라지면 ViT 출력의 재현성도 보장할 수 없으므로
+    //    캐시된 비전 임베딩을 함께 폐기합니다.
+    crate::models::vision_cache::VISION_CACHE.clear_all();
+
     Ok("Deleted".to_string())
+}
+
+#[tauri::command]
+async fn reset_lancedb(
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let store_guard = state.store.lock().await;
+    if let Some(db) = store_guard.as_ref() {
+        db.reset_database().await.map_err(|e| e.to_string())?;
+        println!("[RESET] LanceDB fully reset completed.");
+        Ok("LanceDB reset complete.".to_string())
+    } else {
+        // Store가 아직 초기화되지 않은 경우 직접 생성해서 리셋
+        let db_path = crate::utils::get_app_dir().join("db").to_string_lossy().into_owned();
+        match VectorStore::new(&db_path).await {
+            Ok(s) => {
+                s.reset_database().await.map_err(|e| e.to_string())?;
+                println!("[RESET] LanceDB fully reset completed (fresh connection).");
+                Ok("LanceDB reset complete.".to_string())
+            },
+            Err(e) => Err(format!("Failed to connect to LanceDB for reset: {}", e)),
+        }
+    }
 }
 
 #[tauri::command]
@@ -2808,8 +2836,29 @@ pub fn run() {
             upsert_items, set_ignore_cursor_events, mark_ui_ready, delete_document, delete_documents, delete_message, check_gpu_availability,
             save_mobile_temp_file, crate::utils::network::get_local_network_prefix, crate::utils::network::get_my_full_ip, connect_with_seed, start_listener_command, send_signal_offer, submit_signal_answer,
             get_active_task_context, check_model_status, download_model, delete_all_models,
-            rename_search_mode, start_file_drag, download_gpu_engine, log_frontend_error
+            rename_search_mode, start_file_drag, download_gpu_engine, log_frontend_error, reset_lancedb
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                println!("[APP] Application exiting. Shutting down browser...");
+
+                // 1. 전역 브라우저 상태를 즉시 stopped으로 고정
+                if let Ok(mut state) = crate::CURRENT_BROWSER_STATE.write() {
+                    *state = "stopped".to_string();
+                }
+                crate::IS_BROWSER_LAUNCHING.store(false, std::sync::atomic::Ordering::SeqCst);
+
+                // 2. automation::shutdown_browser()로 명시적 close() 호출 후 인스턴스 제거
+                let rt = tokio::runtime::Runtime::new();
+                if let Ok(rt) = rt {
+                    rt.block_on(async {
+                        automation::shutdown_browser().await;
+                    });
+                }
+
+                println!("[APP] Browser shutdown complete.");
+            }
+        });
 }
