@@ -67,304 +67,6 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if norm_a == 0.0 || norm_b == 0.0 { 0.0 } else { dot_product / (norm_a * norm_b) }
 }
 
-// =====================================================================
-// 🌟 [STANZA IMPROVEMENT] 언어 중립(Language-Agnostic) 형태·구문 판별 엔진
-// ---------------------------------------------------------------------
-// 판별 근거는 아래 4가지뿐이며, 전부 언어에 무관한 보편 자원입니다.
-//   ① UD UPOS 태그셋      (vocab.json 의 pos.upos 배열 — 전 언어 공통 규격)
-//   ② UD DEPREL 태그셋    (vocab.json 의 depparse.deprel 배열 — 전 언어 공통 규격)
-//   ③ Stanza Lemma 출력   (표면형-원형 차이로 굴절/교착 여부를 모델이 직접 알려줌)
-//   ④ 문자열 구조 규칙    (숫자 밀도 / 구분자 — 문자 체계와 무관)
-// 특정 언어의 어휘·조사·어미 사전은 일절 사용하지 않습니다.
-// =====================================================================
-
-/// [PHASE 1] UD UPOS 중 개체명(PII)이 될 수 없는 태그 — 전 언어 공통
-const UPOS_HARD_REJECT: &[&str] = &[
-    "VERB", "AUX", "ADV", "ADP", "PART", "SCONJ", "CCONJ", "CONJ",
-    "DET", "PRON", "INTJ", "PUNCT", "SYM",
-];
-
-/// [PHASE 1] 개체명 후보로 인정되는 핵심 체언 태그 — 전 언어 공통
-const UPOS_STRONG_ENTITY: &[&str] = &["NOUN", "PROPN"];
-
-/// [PHASE 1] 단독으로는 개체명 근거가 되지 못하고 보조 근거(구문/복합어)가 필요한 태그
-const UPOS_WEAK_ENTITY: &[&str] = &["ADJ", "NUM", "X"];
-
-/// UPOS 서브타입(`NOUN:xxx` 형태) 제거 후 상위 태그만 반환
-fn upos_base(tag: &str) -> &str {
-    match tag.find(':') {
-        Some(i) => &tag[..i],
-        None => tag,
-    }
-}
-
-/// UD DEPREL 서브타입(`nsubj:pass`, `flat:name` 등) 제거 후 소문자 상위 레이블 반환
-fn deprel_base(label: &str) -> String {
-    let l = label.to_lowercase();
-    match l.find(':') {
-        Some(i) => l[..i].to_string(),
-        None => l,
-    }
-}
-
-/// [PHASE 2] UD 수식어·기능어 의존관계 → 개체명 기각 근거 (전 언어 공통)
-fn is_modifier_deprel(label: &str) -> bool {
-    matches!(
-        deprel_base(label).as_str(),
-        "acl" | "advcl" | "advmod" | "amod" | "aux" | "cop" | "case" | "mark"
-            | "cc" | "det" | "discourse" | "expl" | "punct" | "dep"
-    )
-}
-
-/// [PHASE 2] UD 체언 논항·복합어 의존관계 → 개체명 후보 근거 (전 언어 공통)
-fn is_nominal_deprel(label: &str) -> bool {
-    matches!(
-        deprel_base(label).as_str(),
-        "nsubj" | "obj" | "iobj" | "obl" | "nmod" | "flat" | "compound"
-            | "appos" | "conj" | "root" | "vocative" | "list" | "nummod"
-    )
-}
-
-/// [PHASE 4] 구분자 포함 여부 (전화·주민번호 등 식별번호의 보편적 구조 신호)
-fn has_identifier_separator(word: &str) -> bool {
-    word.chars().any(|c| matches!(c, '-' | '.' | '/' | '+' | '(' | ')' | ' ' | '_'))
-}
-
-/// [PHASE 4] 식별번호 후보가 실제 식별번호 '구조'인지 검증.
-/// 언어별 단위 사전(도/명/원 등) 없이, 숫자 개수와 구분자 유무만으로 판정하므로
-/// 어떤 문자 체계에서도 동일하게 동작합니다. ('38도','119에','24절기','12일' → 전부 기각)
-fn is_valid_identifier_shape(word: &str, base_target: &str) -> bool {
-    let digits = word.chars().filter(|c| c.is_ascii_digit()).count();
-    let sep = has_identifier_separator(word);
-
-    match base_target {
-        // 이메일: 로컬파트@도메인 구조와 도메인 내 점(.) 존재를 요구
-        "email" => {
-            if let Some(at) = word.find('@') {
-                let domain = &word[at + 1..];
-                !word[..at].is_empty() && domain.contains('.') && domain.len() >= 4
-            } else {
-                false
-            }
-        }
-        // 주민등록/사회보장번호류: 최소 8자리 이상 숫자. 구분자가 없으면 10자리 이상 요구
-        "national_id" => (digits >= 8 && sep) || digits >= 10,
-        // 연락처: 구분자 없는 순수 숫자열 9자리 이상, 또는 구분자 포함 7자리 이상
-        "contact_number" => (digits >= 9) || (digits >= 7 && sep),
-        _ => false,
-    }
-}
-
-/// [PHASE 3] Stanza Lemma 출력과 표면형을 비교하여 '굴절/교착이 일어난 토큰'인지 판정.
-/// 접두 일치(prefix) / 접미 일치(suffix) 양쪽을 모두 검사하므로
-/// 교착어(한국어·일본어·터키어), 굴절어(러시아어·독일어), 고립어(중국어)를 함께 커버합니다.
-fn is_inflected_surface(surface: &str, lemma: &str) -> bool {
-    if lemma.trim().is_empty() { return false; }
-    let s: String = surface.chars().filter(|c| c.is_alphanumeric()).collect();
-    let l: String = lemma.chars().filter(|c| c.is_alphanumeric()).collect();
-    if l.is_empty() || s.is_empty() { return false; }
-    if s == l { return false; }
-    let sc = s.chars().count();
-    let lc = l.chars().count();
-    // 원형이 표면형의 앞/뒤에 포함되며 길이가 더 짧다면 굴절이 발생한 것으로 간주
-    (sc > lc) && (s.starts_with(&l) || s.ends_with(&l) || s.contains(&l))
-}
-
-/// [PHASE 3] Lemma 를 이용한 언어 중립 접미 절단.
-/// 언어별 조사/어미 목록 대신 모델이 산출한 원형을 그대로 신뢰하여 잘라냅니다.
-fn trim_surface_by_lemma(surface: &str, lemma: &str) -> Option<String> {
-    if !is_inflected_surface(surface, lemma) { return None; }
-    let l: String = lemma.chars().filter(|c| c.is_alphanumeric()).collect();
-    if l.chars().count() < 2 { return None; }
-    if surface.starts_with(&l) && surface.chars().count() > l.chars().count() {
-        return Some(l);
-    }
-    if let Some(idx) = surface.rfind(&l) {
-        // 원형이 표면형 뒤쪽에 붙은 형태(접두 굴절)는 원형만 남깁니다.
-        if idx > 0 { return Some(l); }
-    }
-    None
-}
-
-/// 형태·구문 판별 결과
-#[derive(Debug, Clone)]
-pub struct MorphVerdict {
-    pub accept: bool,
-    pub reason: String,
-}
-
-impl MorphVerdict {
-    fn ok(reason: &str) -> Self { Self { accept: true, reason: reason.to_string() } }
-    fn no(reason: &str) -> Self { Self { accept: false, reason: reason.to_string() } }
-}
-
-/// [PHASE 1 + 2 + 4] 개체명 후보 최종 판정 (언어 중립).
-/// - identifier 계열은 구조 검증으로 대체
-/// - PROPN 단독 통과 금지: UD DEPREL 체언 관계 또는 복합 체언 구성일 때만 인정
-/// - 전 토큰이 UD 수식어 관계이면 강제 기각
-pub fn evaluate_entity_candidacy(
-    surface: &str,
-    words: &[String],
-    tags: &[&str],
-    deprels: Option<&[String]>,
-    lemmas: Option<&[String]>,
-    base_target: &str,
-    is_sub_language: bool,
-) -> MorphVerdict {
-    // ── 0) 식별번호 계열: 형태소가 아니라 '구조'로 판정 (언어 무관) ──
-    if matches!(base_target, "email" | "contact_number" | "national_id") {
-        return if is_valid_identifier_shape(surface, base_target) {
-            MorphVerdict::ok("IDENTIFIER-SHAPE 검증 통과")
-        } else {
-            MorphVerdict::no("식별번호 구조(숫자 밀도/구분자) 미충족")
-        };
-    }
-
-    // ── 1) 유효 토큰 수집 (구두점·기호 제외) ──
-    let mut core: Vec<usize> = Vec::new();
-    for (i, w) in words.iter().enumerate() {
-        if i >= tags.len() { break; }
-        if w.chars().any(|c| c.is_alphanumeric()) {
-            let t = upos_base(tags[i]);
-            if t != "PUNCT" && t != "SYM" { core.push(i); }
-        }
-    }
-
-    if core.is_empty() {
-        // 메인 언어와 다른 표기(로마자 약어 등)는 태거 신뢰도가 낮으므로 최소 조건으로 구제
-        let alnum = surface.chars().filter(|c| c.is_alphanumeric()).count();
-        if is_sub_language && alnum >= 2 {
-            return MorphVerdict::ok("SUB-LANGUAGE 구제 (태거 신뢰도 낮음)");
-        }
-        return MorphVerdict::no("유효 토큰 없음 (전부 구두점/기호)");
-    }
-
-    // ── 2) UPOS 1차 게이트 ──
-    let mut has_strong = false;
-    let mut has_weak = false;
-    let mut all_hard_reject = true;
-    for &i in &core {
-        let t = upos_base(tags[i]);
-        if UPOS_STRONG_ENTITY.contains(&t) { has_strong = true; }
-        if UPOS_WEAK_ENTITY.contains(&t) { has_weak = true; }
-        if !UPOS_HARD_REJECT.contains(&t) { all_hard_reject = false; }
-    }
-
-    if all_hard_reject {
-        if is_sub_language {
-            return MorphVerdict::ok("SUB-LANGUAGE 구제 (UPOS 기각 면제)");
-        }
-        return MorphVerdict::no("UD UPOS 전량 비체언(용언/부사/조사/접속사 등)");
-    }
-
-    // ── 3) UD DEPREL 교차 검증 (Phase 2 핵심) ──
-    if let Some(rels) = deprels {
-        let mut nominal_support = false;
-        let mut modifier_hits = 0usize;
-        let mut checked = 0usize;
-        for &i in &core {
-            if i >= rels.len() { continue; }
-            checked += 1;
-            if is_nominal_deprel(&rels[i]) { nominal_support = true; }
-            else if is_modifier_deprel(&rels[i]) { modifier_hits += 1; }
-        }
-        if checked > 0 && !nominal_support && modifier_hits == checked {
-            return MorphVerdict::no("UD DEPREL 전량 수식어 관계(acl/amod/advmod 등)");
-        }
-        // PROPN 단독 토큰은 구문상 체언 논항일 때만 인정 (PROPN 남발 차단)
-        if core.len() == 1 && !has_weak {
-            let i = core[0];
-            let t = upos_base(tags[i]);
-            if t == "PROPN" && i < rels.len() && !is_nominal_deprel(&rels[i]) {
-                return MorphVerdict::no("단일 PROPN 이나 UD DEPREL 체언 근거 부재");
-            }
-        }
-        if nominal_support {
-            return MorphVerdict::ok("UD DEPREL 체언 논항 근거 확보");
-        }
-    }
-
-    // ── 4) DEPREL 미확보 시 폴백: 체언 태그 + 비굴절 여부로 판단 ──
-    if !has_strong {
-        // 약체언(ADJ/NUM/X) 단독은 개체명 근거로 불충분
-        if core.len() >= 2 {
-            return MorphVerdict::ok("복합 구성 내 약체언 (보조 근거 인정)");
-        }
-        if is_sub_language {
-            return MorphVerdict::ok("SUB-LANGUAGE 구제 (약체언 단독)");
-        }
-        return MorphVerdict::no("체언(NOUN/PROPN) 부재 — 약체언 단독은 개체명 불가");
-    }
-
-    // 단일 토큰이 굴절형이면(모델 원형 ≠ 표면형) 개체명보다 활용형일 가능성이 높음
-    if core.len() == 1 {
-        if let Some(lm) = lemmas {
-            let i = core[0];
-            if i < lm.len() && is_inflected_surface(&words[i], &lm[i]) {
-                let t = upos_base(tags[i]);
-                if t != "PROPN" {
-                    return MorphVerdict::no("단일 굴절형 토큰 (Lemma 상이) — 활용형으로 판단");
-                }
-            }
-        }
-    }
-
-    MorphVerdict::ok("UD UPOS 체언 근거 확보")
-}
-
-/// [PHASE 2] Depparse ONNX 세션을 실행하여 토큰별 UD DEPREL 레이블을 추출합니다.
-/// preprocessor 와 session 을 분리 수신하여 StanzaPipeline 의 필드 단위 대여 충돌을 방지합니다.
-pub fn run_depparse_deprels(
-    preprocessor: &crate::stanza::StanzaPreprocessor,
-    session: &mut onnxruntime::session::Session<'static>,
-    words: &[&str],
-    pos_ids: &[i64],
-) -> Option<Vec<String>> {
-    if preprocessor.deprel_vocab.is_empty() || words.is_empty() { return None; }
-    if pos_ids.len() < words.len() { return None; }
-
-    // 세션 가변 대여 이전에 사전을 복제하여 라이프타임 충돌을 원천 차단
-    let deprel_vocab: Vec<String> = preprocessor.deprel_vocab.clone();
-
-    let inputs = preprocessor
-        .encode_to_tensor(words, session, Some(&pos_ids[..words.len()]), None)
-        .ok()?;
-
-    let outputs = session.run::<'_, '_, '_, i64, f32, _>(inputs).ok()?;
-    if outputs.len() < 2 { return None; }
-
-    let arc = &outputs[0];
-    let rel = &outputs[1];
-    let arc_shape = arc.shape();
-    let rel_shape = rel.shape();
-    if arc_shape.len() < 3 || rel_shape.len() < 4 { return None; }
-
-    let seq = words.len().min(arc_shape[1] as usize).min(rel_shape[1] as usize);
-    let head_dim = (arc_shape[2] as usize).min(rel_shape[2] as usize);
-    let num_rel = rel_shape[3] as usize;
-    if seq == 0 || head_dim == 0 || num_rel == 0 { return None; }
-
-    let mut result = Vec::with_capacity(seq);
-    for i in 0..seq {
-        // 1) 최고 점수 head(지배소) 탐색
-        let mut best_head = 0usize;
-        let mut best_arc = std::f32::MIN;
-        for h in 0..head_dim {
-            let v = arc[[0, i, h]];
-            if v > best_arc { best_arc = v; best_head = h; }
-        }
-        // 2) 해당 head 에 대한 최적 DEPREL 레이블 탐색
-        let mut best_rel = 0usize;
-        let mut best_rel_score = std::f32::MIN;
-        for r in 0..num_rel {
-            let v = rel[[0, i, best_head, r]];
-            if v > best_rel_score { best_rel_score = v; best_rel = r; }
-        }
-        result.push(deprel_vocab.get(best_rel).cloned().unwrap_or_else(|| "dep".to_string()));
-    }
-    Some(result)
-}
-
 // --- [모듈화 헬퍼] Sliding Window & NMS 기반 타겟 추출 및 스팬 확장 ---
 async fn execute_sliding_window_nms<F>(
     masked_text: &str,
@@ -424,43 +126,17 @@ where F: Fn(&str) {
         target_prejs_embs.push(p_emb);
     }
 
-    // 🌟 1-1. 서술어(verb) 전용 타이브레이커 가이드 벡터 생성
-    // [PHASE 5] 기존에는 verb 와 expression 을 하나로 뭉쳐 단일 벡터를 만들었기 때문에
-    // 두 개념이 서로를 희석시켜 감점 효과가 사실상 소멸했습니다. 두 벡터를 완전히 분리합니다.
+    // 🌟 1-1. 서술어구(verb_expression) 타이브레이커 가이드 벡터 생성
     let mut prefixed_verb_b_vals = Vec::new();
     for lang in detected_languages_vec {
         let verb_val = bias_json.get("verb").and_then(|v| v.get("bias")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("verb, predicate");
-        let prefixed = verb_val.split(',').map(|s| format!("{} {}", lang, s.trim())).collect::<Vec<_>>().join(", ");
+        let expr_val = bias_json.get("expression").and_then(|v| v.get("bias")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("idiom, phrase");
+        let combined_verb_expr = format!("{}, {}", verb_val, expr_val);
+        let prefixed = combined_verb_expr.split(',').map(|s| format!("{} {}", lang, s.trim())).collect::<Vec<_>>().join(", ");
         prefixed_verb_b_vals.push(prefixed);
     }
     let combined_verb_b_val = prefixed_verb_b_vals.join(", ");
     let verb_emb = model.get_embedding(combined_verb_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
-
-    // 🌟 [PHASE 5] 1-2. 수식어·관용구·대화체(expression) 독립 감점 벡터 신규 장전.
-    // bias.json 의 expression 노드는 18개 언어별 bias 문자열을 이미 보유하고 있으므로
-    // 별도의 언어별 하드코딩 없이 감지된 언어 그대로 벡터를 생성합니다.
-    let mut prefixed_expr_b_vals = Vec::new();
-    for lang in detected_languages_vec {
-        let expr_val = bias_json.get("expression").and_then(|v| v.get("bias")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("idiom, phrase, adjective, modifier");
-        let prefixed = expr_val.split(',').map(|s| format!("{} {}", lang, s.trim())).collect::<Vec<_>>().join(", ");
-        prefixed_expr_b_vals.push(prefixed);
-    }
-    let combined_expr_b_val = prefixed_expr_b_vals.join(", ");
-    let expr_emb = model.get_embedding(combined_expr_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
-
-    // 🌟 [PHASE 5] 1-3. 시스템 명령어·분석 요청 등 비개체 어휘(ignore) 감점 벡터 장전.
-    // bias.json 의 ignore 노드를 활용하여 '분석', '보고', '설명' 류 어휘의 개체명 승격을 억제합니다.
-    let ignore_b_val = bias_json.get("ignore").and_then(|v| v.get("bias")).and_then(|v| v.as_str()).unwrap_or("");
-    let ignore_emb = if ignore_b_val.trim().is_empty() {
-        vec![0.0; 384]
-    } else {
-        let mut prefixed_ignore_vals = Vec::new();
-        for lang in detected_languages_vec {
-            let prefixed = ignore_b_val.split(',').map(|s| format!("{} {}", lang, s.trim())).collect::<Vec<_>>().join(", ");
-            prefixed_ignore_vals.push(prefixed);
-        }
-        model.get_embedding(prefixed_ignore_vals.join(", ")).await.unwrap_or_else(|_| vec![0.0; 384])
-    };
 
     // 🌟 문서 제목(Title) 임베딩 생성
     let title_emb = model.get_embedding(doc_title.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
@@ -508,40 +184,22 @@ where F: Fn(&str) {
                 let word_count = end - start;
                 let length_weight = 1.0; 
 
-                // 🌟 [PHASE 5] 서술어 감점 계수 대폭 상향 (0.05/0.10 -> 0.25/0.35).
-                // 기존 계수는 코사인 유사도(통상 0.2~0.6)에 곱해져 최대 0.06 수준의 감점만 발생했고,
-                // 이는 커트라인 0.3 대비 무의미한 수치였습니다.
                 let v_sim = cosine_similarity(&chunk_emb, &verb_emb);
-                let beta = if word_count <= 2 { 0.25 } else { 0.35 };
+                let beta = if word_count <= 2 { 0.05 } else { 0.10 };
                 let verb_penalty = v_sim * beta;
-
-                // 🌟 [PHASE 5] 수식어·관용구(expression) 독립 감점.
-                // '한산한', '더운', '깊은' 같은 형용사형 및 '~하는', '~된' 관형사형을 억제합니다.
-                let e_sim = cosine_similarity(&chunk_emb, &expr_emb);
-                let expr_beta = if word_count <= 2 { 0.20 } else { 0.30 };
-                let expr_penalty = e_sim * expr_beta;
-
-                // 🌟 [PHASE 5] 비개체 어휘(ignore) 감점.
-                let i_sim = cosine_similarity(&chunk_emb, &ignore_emb);
-                let ignore_penalty = i_sim * 0.15;
 
                 let mut top_targets: Vec<(usize, f32)> = Vec::new();
 
                 for i in 0..dynamic_target_items.len() {
                     let b_score = cosine_similarity(&chunk_emb, &target_biases_embs[i]);
                     let p_score = cosine_similarity(&chunk_emb, &target_prejs_embs[i]);
-                    // 🌟 [PHASE 5] prejudice 반영률 상향 (0.3/0.7 -> 0.6/0.85).
-                    // bias.json 의 각 도메인 prejudice 는 '개체명이 아닌 것'을 정밀하게 기술하고 있으나,
-                    // 기존 0.3 가중치로는 단어 단위 후보에서 사실상 무시되고 있었습니다.
-                    let penalty_weight = if word_count <= 2 { 0.6 } else { 0.85 };
+                    let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
                     
-                    // 🌟 [PHASE 5] 제목 보너스 축소 (0.35 -> 0.15).
-                    // 제목과의 주제적 유사도만으로 일반명사가 개체명으로 승격되는 것을 방지합니다.
                     let mut title_bonus = 0.0;
                     let t_sim = cosine_similarity(&chunk_emb, &title_emb);
-                    if t_sim > 0.0 { title_bonus = t_sim * 0.15; }
+                    if t_sim > 0.0 { title_bonus = t_sim * 0.35; }
                     
-                    let score = b_score - (p_score * penalty_weight) - verb_penalty - expr_penalty - ignore_penalty + title_bonus;
+                    let score = b_score - (p_score * penalty_weight) - verb_penalty + title_bonus;
                     top_targets.push((i, score));
                 }
 
@@ -550,13 +208,8 @@ where F: Fn(&str) {
 
                 if best_score > 0.3 {
                     let final_score = best_score * length_weight;
-                    // 🌟 [PHASE 5] 서술어/수식어/비개체 감점을 통합 로깅하여 튜닝 근거를 남깁니다.
-                    let total_penalty = verb_penalty + expr_penalty + ignore_penalty;
-                    if total_penalty > 0.05 {
-                        emit_term(&format!(
-                            "  📉 [PENALTY] '{}' -> verb:{:.4} / expr:{:.4} / ignore:{:.4} (합계 {:.4}, 최종 스코어: {:.4})",
-                            chunk_text, verb_penalty, expr_penalty, ignore_penalty, total_penalty, final_score
-                        ));
+                    if verb_penalty > 0.05 {
+                        emit_term(&format!("  📉 [VERB PENALTY] '{}' -> 감점: {:.4} (최종 반영 스코어: {:.4})", chunk_text, verb_penalty, final_score));
                     }
                     let mut selected_indices = Vec::new();
                     for (idx, score) in top_targets {
@@ -565,14 +218,6 @@ where F: Fn(&str) {
                         } else { break; }
                     }
                     raw_spans.push(ChunkSpan { line_idx, start, end, text: chunk_text, target_indices: selected_indices, score: final_score });
-                } else {
-                    // 🌟 [PHASE 5] 커트라인 미달 사유 추적용 로그 (감점이 실제로 작동했는지 검증)
-                    if verb_penalty + expr_penalty > 0.10 {
-                        emit_term(&format!(
-                            "  🚫 [BELOW-CUTOFF] '{}' 기각 (스코어 {:.4} / verb:{:.4} expr:{:.4})",
-                            chunk_text, best_score, verb_penalty, expr_penalty
-                        ));
-                    }
                 }
             }
         }
@@ -757,36 +402,26 @@ where F: Fn(&str) {
 
                         let combined_emb = model.get_embedding(combined_text.clone()).await.unwrap_or_else(|_| vec![0.0; 384]);
                         let mut real_max_score = 0.0_f32;
-
-                        // 🌟 [PHASE 5] Sliding Window 구간과 동일한 감점 체계를 적용하여
-                        // 결합 스팬만 느슨한 기준으로 통과하는 비대칭 문제를 제거합니다.
-                        let v_sim = cosine_similarity(&combined_emb, &verb_emb);
-                        let verb_penalty = v_sim * 0.35;
-                        let e_sim = cosine_similarity(&combined_emb, &expr_emb);
-                        let expr_penalty = e_sim * 0.30;
-                        let i_sim = cosine_similarity(&combined_emb, &ignore_emb);
-                        let ignore_penalty = i_sim * 0.15;
-
+                        
                         for &t_idx in &combined_targets {
                             let b_score = cosine_similarity(&combined_emb, &target_biases_embs[t_idx]);
                             let p_score = cosine_similarity(&combined_emb, &target_prejs_embs[t_idx]);
+                            let v_sim = cosine_similarity(&combined_emb, &verb_emb);
+                            let verb_penalty = v_sim * 0.25; 
                             let mut title_bonus = 0.0;
                             let t_sim = cosine_similarity(&combined_emb, &title_emb);
-                            if t_sim > 0.0 { title_bonus = t_sim * 0.15; }
+                            if t_sim > 0.0 { title_bonus = t_sim * 0.35; }
                             
-                            let target_score = b_score - (p_score * 0.85) - verb_penalty - expr_penalty - ignore_penalty + title_bonus;
+                            let target_score = b_score - (p_score * 0.7) - verb_penalty + title_bonus;
                             if target_score > real_max_score { real_max_score = target_score; }
                         }
 
-                        // 🌟 [PHASE 5] 상속 점수(inherited)로 인한 감점 무력화 차단.
-                        // 기존에는 서술어 유사도가 0.40 미만이면 무조건 조각 점수의 90%를 상속받아
-                        // 결합 결과가 서술어라도 그대로 통과했습니다. 수식어 유사도까지 판단에 포함합니다.
-                        let bypass_inherit = v_sim > 0.35 || e_sim > 0.35;
-                        let final_score = if bypass_inherit {
+                        let v_sim_for_drop = cosine_similarity(&combined_emb, &verb_emb);
+                        let final_score = if v_sim_for_drop > 0.40 {
                             real_max_score
                         } else {
                             let inherited_max = sub_group.iter().map(|s| s.score).fold(0.0, f32::max);
-                            real_max_score.max(inherited_max * 0.8)
+                            real_max_score.max(inherited_max * 0.9)
                         };
                         
                         if final_score > 0.3 {
@@ -801,11 +436,7 @@ where F: Fn(&str) {
                             println!("    🤝 [EXPANDED] {}조각 결합 파생: '{}' (재평가 스코어: {:.4})", len, combined_text, final_score);
                             expanded_only_spans.push(new_span);
                         } else {
-                            // 🌟 [PHASE 5] 어떤 감점 요인으로 기각되었는지 명시하여 파라미터 튜닝 근거를 남깁니다.
-                            println!(
-                                "    🚫 [EXPANDED DROP] 결합 기각: '{}' (스코어 {:.4} / verb:{:.4} expr:{:.4} ignore:{:.4})",
-                                combined_text, final_score, verb_penalty, expr_penalty, ignore_penalty
-                            );
+                            println!("    🚫 [EXPANDED DROP] 동사/서술어 패널티로 결합 기각: '{}'", combined_text);
                         }
                     }
                 }
@@ -2136,40 +1767,16 @@ async fn process_task(
                     let lines = rebuilt_lines;
 
                     // 🌟 [CRITICAL FIX] execute_sliding_window_nms 내부에서만 사용되던 변수를 외부 루프(Phase 2)에서도 참조할 수 있도록 재생성합니다.
-                    // 🌟 [PHASE 5] NMS 내부와 완전히 동일한 벡터 구성(verb / expression / ignore 분리)을 유지해야
-                    // 수축 로테이션 구간이 NMS 보다 느슨해지는 비대칭이 발생하지 않습니다.
                     let mut prefixed_verb_b_vals = Vec::new();
                     for lang in &detected_languages_vec {
                         let verb_val = bias_json.get("verb").and_then(|v| v.get("bias")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("verb, predicate");
-                        let prefixed = verb_val.split(',').map(|s| format!("{} {}", lang, s.trim())).collect::<Vec<_>>().join(", ");
+                        let expr_val = bias_json.get("expression").and_then(|v| v.get("bias")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("idiom, phrase");
+                        let combined_verb_expr = format!("{}, {}", verb_val, expr_val);
+                        let prefixed = combined_verb_expr.split(',').map(|s| format!("{} {}", lang, s.trim())).collect::<Vec<_>>().join(", ");
                         prefixed_verb_b_vals.push(prefixed);
                     }
                     let combined_verb_b_val = prefixed_verb_b_vals.join(", ");
                     let verb_emb = model.get_embedding(combined_verb_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
-
-                    // 🌟 [PHASE 5] 수식어·관용구(expression) 독립 감점 벡터 재생성
-                    let mut prefixed_expr_b_vals = Vec::new();
-                    for lang in &detected_languages_vec {
-                        let expr_val = bias_json.get("expression").and_then(|v| v.get("bias")).and_then(|v| v.get(lang)).and_then(|v| v.as_str()).unwrap_or("idiom, phrase, adjective, modifier");
-                        let prefixed = expr_val.split(',').map(|s| format!("{} {}", lang, s.trim())).collect::<Vec<_>>().join(", ");
-                        prefixed_expr_b_vals.push(prefixed);
-                    }
-                    let combined_expr_b_val = prefixed_expr_b_vals.join(", ");
-                    let expr_emb = model.get_embedding(combined_expr_b_val).await.unwrap_or_else(|_| vec![0.0; 384]);
-
-                    // 🌟 [PHASE 5] 비개체 어휘(ignore) 감점 벡터 재생성
-                    let ignore_b_val = bias_json.get("ignore").and_then(|v| v.get("bias")).and_then(|v| v.as_str()).unwrap_or("");
-                    let ignore_emb = if ignore_b_val.trim().is_empty() {
-                        vec![0.0; 384]
-                    } else {
-                        let mut prefixed_ignore_vals = Vec::new();
-                        for lang in &detected_languages_vec {
-                            let prefixed = ignore_b_val.split(',').map(|s| format!("{} {}", lang, s.trim())).collect::<Vec<_>>().join(", ");
-                            prefixed_ignore_vals.push(prefixed);
-                        }
-                        model.get_embedding(prefixed_ignore_vals.join(", ")).await.unwrap_or_else(|_| vec![0.0; 384])
-                    };
-
                     let title_emb = model.get_embedding(doc_title.to_string()).await.unwrap_or_else(|_| vec![0.0; 384]);
                     let noise_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
@@ -2534,30 +2141,13 @@ async fn process_task(
                                 if true {
                                     match simulated_result {
                                         Ok(tags) => {
-                                            // 🌟 [PHASE 2] Depparse 입력(pos_ids)으로 재사용하기 위해 POS ID 배열을 소비하지 않고 보존합니다.
-                                            let pos_ids: Vec<i64> = tags.clone();
-                                            let tag_names: Vec<&str> = tags.iter()
-                                                    .map(|&id| stanza.preprocessor.upos_vocab.get(id as usize).map(|s| s.as_str()).unwrap_or("X"))
+                                            let tag_names: Vec<&str> = tags.into_iter()
+                                                    .map(|id| stanza.preprocessor.upos_vocab.get(id as usize).map(|s| s.as_str()).unwrap_or("X"))
                                                     .collect();
-
-                                            // 🌟 [PHASE 2] UD DEPREL 의존관계 추출 (언어 중립).
-                                            // depparse.onnx 는 그동안 세션만 로드된 채 단 한 번도 추론에 쓰이지 않았습니다.
-                                            // preprocessor(불변) / depparse_session(가변)은 서로 다른 필드이므로 대여가 충돌하지 않습니다.
-                                            let dep_labels: Option<Vec<String>> = {
-                                                let word_refs: Vec<&str> = ext_words_string.iter().map(|s| s.as_str()).collect();
-                                                run_depparse_deprels(
-                                                    &stanza.preprocessor,
-                                                    &mut stanza.depparse_session,
-                                                    &word_refs,
-                                                    &pos_ids,
-                                                )
-                                            };
-
+                                                
                                             // 🌟 [CRITICAL FIX] 추출 단어가 문맥에 정확히 존재할 때만 오프셋 매핑을 수행하여 엉뚱한 마커 분할을 방지합니다.
                                             let mut candidate_words = Vec::new();
                                             let mut candidate_tags = Vec::new();
-                                            // 🌟 [PHASE 2] 후보 토큰과 1:1 정렬된 UD DEPREL 레이블 버퍼
-                                            let mut candidate_deps: Vec<String> = Vec::new();
                                             
                                             if use_context {
                                                 let cand_byte_idx = cand_byte_idx_opt.unwrap();
@@ -2568,32 +2158,29 @@ async fn process_task(
                                                     if *w_start < cand_end_char && *w_end > cand_start_char {
                                                         candidate_words.push(w_str.clone());
                                                         candidate_tags.push(if w_idx < tag_names.len() { tag_names[w_idx] } else { "X" });
-                                                        if let Some(ref deps) = dep_labels {
-                                                            candidate_deps.push(deps.get(w_idx).cloned().unwrap_or_else(|| "dep".to_string()));
-                                                        }
                                                     }
                                                 }
                                             }
 
                                             if candidate_words.is_empty() {
-                                                candidate_deps.clear();
                                                 if use_context {
                                                     candidate_words = vec![eval_target.clone()];
                                                     candidate_tags = vec!["NOUN"];
                                                 } else {
                                                     candidate_words = ext_words_string.clone();
                                                     candidate_tags = tag_names.clone();
-                                                    if let Some(ref deps) = dep_labels {
-                                                        candidate_deps = deps.clone();
-                                                    }
                                                 }
                                             }
 
                                             emit_term(&format!("[STANZA] 문맥 기반 형태소 분리 완료 '{}' -> {:?}", eval_target, candidate_tags));
-                                            if !candidate_deps.is_empty() {
-                                                emit_term(&format!("[STANZA] 🔗 UD 의존관계(DEPREL) 분석 완료 '{}' -> {:?}", eval_target, candidate_deps));
-                                            }
 
+                                            let invalid_tags = ["PUNCT", "SYM"];
+                                            let all_invalid = candidate_tags.iter().all(|&t| invalid_tags.contains(&t));
+                                            // 🌟 [CRITICAL FIX] 개체명(Named Entity) 범주에 속할 수 없는 "VERB"를 허용 목록에서 제거하여 순수 동사의 LLM 진입을 원천 차단합니다.
+                                            let has_noun_or_oov = candidate_tags.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON");
+                                            
+                                            let cand_char_count = specific_candidate.chars().filter(|c| !c.is_whitespace()).count();
+                                            
                                             // 🌟 [서브 언어 감지] 단일 단어의 언어가 메인 언어와 다를 경우 형태소 기각 면제 플래그 활성화
                                             let mut is_sub_language = false;
                                             if let Some(info) = whatlang::detect(&specific_candidate) {
@@ -2621,80 +2208,25 @@ async fn process_task(
                                                     is_sub_language = true;
                                                 }
                                             }
-
-                                            // 🌟 [PHASE 4] 식별번호 계열 플래그. 무조건 구제하던 기존 동작을 폐기하고
-                                            // evaluate_entity_candidacy 내부의 '구조 검증(숫자 밀도/구분자)'으로 판정을 위임합니다.
-                                            // 이 플래그는 이후 형태소 절단(front/tail drop) 면제 용도로만 남깁니다.
+                                            
+                                            // 🌟 [CRITICAL FIX] 식별번호, 연락처 등 기호(-)가 필수적으로 포함된 고유 형식 도메인은 무조건 구제(Bypass)합니다.
                                             let is_id_domain = base_target == "national_id" || base_target == "contact_number" || base_target == "email";
+                                            let rescue_oov = (cand_char_count >= 2 && all_invalid) || is_id_domain || is_sub_language;
 
-                                            // 🌟 [PHASE 1+2+4] 언어 중립 개체명 판정 엔진 호출
-                                            // - UD UPOS 로 1차 게이트 (PROPN 단독 통과 금지)
-                                            // - UD DEPREL 로 수식어(acl/amod/advmod) 강제 기각
-                                            // - 식별번호는 형태소가 아닌 구조로 판정
-                                            let dep_slice: Option<&[String]> =
-                                                if !candidate_deps.is_empty() && candidate_deps.len() >= candidate_words.len() {
-                                                    Some(&candidate_deps[..])
-                                                } else {
-                                                    None
-                                                };
-
-                                            let verdict = evaluate_entity_candidacy(
-                                                &specific_candidate,
-                                                &candidate_words,
-                                                &candidate_tags,
-                                                dep_slice,
-                                                None,
-                                                &base_target,
-                                                is_sub_language,
-                                            );
-
-                                            if !verdict.accept {
-                                                emit_term(&format!("[STANZA] 💀 개체명 판정 기각: '{}' (사유: {})", specific_candidate, verdict.reason));
+                                            if !rescue_oov && (all_invalid || !has_noun_or_oov) {
+                                                emit_term(&format!("[STANZA] 💀 순수 수식어/조사/동사/기호 감지 (Plan B). 강제 기각: '{}'", specific_candidate));
                                                 hallucinated_candidates.insert(specific_candidate.clone());
                                             } else {
-                                                emit_term(&format!("[STANZA] ✅ 개체명 판정 통과: '{}' (근거: {})", specific_candidate, verdict.reason));
+                                                if rescue_oov {
+                                                    if is_sub_language {
+                                                        emit_term(&format!("[STANZA] 🚑 서브 언어 감지 발동 (우회): '{}'. 메인 언어({})가 아니므로 형태소 기각을 면제합니다.", specific_candidate, local_language));
+                                                    } else {
+                                                        emit_term(&format!("[STANZA] 🚑 OOV 및 식별번호 구제 발동 (Plan B 우회): '{}' ({} 항목). 강제 기각 및 절단을 면제합니다.", specific_candidate, base_target));
+                                                    }
+                                                }
                                                 let mut trimmed_words = candidate_words.clone();
                                                 let mut valid_tags_clone = candidate_tags.clone();
                                                 let mut is_trimmed = false;
-
-                                                // 🌟 [PHASE 2] UD DEPREL 기반 수식어 선절단 (언어 중립).
-                                                // 'acl(관형절)', 'amod(형용사 수식)', 'advmod(부사 수식)', 'case(격표지)' 등
-                                                // UD 표준 수식어 관계를 가진 앞/뒤 토큰을 개체명 본체에서 분리합니다.
-                                                // Lemma 커팅보다 먼저 실행해야 candidate_deps 와의 인덱스 정렬이 보장됩니다.
-                                                if !is_id_domain && !candidate_deps.is_empty() && candidate_deps.len() >= trimmed_words.len() {
-                                                    let mut dep_clone: Vec<String> = candidate_deps[..trimmed_words.len()].to_vec();
-
-                                                    // 머리(head) 절단: 앞쪽 수식어 제거
-                                                    while trimmed_words.len() > 1 {
-                                                        let is_mod = is_modifier_deprel(&dep_clone[0]);
-                                                        let has_ascii = trimmed_words[0].chars().any(|c| c.is_ascii_alphanumeric());
-                                                        if is_mod && !has_ascii {
-                                                            emit_term(&format!("[STANZA] ✂️ UD DEPREL 머리 절단: '{}' ({}) 제거", trimmed_words[0], dep_clone[0]));
-                                                            trimmed_words.remove(0);
-                                                            valid_tags_clone.remove(0);
-                                                            dep_clone.remove(0);
-                                                            is_trimmed = true;
-                                                        } else {
-                                                            break;
-                                                        }
-                                                    }
-
-                                                    // 꼬리(tail) 절단: 뒤쪽 수식어 제거
-                                                    while trimmed_words.len() > 1 {
-                                                        let last = trimmed_words.len() - 1;
-                                                        let is_mod = is_modifier_deprel(&dep_clone[last]);
-                                                        let has_ascii = trimmed_words[last].chars().any(|c| c.is_ascii_alphanumeric());
-                                                        if is_mod && !has_ascii {
-                                                            emit_term(&format!("[STANZA] ✂️ UD DEPREL 꼬리 절단: '{}' ({}) 제거", trimmed_words[last], dep_clone[last]));
-                                                            trimmed_words.pop();
-                                                            valid_tags_clone.pop();
-                                                            dep_clone.pop();
-                                                            is_trimmed = true;
-                                                        } else {
-                                                            break;
-                                                        }
-                                                    }
-                                                }
 
                                                 // 🌟 [추가] Lemma 기반 글자 커팅 (어간 추출) 적용
                                                 // POS 태깅을 마친 trimmed_words를 대상으로 lemma.onnx를 돌려 원형(어근)만 추출하여 교체합니다.
@@ -2803,12 +2335,10 @@ async fn process_task(
                                                 }
 
                                                 // 🌟 [CRITICAL FIX] 추출 단어 앞부분에 붙은 수식어(관형사, 부사, 접속사 등)를 잘라내는 머리 절단 로직을 추가합니다. ('전 소속팀' 등 방어)
-                                                // 🌟 [PHASE 1] UD 표준상 개체명 본체가 될 수 없는 용언류(VERB/AUX)를 절단 대상에 추가합니다.
-                                                // Depparse 사전(deprel_vocab)이 없는 언어의 폴백 방어선 역할을 합니다.
-                                                let front_drop_tags = ["DET", "ADJ", "ADV", "PUNCT", "CCONJ", "SCONJ", "PART", "ADP", "VERB", "AUX"];
+                                                let front_drop_tags = ["DET", "ADJ", "ADV", "PUNCT", "CCONJ", "SCONJ", "PART", "ADP"];
                                                 if !is_id_domain {
                                                     while let Some(first_tag) = valid_tags_clone.first() {
-                                                        if front_drop_tags.contains(&upos_base(first_tag)) && trimmed_words.len() > 1 {
+                                                        if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
                                                             // 🌟 [예외 추가] 만약 잘려나가는 단어가 영어/숫자 등 고유명사의 특징을 띤다면 보호합니다.
                                                             let first_word = &trimmed_words[0];
                                                             if first_word.chars().any(|c| c.is_ascii_alphanumeric()) {
@@ -2824,11 +2354,10 @@ async fn process_task(
                                                 }
 
                                                 // 🌟 [CRITICAL FIX] 추출 단어 끝에 꼬리로 잘못 붙은 동사(VERB), 형용사(ADJ), 부사(ADV)도 잘라내도록 꼬리 절단 태그를 대폭 보강합니다.
-                                                // 🌟 [PHASE 1] 조동사(AUX) 추가 및 UPOS 서브타입(`NOUN:xxx`) 정규화 비교 적용.
-                                                let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV", "AUX"];
+                                                let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV"];
                                                 if !is_id_domain {
                                                     while let Some(last_tag) = valid_tags_clone.last() {
-                                                        if tail_drop_tags.contains(&upos_base(last_tag)) && trimmed_words.len() > 1 {
+                                                        if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
                                                             // 🌟 [예외 추가] 만약 잘려나가는 단어가 영어/숫자 등 고유명사의 특징을 띤다면 보호합니다.
                                                             let last_word = trimmed_words.last().unwrap();
                                                             if last_word.chars().any(|c| c.is_ascii_alphanumeric()) {
@@ -3375,29 +2904,13 @@ async fn process_task(
 
                                         if true {
                                             if let Ok(tags) = simulated_result {
-                                                // 🌟 [PHASE 2] Depparse 입력(pos_ids)으로 재사용하기 위해 POS ID 배열을 소비하지 않고 보존합니다.
-                                                let pos_ids: Vec<i64> = tags.clone();
-                                                let tag_names: Vec<&str> = tags.iter()
-                                                        .map(|&id| stanza.preprocessor.upos_vocab.get(id as usize).map(|s| s.as_str()).unwrap_or("X"))
+                                                let tag_names: Vec<&str> = tags.into_iter()
+                                                        .map(|id| stanza.preprocessor.upos_vocab.get(id as usize).map(|s| s.as_str()).unwrap_or("X"))
                                                         .collect();
-
-                                                // 🌟 [PHASE 2] UD DEPREL 의존관계 추출 (언어 중립).
-                                                // 최종 마스킹 직전의 마지막 방어선이므로 Stage 2.5 와 동일한 구문 검증을 적용합니다.
-                                                let dep_labels: Option<Vec<String>> = {
-                                                    let word_refs: Vec<&str> = ext_words_string.iter().map(|s| s.as_str()).collect();
-                                                    run_depparse_deprels(
-                                                        &stanza.preprocessor,
-                                                        &mut stanza.depparse_session,
-                                                        &word_refs,
-                                                        &pos_ids,
-                                                    )
-                                                };
-
+                                                    
                                                 // 🌟 [CRITICAL FIX] 추출 단어가 문맥에 정확히 존재할 때만 오프셋 매핑을 수행하여 엉뚱한 마커 분할을 방지합니다.
                                                 let mut candidate_words = Vec::new();
                                                 let mut candidate_tags = Vec::new();
-                                                // 🌟 [PHASE 2] 후보 토큰과 1:1 정렬된 UD DEPREL 레이블 버퍼
-                                                let mut candidate_deps: Vec<String> = Vec::new();
                                                 
                                                 if use_context {
                                                     let cand_byte_idx = cand_byte_idx_opt.unwrap();
@@ -3408,31 +2921,27 @@ async fn process_task(
                                                         if *w_start < cand_end_char && *w_end > cand_start_char {
                                                             candidate_words.push(w_str.clone());
                                                             candidate_tags.push(if w_idx < tag_names.len() { tag_names[w_idx] } else { "X" });
-                                                            if let Some(ref deps) = dep_labels {
-                                                                candidate_deps.push(deps.get(w_idx).cloned().unwrap_or_else(|| "dep".to_string()));
-                                                            }
                                                         }
                                                     }
                                                 }
 
                                                 if candidate_words.is_empty() {
-                                                    candidate_deps.clear();
                                                     if use_context {
                                                         candidate_words = vec![eval_ext.clone()];
                                                         candidate_tags = vec!["NOUN"];
                                                     } else {
                                                         candidate_words = ext_words_string.clone();
                                                         candidate_tags = tag_names.clone();
-                                                        if let Some(ref deps) = dep_labels {
-                                                            candidate_deps = deps.clone();
-                                                        }
                                                     }
                                                 }
 
-                                                if !candidate_deps.is_empty() {
-                                                    emit_term(&format!("[STANZA-EXT] 🔗 UD 의존관계(DEPREL) 분석 완료 '{}' -> {:?}", eval_ext, candidate_deps));
-                                                }
-
+                                                let invalid_tags = ["PUNCT", "SYM"];
+                                                let all_invalid = candidate_tags.iter().all(|&t| invalid_tags.contains(&t));
+                                                // 🌟 [CRITICAL FIX] 개체명(Named Entity) 범주에 속할 수 없는 "VERB"를 허용 목록에서 제거하여 순수 동사의 강제 기각을 유도합니다.
+                                                let has_noun_or_oov = candidate_tags.iter().any(|&t| t == "NOUN" || t == "PROPN" || t == "NUM" || t == "X" || t == "DET" || t == "CCONJ" || t == "PRON");
+                                                
+                                                let ext_char_count = extracted_val.chars().filter(|c| !c.is_whitespace()).count();
+                                                
                                                 // 🌟 [서브 언어 감지] 단일 단어의 언어가 메인 언어와 다를 경우 형태소 기각 면제 플래그 활성화
                                                 let mut is_sub_language = false;
                                                 if let Some(info) = whatlang::detect(&extracted_val) {
@@ -3460,75 +2969,25 @@ async fn process_task(
                                                         is_sub_language = true;
                                                     }
                                                 }
-
-                                                // 🌟 [PHASE 4] 식별번호 계열 플래그. 무조건 구제하던 기존 동작을 폐기하고
-                                                // evaluate_entity_candidacy 내부의 '구조 검증(숫자 밀도/구분자)'으로 판정을 위임합니다.
-                                                // 이 플래그는 이후 형태소 절단(front/tail drop) 면제 용도로만 남깁니다.
+                                                
+                                                // 🌟 [CRITICAL FIX] 식별번호 등 기호가 섞인 형식 도메인은 강제 기각 면제 (Bypass)
                                                 let is_id_domain = base_target == "national_id" || base_target == "contact_number" || base_target == "email";
+                                                let rescue_oov = (ext_char_count >= 2 && all_invalid) || is_id_domain || is_sub_language;
 
-                                                // 🌟 [PHASE 1+2+4] 언어 중립 개체명 판정 엔진 호출 (최종 방어선)
-                                                let dep_slice: Option<&[String]> =
-                                                    if !candidate_deps.is_empty() && candidate_deps.len() >= candidate_words.len() {
-                                                        Some(&candidate_deps[..])
-                                                    } else {
-                                                        None
-                                                    };
-
-                                                let verdict = evaluate_entity_candidacy(
-                                                    &extracted_val,
-                                                    &candidate_words,
-                                                    &candidate_tags,
-                                                    dep_slice,
-                                                    None,
-                                                    &base_target,
-                                                    is_sub_language,
-                                                );
-
-                                                if !verdict.accept {
-                                                    emit_term(&format!("[STANZA-EXT] 💀 개체명 판정 기각: '{}' (사유: {})", extracted_val, verdict.reason));
+                                                if !rescue_oov && (all_invalid || !has_noun_or_oov) {
+                                                    emit_term(&format!("[STANZA-EXT] 💀 순수 수식어/조사/동사/기호 감지. 추출단어 강제 기각: '{}'", extracted_val));
                                                     nlp_rejected = true;
                                                 } else {
-                                                    emit_term(&format!("[STANZA-EXT] ✅ 개체명 판정 통과: '{}' (근거: {})", extracted_val, verdict.reason));
+                                                    if rescue_oov {
+                                                        if is_sub_language {
+                                                            emit_term(&format!("[STANZA-EXT] 🚑 서브 언어 감지 발동 (우회): '{}'. 메인 언어({})가 아니므로 형태소 기각을 면제합니다.", extracted_val, local_language));
+                                                        } else {
+                                                            emit_term(&format!("[STANZA-EXT] 🚑 OOV 및 식별번호 구제 발동 (Plan B 우회): '{}'. 강제 기각 및 절단을 면제합니다.", extracted_val));
+                                                        }
+                                                    }
                                                     let mut trimmed_words = candidate_words.clone();
                                                     let mut valid_tags_clone = candidate_tags.clone();
                                                     let mut is_trimmed = false;
-
-                                                    // 🌟 [PHASE 2] UD DEPREL 기반 수식어 선절단 (언어 중립).
-                                                    // Lemma 커팅보다 먼저 실행해야 candidate_deps 와의 인덱스 정렬이 보장됩니다.
-                                                    if !is_id_domain && !candidate_deps.is_empty() && candidate_deps.len() >= trimmed_words.len() {
-                                                        let mut dep_clone: Vec<String> = candidate_deps[..trimmed_words.len()].to_vec();
-
-                                                        // 머리(head) 절단: 앞쪽 수식어 제거
-                                                        while trimmed_words.len() > 1 {
-                                                            let is_mod = is_modifier_deprel(&dep_clone[0]);
-                                                            let has_ascii = trimmed_words[0].chars().any(|c| c.is_ascii_alphanumeric());
-                                                            if is_mod && !has_ascii {
-                                                                emit_term(&format!("[STANZA-EXT] ✂️ UD DEPREL 머리 절단: '{}' ({}) 제거", trimmed_words[0], dep_clone[0]));
-                                                                trimmed_words.remove(0);
-                                                                valid_tags_clone.remove(0);
-                                                                dep_clone.remove(0);
-                                                                is_trimmed = true;
-                                                            } else {
-                                                                break;
-                                                            }
-                                                        }
-
-                                                        // 꼬리(tail) 절단: 뒤쪽 수식어 제거
-                                                        while trimmed_words.len() > 1 {
-                                                            let last = trimmed_words.len() - 1;
-                                                            let is_mod = is_modifier_deprel(&dep_clone[last]);
-                                                            let has_ascii = trimmed_words[last].chars().any(|c| c.is_ascii_alphanumeric());
-                                                            if is_mod && !has_ascii {
-                                                                emit_term(&format!("[STANZA-EXT] ✂️ UD DEPREL 꼬리 절단: '{}' ({}) 제거", trimmed_words[last], dep_clone[last]));
-                                                                trimmed_words.pop();
-                                                                valid_tags_clone.pop();
-                                                                dep_clone.pop();
-                                                                is_trimmed = true;
-                                                            } else {
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
 
                                                     // 🌟 [추가] Lemma 기반 글자 커팅 (어간 추출) 2차 적용
                                                     // 추출 단어에 대한 NLP 검증 시에도 동일하게 원형 커팅을 시도합니다.
@@ -3637,19 +3096,17 @@ async fn process_task(
                                                     }
 
                                                     // 🌟 [CRITICAL FIX] 추출 단어 앞부분에 붙은 수식어(관형사, 부사, 접속사 등)를 잘라내는 머리 절단 로직을 추가합니다. ('전 소속팀' 등 방어)
-                                                    // 🌟 [PHASE 1] UD 표준상 개체명 본체가 될 수 없는 용언류(VERB/AUX)를 절단 대상에 추가하고,
-                                                    // UPOS 서브타입(`NOUN:xxx`) 정규화 비교를 적용합니다. Depparse 미탑재 언어의 폴백 방어선입니다.
-                                                    let front_drop_tags = ["DET", "ADJ", "ADV", "PUNCT", "CCONJ", "SCONJ", "PART", "ADP", "VERB", "AUX"];
+                                                    let front_drop_tags = ["DET", "ADJ", "ADV", "PUNCT", "CCONJ", "SCONJ", "PART", "ADP"];
                                                     if !is_id_domain {
                                                         while let Some(first_tag) = valid_tags_clone.first() {
-                                                            if front_drop_tags.contains(&upos_base(first_tag)) && trimmed_words.len() > 1 {
+                                                            if front_drop_tags.contains(first_tag) && trimmed_words.len() > 1 {
                                                                 let first_word = &trimmed_words[0];
                                                                 // 🌟 [예외 추가] 잘려나가는 단어가 영어/숫자이거나 특정 보호 기호(괄호 등)를 포함하면 보호합니다.
                                                                 let has_ascii = first_word.chars().any(|c| c.is_ascii_alphanumeric());
                                                                 let has_bracket = first_word.contains('[') || first_word.contains(']') || first_word.contains('(') || first_word.contains(')');
                                                                 
                                                                 // 태그가 PUNCT(문장부호)인데 괄호를 포함하거나, 길이가 2글자 이상인 기호 덩어리라면 자르지 않고 보호합니다.
-                                                                if has_ascii || (upos_base(first_tag) == "PUNCT" && (has_bracket || first_word.chars().count() >= 2)) {
+                                                                if has_ascii || (*first_tag == "PUNCT" && (has_bracket || first_word.chars().count() >= 2)) {
                                                                     break;
                                                                 }
                                                                 trimmed_words.remove(0);
@@ -3662,17 +3119,16 @@ async fn process_task(
                                                     }
 
                                                     // 🌟 [CRITICAL FIX] 추출 단어 끝에 꼬리로 잘못 붙은 동사(VERB), 형용사(ADJ), 부사(ADV)도 잘라내도록 꼬리 절단 태그를 대폭 보강합니다.
-                                                    // 🌟 [PHASE 1] 조동사(AUX) 추가 및 UPOS 서브타입 정규화 비교 적용.
-                                                    let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV", "AUX"];
+                                                    let tail_drop_tags = ["ADP", "PUNCT", "PART", "SCONJ", "CCONJ", "DET", "VERB", "ADJ", "ADV"];
                                                     if !is_id_domain {
                                                         while let Some(last_tag) = valid_tags_clone.last() {
-                                                            if tail_drop_tags.contains(&upos_base(last_tag)) && trimmed_words.len() > 1 {
+                                                            if tail_drop_tags.contains(last_tag) && trimmed_words.len() > 1 {
                                                                 let last_word = trimmed_words.last().unwrap();
                                                                 // 🌟 [예외 추가] 잘려나가는 단어가 영어/숫자이거나 특정 보호 기호(괄호 등)를 포함하면 보호합니다.
                                                                 let has_ascii = last_word.chars().any(|c| c.is_ascii_alphanumeric());
                                                                 let has_bracket = last_word.contains('[') || last_word.contains(']') || last_word.contains('(') || last_word.contains(')');
                                                                 
-                                                                if has_ascii || (upos_base(last_tag) == "PUNCT" && (has_bracket || last_word.chars().count() >= 2)) {
+                                                                if has_ascii || (*last_tag == "PUNCT" && (has_bracket || last_word.chars().count() >= 2)) {
                                                                     break;
                                                                 }
                                                                 trimmed_words.pop();
@@ -3687,68 +3143,24 @@ async fn process_task(
                                                         if trimmed_words.len() == 1 {
                                                             let word = trimmed_words[0].clone();
                                                             let chars: Vec<char> = word.chars().collect();
-
-                                                            // 🌟 [PHASE 4] 숫자 + 비숫자 결합 토큰의 분리 (언어 중립).
-                                                            // 기존에는 '숫자로 시작하는 경우'만 처리했으나, 숫자 블록의 위치와 무관하게
-                                                            // 최장 연속 숫자열만 남기도록 일반화합니다. ('38도','No.38','Room12' 모두 커버)
-                                                            let digit_count = chars.iter().filter(|c| c.is_ascii_digit()).count();
-                                                            let has_non_digit = chars.iter().any(|c| !c.is_ascii_digit() && !matches!(c, '.' | ',' | '-' | ' '));
-
-                                                            if chars.len() > 1 && digit_count > 0 && has_non_digit {
-                                                                // 최장 연속 숫자 구간(구분자 . , - 포함) 탐색
-                                                                let mut best_start = 0usize;
-                                                                let mut best_len = 0usize;
-                                                                let mut cur_start = 0usize;
-                                                                let mut cur_len = 0usize;
-                                                                let mut cur_digits = 0usize;
-                                                                let mut best_digits = 0usize;
-
-                                                                for (i, c) in chars.iter().enumerate() {
-                                                                    let is_num_part = c.is_ascii_digit() || matches!(c, '.' | ',' | '-');
-                                                                    if is_num_part {
-                                                                        if cur_len == 0 { cur_start = i; }
-                                                                        cur_len += 1;
-                                                                        if c.is_ascii_digit() { cur_digits += 1; }
+                                                            
+                                                            // 숫자와 단위(도, 명, 원 등)가 결합된 경우(예: "35도") 단위 분리
+                                                            if chars.len() > 1 && chars[0].is_ascii_digit() && !chars.last().unwrap().is_ascii_digit() {
+                                                                let mut cut_idx = chars.len();
+                                                                for i in (0..chars.len()).rev() {
+                                                                    if !chars[i].is_ascii_digit() && chars[i] != '.' && chars[i] != ',' {
+                                                                        cut_idx = i;
                                                                     } else {
-                                                                        if cur_digits > best_digits {
-                                                                            best_digits = cur_digits;
-                                                                            best_start = cur_start;
-                                                                            best_len = cur_len;
-                                                                        }
-                                                                        cur_len = 0;
-                                                                        cur_digits = 0;
+                                                                        break;
                                                                     }
                                                                 }
-                                                                if cur_digits > best_digits {
-                                                                    best_digits = cur_digits;
-                                                                    best_start = cur_start;
-                                                                    best_len = cur_len;
+                                                                if cut_idx > 0 && cut_idx < chars.len() {
+                                                                    let clean_word: String = chars[0..cut_idx].iter().collect();
+                                                                    emit_term(&format!("[STANZA] ✂️ 숫자 단위 분리 성공: '{}' -> '{}'", word, clean_word));
+                                                                    trimmed_words[0] = clean_word;
+                                                                    is_trimmed = true;
                                                                 }
-
-                                                                if best_len > 0 && best_len < chars.len() {
-                                                                    let clean_word: String = chars[best_start..best_start + best_len]
-                                                                        .iter()
-                                                                        .collect::<String>()
-                                                                        .trim_matches(|c| c == '.' || c == ',' || c == '-')
-                                                                        .to_string();
-
-                                                                    // 🌟 [PHASE 4] 식별번호 계열이라면 분리된 숫자열이 실제 식별번호 구조를 만족할 때만 채택합니다.
-                                                                    // '38도' -> '38' 처럼 자릿수 미달인 경우 분리 자체를 포기하여 잘못된 마스킹을 원천 차단합니다.
-                                                                    let accept_split = if is_id_domain {
-                                                                        is_valid_identifier_shape(&clean_word, &base_target)
-                                                                    } else {
-                                                                        clean_word.chars().count() >= 2
-                                                                    };
-
-                                                                    if accept_split && !clean_word.is_empty() {
-                                                                        emit_term(&format!("[STANZA] ✂️ 숫자/단위 구조 분리 성공: '{}' -> '{}'", word, clean_word));
-                                                                        trimmed_words[0] = clean_word;
-                                                                        is_trimmed = true;
-                                                                    } else {
-                                                                        emit_term(&format!("[STANZA] 🚫 숫자 분리 결과가 식별번호 구조를 만족하지 않아 분리를 취소합니다: '{}'", word));
-                                                                    }
-                                                                }
-                                                            } else if chars.len() > 1 && !is_id_domain {
+                                                            } else if chars.len() > 1 {
                                                                 let char_strs: Vec<String> = chars.iter().map(|c| c.to_string()).collect();
                                                                 let char_refs: Vec<&str> = char_strs.iter().map(|s| s.as_str()).collect();
                                                                 
@@ -3788,11 +3200,10 @@ async fn process_task(
                                                                         }
                                                                         
                                                                         // 분석된 글자별 태그를 확인하여, 끝부분이 조사(ADP), 어조사(PART), 기호(PUNCT), 동사(VERB), 부사(ADV) 등으로 끝나는지 판별
-                                                                        // 🌟 [PHASE 1] 조동사(AUX) 추가 및 UPOS 서브타입 정규화 비교 적용
-                                                                        let tail_cut_tags = ["ADP", "PART", "PUNCT", "SCONJ", "CCONJ", "VERB", "ADV", "ADJ", "AUX"];
+                                                                        let tail_cut_tags = ["ADP", "PART", "PUNCT", "SCONJ", "CCONJ", "VERB", "ADV", "ADJ"];
                                                                         let mut cut_idx = valid_len;
                                                                         for i in (1..valid_len).rev() {
-                                                                            if tail_cut_tags.contains(&upos_base(char_tags[i])) {
+                                                                            if tail_cut_tags.contains(&char_tags[i]) {
                                                                                 cut_idx = i;
                                                                             } else {
                                                                                 break;
@@ -3801,18 +3212,12 @@ async fn process_task(
                                                                         
                                                                         // 잘려나가는 꼬리에 영문자/숫자가 포함되어 있으면 보호 (예: '아이폰X' -> X가 기호로 오판되는 것 방지)
                                                                         let has_ascii_tail = chars[cut_idx..].iter().any(|c| c.is_ascii_alphanumeric());
-
-                                                                        // 🌟 [PHASE 1] 문자 단위 POS 는 신뢰도가 낮으므로, 원형 대비 절반 이상이 잘려나가는
-                                                                        // 과잉 절단은 거부하여 개체명 본체가 훼손되는 것을 방지합니다.
-                                                                        let over_trim = cut_idx * 2 < valid_len;
                                                                         
-                                                                        if cut_idx < valid_len && cut_idx > 0 && !has_ascii_tail && !over_trim {
+                                                                        if cut_idx < valid_len && cut_idx > 0 && !has_ascii_tail {
                                                                             let clean_word: String = chars[0..cut_idx].iter().collect();
                                                                             emit_term(&format!("[STANZA] ✂️ Stanza Char-POS 절단 성공: '{}' -> '{}' (태그 맵: {:?})", word, clean_word, char_tags));
                                                                             trimmed_words[0] = clean_word;
                                                                             is_trimmed = true;
-                                                                        } else if over_trim {
-                                                                            emit_term(&format!("[STANZA] 🚫 Char-POS 과잉 절단 방지: '{}' (절단 후 {}/{} 글자만 잔존)", word, cut_idx, valid_len));
                                                                         }
                                                                     }
                                                                 }
@@ -4350,37 +3755,27 @@ async fn process_task(
                                             let b_score = cosine_similarity(&p_emb, &bias_emb);
                                             let p_score = cosine_similarity(&p_emb, &prej_emb);
                                             let v_sim = cosine_similarity(&p_emb, &verb_emb);
-                                            let e_sim = cosine_similarity(&p_emb, &expr_emb);
-                                            let i_sim = cosine_similarity(&p_emb, &ignore_emb);
                                             
                                             let word_count = end - start;
                                             let length_weight = 1.0; // 단어 개수 가중치 제거 (길이 무관 동등 점수)
-                                            // 🌟 [PHASE 5] NMS 구간과 동일한 감점 계수를 적용합니다.
-                                            let beta = if word_count <= 2 { 0.25 } else { 0.35 };
+                                            let beta = if word_count <= 2 { 0.05 } else { 0.10 };
                                             let verb_penalty = v_sim * beta;
-                                            let expr_beta = if word_count <= 2 { 0.20 } else { 0.30 };
-                                            let expr_penalty = e_sim * expr_beta;
-                                            let ignore_penalty = i_sim * 0.15;
-                                            let penalty_weight = if word_count <= 2 { 0.6 } else { 0.85 };
+                                            let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
                                             
                                             // 🌟 [추가] 수축 로테이션 시에도 문맥 의존도가 높은 고유명사 타겟에 한하여 제목 벡터 유사도 보너스를 동일하게 부여합니다.
-                                            // 🌟 [PHASE 5] 제목 보너스 계수 축소 (0.35 -> 0.15).
                                             let mut title_bonus = 0.0;
                                             let t_sim = cosine_similarity(&p_emb, &title_emb);
                                             if t_sim > 0.0 {
-                                                title_bonus = t_sim * 0.15;
+                                                title_bonus = t_sim * 0.35;
                                             }
                                             
-                                            let base_score = b_score - (p_score * penalty_weight) - verb_penalty - expr_penalty - ignore_penalty + title_bonus;
+                                            let base_score = b_score - (p_score * penalty_weight) - verb_penalty + title_bonus;
                                             
                                             // Pass 2와 동일한 커트라인(0.3) 검증
                                             if base_score > 0.3 {
                                                 sub_chunks.push((start, end, chunk_text, base_score * length_weight, verb_penalty));
                                             } else {
-                                                emit_term(&format!(
-                                                    "    💀 [DEFEAT] 수축 로테이션 탈락: '{}' (Score: {:.4} / verb:{:.4} expr:{:.4} ignore:{:.4})",
-                                                    chunk_text, base_score, verb_penalty, expr_penalty, ignore_penalty
-                                                ));
+                                                emit_term(&format!("    💀 [DEFEAT] 수축 로테이션 탈락: '{}' (Score: {:.4} / VerbPenalty: {:.4})", chunk_text, base_score, verb_penalty));
                                             }
                                         }
                                     }
@@ -4626,22 +4021,17 @@ async fn process_task(
                                             let b_score = cosine_similarity(&p_emb, &bias_emb);
                                             let p_score = cosine_similarity(&p_emb, &prej_emb);
                                             let v_sim = cosine_similarity(&p_emb, &verb_emb);
-                                            let e_sim = cosine_similarity(&p_emb, &expr_emb);
-                                            let i_sim = cosine_similarity(&p_emb, &ignore_emb);
                                             
                                             let word_count = chunk_trim.split_whitespace().count();
-                                            // 🌟 [PHASE 5] NMS 구간과 동일한 감점 계수 적용
-                                            let beta = if word_count <= 2 { 0.25 } else { 0.35 };
+                                            let beta = if word_count <= 2 { 0.05 } else { 0.10 };
                                             let verb_penalty = v_sim * beta;
-                                            let expr_beta = if word_count <= 2 { 0.20 } else { 0.30 };
-                                            let expr_penalty = e_sim * expr_beta;
-                                            let ignore_penalty = i_sim * 0.15;
-                                            let penalty_weight = if word_count <= 2 { 0.6 } else { 0.85 };
+                                            let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
                                             
-                                            // 🌟 [PHASE 5] 제목 구제 구간에서는 title_bonus 를 제거합니다.
-                                            // 제목 자체를 대상으로 하면서 제목 유사도로 가산하는 것은 순환 보정이며,
-                                            // 로그의 '주의', '동안', '포착한' 오탐의 직접 원인이었습니다.
-                                            let score = b_score - (p_score * penalty_weight) - verb_penalty - expr_penalty - ignore_penalty;
+                                            let mut t_bonus = 0.0;
+                                            let t_sim = cosine_similarity(&p_emb, &title_emb);
+                                            if t_sim > 0.0 { t_bonus = t_sim * 0.35; }
+                                            
+                                            let score = b_score - (p_score * penalty_weight) - verb_penalty + t_bonus;
                                             if score > best_score {
                                                 best_score = score;
                                                 best_chunk = chunk_trim.clone();
@@ -4689,20 +4079,17 @@ async fn process_task(
                                             let b_score = cosine_similarity(&p_emb, &bias_emb);
                                             let p_score = cosine_similarity(&p_emb, &prej_emb);
                                             let v_sim = cosine_similarity(&p_emb, &verb_emb);
-                                            let e_sim = cosine_similarity(&p_emb, &expr_emb);
-                                            let i_sim = cosine_similarity(&p_emb, &ignore_emb);
                                             
                                             let word_count = chunk_trim.split_whitespace().count();
-                                            // 🌟 [PHASE 5] NMS 구간과 동일한 감점 계수 적용
-                                            let beta = if word_count <= 2 { 0.25 } else { 0.35 };
+                                            let beta = if word_count <= 2 { 0.05 } else { 0.10 };
                                             let verb_penalty = v_sim * beta;
-                                            let expr_beta = if word_count <= 2 { 0.20 } else { 0.30 };
-                                            let expr_penalty = e_sim * expr_beta;
-                                            let ignore_penalty = i_sim * 0.15;
-                                            let penalty_weight = if word_count <= 2 { 0.6 } else { 0.85 };
+                                            let penalty_weight = if word_count <= 2 { 0.3 } else { 0.7 };
                                             
-                                            // 🌟 [PHASE 5] 요약 구제 구간에서도 순환 보정을 유발하는 title_bonus 를 제거합니다.
-                                            let score = b_score - (p_score * penalty_weight) - verb_penalty - expr_penalty - ignore_penalty;
+                                            let mut t_bonus = 0.0;
+                                            let t_sim = cosine_similarity(&p_emb, &title_emb);
+                                            if t_sim > 0.0 { t_bonus = t_sim * 0.35; }
+                                            
+                                            let score = b_score - (p_score * penalty_weight) - verb_penalty + t_bonus;
                                             if score > best_score {
                                                 best_score = score;
                                                 best_chunk = chunk_trim.clone();
@@ -5621,4 +5008,3 @@ async fn update_team_base_metrics(
 
     Ok(())
 }
-
